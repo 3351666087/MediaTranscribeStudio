@@ -1,0 +1,58 @@
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+.micromamba-root/
+
+# Runtime caches and checkpoints
+.build-cache/
+.runtime_cache/
+.pycache/
+.pycache_check/
+.pycache_tmp/
+checkpoints/
+
+# Build artifacts
+build/
+dist/
+dist_accept/
+dist_accept2/
+dist_accept3/
+dist_accept4/
+packaging/build/
+packaging/dist/
+
+# Generated inputs / outputs
+input_files/*
+!input_files/.gitkeep
+output_files/*
+!output_files/.gitkeep
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+pipeline.log
+all_results_summary.txt
+
+# Optional local overrides
+config.local.yaml

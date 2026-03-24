@@ -1,0 +1,65 @@
+paths:
+  input_dir: input_files
+  output_dir: output_files
+  summary_file: all_results_summary.txt
+
+audio:
+  target_sample_rate: 16000
+  target_channels: 1
+  overlap_sec: 1.0
+
+asr:
+  engine: auto
+  funasr:
+    device: auto
+  faster_whisper:
+    model_size: medium
+    device: auto
+    compute_type: int8
+    language: null
+    hf_token: ""
+    mirror_endpoint: https://hf-mirror.com
+    official_endpoint: https://huggingface.co
+  nemo_msdd:
+    enabled: true
+    strict: false
+    device: auto
+    model_path: diar_msdd_telephonic
+    ngc_api_key: ""
+    cache_dir: output_files/.nemo_msdd
+    pyannote_fallback:
+      enabled: true
+      model_name: pyannote/speaker-diarization-community-1
+      hf_token: ""
+      device: auto
+
+report:
+  generate_html: true
+  generate_pdf: true
+
+video_text_overlay:
+  enabled: false
+  renderer: ffmpeg
+  output_suffix: .captioned
+
+translation:
+  enabled: false
+  target_language: zh
+
+llm:
+  enabled: false
+  api_key: ""
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  model: qwen3.5-plus
+  max_concurrent: 8
+  speaker_arbitration:
+    enabled: false
+  optimize_language:
+    enabled: false
+
+performance:
+  dtype: float32
+
+logging:
+  level: INFO
+  log_file: pipeline.log

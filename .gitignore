@@ -66,3 +66,6 @@ config.local.yaml
 
 # Local Codex/design workflow state
 .codex/
+
+# Machine-specific validation evidence
+docs/refactor/evidence/environment/

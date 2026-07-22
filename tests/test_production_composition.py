@@ -1,0 +1,253 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+from backend.composition import (
+    ProductionFactories,
+    build_production_composition,
+)
+from backend.production_config import (
+    ProductionConfig,
+    ProductionConfigError,
+    production_diagnostics,
+    run_production_preflight,
+)
+
+
+class RecordingFactory:
+    def __init__(self, result: Any = None) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.result = result if result is not None else SimpleNamespace()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return self.result
+
+
+class FakePipeline:
+    version = "9.0-test"
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class FakeService:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+class ProductionCompositionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.input_root = self.root / "input"
+        self.output_root = self.root / "output"
+        self.cache_root = self.root / "cache"
+        self.input_root.mkdir()
+        self.output_root.mkdir()
+        for name in ("vad", "asr", "aligner", "cam", "eres", "pyannote"):
+            (self.root / name).mkdir()
+        self.jar = self.root / "renderer.jar"
+        with zipfile.ZipFile(self.jar, "w") as archive:
+            archive.writestr("META-INF/MANIFEST.MF", "Main-Class: test.Main\n")
+            archive.writestr(
+                "com/openhtmltopdf/pdfboxout/PdfRendererBuilder.class", b""
+            )
+            archive.writestr(
+                "org/apache/pdfbox/pdmodel/PDDocument.class", b""
+            )
+        self.ffmpeg = self.root / "ffmpeg.exe"
+        self.java = self.root / "java.exe"
+        self.ffmpeg.write_bytes(b"fixture")
+        self.java.write_bytes(b"fixture")
+        self.config_path = self.root / "production.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def mapping(self, *, pyannote_mode: str = "fallback") -> dict[str, Any]:
+        return {
+            "schemaVersion": "1.0.0",
+            "mode": "offline-production",
+            "offline": True,
+            "paths": {
+                "allowedInputRoots": ["input"],
+                "allowedOutputRoot": "output",
+                "cacheRoot": "cache",
+            },
+            "models": {
+                "funasrVad": "vad",
+                "qwen3Asr": "asr",
+                "qwen3ForcedAligner": "aligner",
+                "camPlus": "cam",
+                "eres2netV2": "eres",
+                "pyannote": (
+                    "pyannote" if pyannote_mode != "disabled" else None
+                ),
+            },
+            "executables": {
+                "ffmpeg": str(self.ffmpeg),
+                "java": str(self.java),
+                "pdfRendererJar": "renderer.jar",
+            },
+            "runtime": {
+                "maxWorkers": 2,
+                "maxPendingJobs": 3,
+                "strictStartupPreflight": True,
+            },
+            "speaker": {
+                "maxAutoSpeakers": None,
+                "pyannoteMode": pyannote_mode,
+                "localLlmMode": "disabled",
+            },
+            "pdf": {
+                "minimumScore": 85,
+                "maxRounds": 5,
+            },
+        }
+
+    def load(self, *, pyannote_mode: str = "fallback") -> ProductionConfig:
+        self.config_path.write_text(
+            json.dumps(self.mapping(pyannote_mode=pyannote_mode)),
+            encoding="utf-8",
+        )
+        return ProductionConfig.load(self.config_path)
+
+    def test_load_resolves_relative_local_paths_and_dynamic_cardinality(self) -> None:
+        config = self.load()
+        self.assertEqual(config.paths.allowed_input_roots, (self.input_root,))
+        self.assertEqual(config.models.qwen3_asr, self.root / "asr")
+        self.assertIsNone(config.speaker.max_auto_speakers)
+        self.assertEqual(config.speaker.pyannote_mode, "fallback")
+        self.assertTrue(config.offline)
+
+    def test_unknown_fields_fail_closed(self) -> None:
+        value = self.mapping()
+        value["models"]["remoteModelId"] = "organization/model"
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError, "unsupported fields"
+        ):
+            ProductionConfig.load(self.config_path)
+
+    def test_pyannote_mode_and_model_must_agree(self) -> None:
+        value = self.mapping(pyannote_mode="fallback")
+        value["models"]["pyannote"] = None
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError, "models.pyannote is required"
+        ):
+            ProductionConfig.load(self.config_path)
+
+    def test_secondary_fraction_cannot_consume_the_full_corpus(self) -> None:
+        value = self.mapping()
+        value["speaker"]["maxSecondaryFraction"] = 1.0
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError, "must be less than 1.0"
+        ):
+            ProductionConfig.load(self.config_path)
+
+    def test_preflight_is_path_free_and_checks_all_runtime_layers(self) -> None:
+        config = self.load()
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda module: module != "pyannote.audio",
+            probe_executables=False,
+        )
+        self.assertFalse(report.passed)
+        diagnostics = production_diagnostics(config, report)
+        serialized = json.dumps(diagnostics, ensure_ascii=False)
+        self.assertNotIn(str(self.root), serialized)
+        self.assertIn("runtime-pyannote", serialized)
+        self.assertIn("difficult-segments-only", serialized)
+        self.assertFalse(
+            diagnostics["speakerCardinality"]["fixedFivePersonLimit"]
+        )
+
+    def test_composition_never_uses_unavailable_adapters(self) -> None:
+        config = self.load()
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        preparation = RecordingFactory(SimpleNamespace(adapter_id="prep"))
+        asr = RecordingFactory(SimpleNamespace(adapter_id="asr"))
+        embedding = RecordingFactory(SimpleNamespace(adapter_id="cam"))
+        secondary = RecordingFactory(SimpleNamespace(adapter_id="eres"))
+        pyannote = RecordingFactory(
+            SimpleNamespace(adapter_id="pyannote", telemetry_enabled=False)
+        )
+        cache = RecordingFactory(SimpleNamespace())
+        assembler = RecordingFactory(SimpleNamespace())
+        java_client = RecordingFactory(SimpleNamespace())
+        renderer = RecordingFactory(SimpleNamespace(adapter_id="renderer"))
+        composition = build_production_composition(
+            config,
+            preflight_report=report,
+            factories=ProductionFactories(
+                preparation=preparation,
+                asr=asr,
+                embedding=embedding,
+                secondary=secondary,
+                pyannote=pyannote,
+                cache=cache,
+                pipeline=FakePipeline,
+                assembler=assembler,
+                java_client_from_jar=java_client,
+                renderer=renderer,
+                service=FakeService,
+            ),
+        )
+        service = composition.service
+        self.assertIsInstance(service, FakeService)
+        self.assertEqual(service.kwargs["max_workers"], 2)
+        self.assertEqual(service.kwargs["max_pending_jobs"], 3)
+        pipeline = service.kwargs["transcription_adapter"]
+        self.assertIsInstance(pipeline, FakePipeline)
+        self.assertIsNotNone(pipeline.kwargs["secondary_adapter"])
+        self.assertIsNotNone(pipeline.kwargs["pyannote_adapter"])
+        self.assertIsNone(pipeline.kwargs["config"].max_auto_speakers)
+        self.assertEqual(len(secondary.calls), 1)
+        self.assertEqual(len(pyannote.calls), 1)
+
+    def test_disabled_pyannote_is_not_instantiated(self) -> None:
+        config = self.load(pyannote_mode="disabled")
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        pyannote = RecordingFactory()
+        factories = ProductionFactories(
+            preparation=RecordingFactory(),
+            asr=RecordingFactory(),
+            embedding=RecordingFactory(),
+            secondary=RecordingFactory(),
+            pyannote=pyannote,
+            cache=RecordingFactory(),
+            pipeline=FakePipeline,
+            assembler=RecordingFactory(),
+            java_client_from_jar=RecordingFactory(),
+            renderer=RecordingFactory(),
+            service=FakeService,
+        )
+        composition = build_production_composition(
+            config,
+            preflight_report=report,
+            factories=factories,
+        )
+        pipeline = composition.service.kwargs["transcription_adapter"]
+        self.assertIsNone(pipeline.kwargs["pyannote_adapter"])
+        self.assertEqual(pyannote.calls, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

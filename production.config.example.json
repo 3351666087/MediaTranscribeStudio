@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "1.0.0",
+  "mode": "offline-production",
+  "offline": true,
+  "paths": {
+    "allowedInputRoots": [
+      "D:/Downloads"
+    ],
+    "allowedOutputRoot": "D:/desktop/01_Projects/2",
+    "cacheRoot": "D:/desktop/01_Projects/2/.media-transcribe-studio-cache"
+  },
+  "models": {
+    "funasrVad": "D:/models/funasr/fsmn-vad",
+    "qwen3Asr": "D:/models/qwen/Qwen3-ASR-1.7B",
+    "qwen3ForcedAligner": "D:/models/qwen/Qwen3-ForcedAligner-0.6B",
+    "camPlus": "D:/models/funasr/campplus",
+    "eres2netV2": "D:/models/modelscope/eres2netv2",
+    "pyannote": "D:/models/pyannote/speaker-diarization-community-1"
+  },
+  "executables": {
+    "ffmpeg": "ffmpeg",
+    "java": "java",
+    "pdfRendererJar": "pdf-renderer/target/pdf-renderer.jar"
+  },
+  "runtime": {
+    "maxWorkers": 1,
+    "maxPendingJobs": 1,
+    "maxLineBytes": 1048576,
+    "vadDevice": "cuda:0",
+    "asrDevice": "cuda:0",
+    "asrDtype": "bfloat16",
+    "camPlusDevice": "cuda:0",
+    "eres2netDevice": "gpu",
+    "pyannoteDevice": "cuda",
+    "strictStartupPreflight": true
+  },
+  "speaker": {
+    "normalizationProfile": "mono-16khz-f32-v1",
+    "clusterSimilarityThreshold": 0.72,
+    "lowMarginThreshold": 0.18,
+    "highMarginThreshold": 0.35,
+    "outlierScoreThreshold": 0.3,
+    "maxAutoSpeakers": null,
+    "kmeansIterations": 30,
+    "maxBatchSize": 32,
+    "maxSecondaryFraction": 0.25,
+    "maxCountUncertaintyCandidates": 8,
+    "autoCountConfidenceThreshold": 0.75,
+    "eres2netDecisionMargin": 0.05,
+    "pyannoteMode": "fallback",
+    "localLlmMode": "disabled",
+    "localLlmModel": "qwen3.5:4b"
+  },
+  "pdf": {
+    "minimumScore": 85,
+    "maxRounds": 5,
+    "captureDpi": 144,
+    "marginMm": 14,
+    "preferredFont": "Microsoft YaHei",
+    "templateId": "mts-cute-transcript-v1",
+    "timeoutSeconds": 300
+  }
+}

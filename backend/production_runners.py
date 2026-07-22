@@ -8,6 +8,7 @@ lazy so the worker can validate jobs before reserving GPU memory.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -18,6 +19,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
@@ -40,6 +42,9 @@ from .speaker_pipeline import (
     ReviewProposal,
     SpeechWindow,
 )
+
+VadStageObserver = Callable[[Mapping[str, Any]], None]
+_THIRD_PARTY_STDOUT_LOCK = threading.Lock()
 
 
 def _local_model_path(value: str | Path, label: str) -> Path:
@@ -271,16 +276,17 @@ class FfmpegFunAsrPreparationAdapter:
     """Normalize once with FFmpeg, then produce cached FunASR VAD boundaries."""
 
     adapter_id = "ffmpeg-funasr-vad-boundary"
-    version = "1.1.0"
+    version = "1.2.0"
 
     def __init__(
         self,
         *,
         vad_model_path: str | Path,
         ffmpeg_executable: str | Path = "ffmpeg",
-        device: str = "cuda:0",
+        device: str = "cpu",
         minimum_window_ms: int = 120,
         model_factory: Callable[..., Any] | None = None,
+        stage_observer: VadStageObserver | None = None,
     ) -> None:
         self.vad_model_path = _local_model_path(
             vad_model_path, "FunASR VAD model"
@@ -293,27 +299,78 @@ class FfmpegFunAsrPreparationAdapter:
         if self.minimum_window_ms < 1:
             raise ValueError("minimum_window_ms must be positive")
         self._model_factory = model_factory
+        self._stage_observer = stage_observer
         self._vad_model: Any = None
         self._load_lock = threading.Lock()
+
+    def _observe_stage(
+        self,
+        stage: str,
+        status: str,
+        *,
+        started_at: float | None = None,
+        error: Exception | None = None,
+        **details: Any,
+    ) -> None:
+        """Send path-free VAD diagnostics to an injected observer.
+
+        Observability must never write to stdout because stdout is reserved for
+        the worker JSONL protocol. Observer failures are deliberately isolated
+        from media processing so a telemetry consumer cannot fail a job.
+        """
+
+        observer = self._stage_observer
+        if observer is None:
+            return
+        event: dict[str, Any] = {
+            "adapterId": self.adapter_id,
+            "stage": stage,
+            "status": status,
+            "device": self.device,
+        }
+        if started_at is not None:
+            event["elapsedMs"] = max(
+                0.0,
+                (time.perf_counter() - started_at) * 1000.0,
+            )
+        if error is not None:
+            event["errorCode"] = (
+                error.code
+                if isinstance(error, WorkerError)
+                else type(error).__name__
+            )
+        event.update(details)
+        try:
+            observer(event)
+        except Exception:
+            # The JSONL worker and model pipeline must remain independent from
+            # optional diagnostics sinks.
+            return
 
     def _model(self) -> Any:
         with self._load_lock:
             if self._vad_model is None:
-                factory = self._model_factory
-                if factory is None:
-                    try:
-                        from funasr import AutoModel
-                    except ImportError as exc:
-                        raise WorkerError(
-                            "FUNASR_RUNTIME_MISSING",
-                            "FunASR is required for production VAD",
-                        ) from exc
-                    factory = AutoModel
-                self._vad_model = factory(
-                    model=str(self.vad_model_path),
-                    device=self.device,
-                    disable_update=True,
-                )
+                # Some FunASR releases print their version during import.
+                # stdout is the worker's JSONL protocol, so third-party model
+                # initialization must never be allowed to write to it.
+                with _THIRD_PARTY_STDOUT_LOCK, redirect_stdout(io.StringIO()):
+                    factory = self._model_factory
+                    if factory is None:
+                        try:
+                            from funasr import AutoModel
+                        except ImportError as exc:
+                            raise WorkerError(
+                                "FUNASR_RUNTIME_MISSING",
+                                "FunASR is required for production VAD",
+                            ) from exc
+                        factory = AutoModel
+                    self._vad_model = factory(
+                        model=str(self.vad_model_path),
+                        device=self.device,
+                        disable_update=True,
+                        disable_pbar=True,
+                        ncpu=1,
+                    )
             return self._vad_model
 
     @staticmethod
@@ -431,40 +488,133 @@ class FfmpegFunAsrPreparationAdapter:
             / f"{source_fingerprint}.mono-16khz.wav"
         )
         decode_started = time.perf_counter()
-        if not normalized_path.is_file():
-            self._normalize(source_path, normalized_path, context)
-        normalization_ms = (time.perf_counter() - decode_started) * 1000.0
-        samples, sample_rate = _load_audio(normalized_path)
-        if sample_rate != 16000:
-            raise WorkerError(
-                "NORMALIZED_AUDIO_INVALID",
-                "normalized audio must be mono 16 kHz",
+        normalize_cache_hit = normalized_path.is_file()
+        self._observe_stage(
+            "normalize",
+            "started",
+            cacheHit=normalize_cache_hit,
+        )
+        try:
+            if not normalize_cache_hit:
+                self._normalize(source_path, normalized_path, context)
+        except Exception as exc:
+            self._observe_stage(
+                "normalize",
+                "failed",
+                started_at=decode_started,
+                error=exc,
+                cacheHit=normalize_cache_hit,
             )
+            raise
+        normalization_ms = (time.perf_counter() - decode_started) * 1000.0
+        self._observe_stage(
+            "normalize",
+            "completed",
+            started_at=decode_started,
+            cacheHit=normalize_cache_hit,
+        )
+
+        pcm_started = time.perf_counter()
+        self._observe_stage("pcm_load", "started")
+        try:
+            samples, sample_rate = _load_audio(normalized_path)
+            if sample_rate != 16000:
+                raise WorkerError(
+                    "NORMALIZED_AUDIO_INVALID",
+                    "normalized audio must be mono 16 kHz",
+                )
+            duration_ms = max(1, round(len(samples) * 1000 / sample_rate))
+        except Exception as exc:
+            self._observe_stage(
+                "pcm_load",
+                "failed",
+                started_at=pcm_started,
+                error=exc,
+            )
+            raise
+        self._observe_stage(
+            "pcm_load",
+            "completed",
+            started_at=pcm_started,
+            sampleRate=sample_rate,
+            audioDurationMs=duration_ms,
+        )
         normalized_audio_path = str(normalized_path.resolve(strict=True))
         _SHARED_PCM_STORE.put(
             _pcm_buffer_key(source_fingerprint, normalized_audio_path),
             samples,
             sample_rate,
         )
-        duration_ms = max(1, round(len(samples) * 1000 / sample_rate))
         context.raise_if_cancelled()
         vad_started = time.perf_counter()
-        raw_vad = self._model().generate(
-            input=str(normalized_path),
-            cache={},
-            is_final=True,
+        model_load_started = time.perf_counter()
+        model_was_cached = self._vad_model is not None
+        self._observe_stage(
+            "model_load",
+            "started",
+            cacheHit=model_was_cached,
         )
-        intervals = [
-            (start_ms, min(end_ms, duration_ms))
-            for start_ms, end_ms in self._vad_intervals(raw_vad)
-            if min(end_ms, duration_ms) - start_ms >= self.minimum_window_ms
-        ]
-        vad_ms = (time.perf_counter() - vad_started) * 1000.0
-        if not intervals:
-            raise WorkerError(
-                "NO_SPEECH_DETECTED",
-                "FunASR VAD found no speech windows",
+        try:
+            model = self._model()
+        except Exception as exc:
+            self._observe_stage(
+                "model_load",
+                "failed",
+                started_at=model_load_started,
+                error=exc,
+                cacheHit=model_was_cached,
             )
+            raise
+        self._observe_stage(
+            "model_load",
+            "completed",
+            started_at=model_load_started,
+            cacheHit=model_was_cached,
+        )
+
+        inference_started = time.perf_counter()
+        self._observe_stage(
+            "inference",
+            "started",
+            audioDurationMs=duration_ms,
+            sampleRate=sample_rate,
+        )
+        try:
+            raw_vad = model.generate(
+                input=str(normalized_path),
+                cache={},
+                is_final=True,
+            )
+            intervals = [
+                (start_ms, min(end_ms, duration_ms))
+                for start_ms, end_ms in self._vad_intervals(raw_vad)
+                if min(end_ms, duration_ms) - start_ms
+                >= self.minimum_window_ms
+            ]
+            if not intervals:
+                raise WorkerError(
+                    "NO_SPEECH_DETECTED",
+                    "FunASR VAD found no speech windows",
+                )
+        except Exception as exc:
+            self._observe_stage(
+                "inference",
+                "failed",
+                started_at=inference_started,
+                error=exc,
+                audioDurationMs=duration_ms,
+                sampleRate=sample_rate,
+            )
+            raise
+        self._observe_stage(
+            "inference",
+            "completed",
+            started_at=inference_started,
+            audioDurationMs=duration_ms,
+            sampleRate=sample_rate,
+            speechWindowCount=len(intervals),
+        )
+        vad_ms = (time.perf_counter() - vad_started) * 1000.0
         windows = tuple(
             SpeechWindow(
                 window_id=f"window-{index:06d}",

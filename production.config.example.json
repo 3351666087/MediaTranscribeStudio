@@ -26,7 +26,7 @@
     "maxWorkers": 1,
     "maxPendingJobs": 1,
     "maxLineBytes": 1048576,
-    "vadDevice": "cuda:0",
+    "vadDevice": "cpu",
     "asrDevice": "cuda:0",
     "asrDtype": "bfloat16",
     "camPlusDevice": "cuda:0",

@@ -125,6 +125,7 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(config.models.qwen3_asr, self.root / "asr")
         self.assertIsNone(config.speaker.max_auto_speakers)
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
+        self.assertEqual(config.runtime.vad_device, "cpu")
         self.assertTrue(config.offline)
 
     def test_unknown_fields_fail_closed(self) -> None:
@@ -217,6 +218,16 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertIsNone(pipeline.kwargs["config"].max_auto_speakers)
         self.assertEqual(len(secondary.calls), 1)
         self.assertEqual(len(pyannote.calls), 1)
+        self.assertEqual(preparation.calls[0][1]["device"], "cpu")
+
+    def test_explicit_vad_device_override_is_preserved(self) -> None:
+        value = self.mapping()
+        value["runtime"]["vadDevice"] = "cuda:7"
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        config = ProductionConfig.load(self.config_path)
+
+        self.assertEqual(config.runtime.vad_device, "cuda:7")
 
     def test_disabled_pyannote_is_not_instantiated(self) -> None:
         config = self.load(pyannote_mode="disabled")

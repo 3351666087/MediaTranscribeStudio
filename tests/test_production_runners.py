@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
+import io
 import json
 import shutil
 import struct
@@ -76,6 +78,18 @@ class FakePcmTimeline:
 class FakeVadModel:
     def generate(self, **kwargs):
         return [{"value": [[0, 900], [1000, 1900]]}]
+
+
+class FailingVadModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, **kwargs):
+        self.calls += 1
+        raise WorkerError(
+            "FUNASR_VAD_INFERENCE_FAILED",
+            "synthetic VAD inference failure",
+        )
 
 
 class FakeQwenModel:
@@ -1146,6 +1160,8 @@ class ProductionRunnerTests(unittest.TestCase):
         def factory(**kwargs):
             self.assertEqual(kwargs["model"], str(self.vad_model.resolve()))
             self.assertTrue(kwargs["disable_update"])
+            self.assertTrue(kwargs["disable_pbar"])
+            self.assertEqual(kwargs["ncpu"], 1)
             return FakeVadModel()
 
         adapter = FfmpegFunAsrPreparationAdapter(
@@ -1164,6 +1180,142 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(
             [(item.start_ms, item.end_ms) for item in prepared.windows],
             [(0, 900), (1000, 1900)],
+        )
+
+    def test_funasr_vad_is_cpu_isolated_observable_and_stdout_silent(
+        self,
+    ) -> None:
+        factory_calls = []
+        observations = []
+
+        def factory(**kwargs):
+            print("synthetic third-party model banner")
+            factory_calls.append(kwargs)
+            return FakeVadModel()
+
+        def normalize(source_path, output_path, context):
+            context.raise_if_cancelled()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_path, output_path)
+
+        adapter = FfmpegFunAsrPreparationAdapter(
+            vad_model_path=self.vad_model,
+            ffmpeg_executable=Path(__file__),
+            model_factory=factory,
+            stage_observer=observations.append,
+        )
+        output = io.StringIO()
+        samples = FakePcmTimeline(32_000)
+        with (
+            mock.patch.object(adapter, "_normalize", side_effect=normalize),
+            mock.patch.object(
+                production_runners,
+                "_load_audio",
+                return_value=(samples, 16_000),
+            ),
+            redirect_stdout(output),
+        ):
+            prepared = adapter.prepare(
+                self.audio,
+                normalization_profile="mono-16khz-f32-v1",
+                context=self.context,
+            )
+
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(adapter.device, "cpu")
+        self.assertEqual(
+            factory_calls,
+            [
+                {
+                    "model": str(self.vad_model.resolve()),
+                    "device": "cpu",
+                    "disable_update": True,
+                    "disable_pbar": True,
+                    "ncpu": 1,
+                }
+            ],
+        )
+        self.assertEqual(
+            [
+                (event["stage"], event["status"])
+                for event in observations
+            ],
+            [
+                ("normalize", "started"),
+                ("normalize", "completed"),
+                ("pcm_load", "started"),
+                ("pcm_load", "completed"),
+                ("model_load", "started"),
+                ("model_load", "completed"),
+                ("inference", "started"),
+                ("inference", "completed"),
+            ],
+        )
+        self.assertEqual(prepared.duration_ms, 2_000)
+        self.assertEqual(
+            observations[-1]["speechWindowCount"],
+            len(prepared.windows),
+        )
+        self.assertTrue(
+            all(event["device"] == "cpu" for event in observations)
+        )
+
+    def test_funasr_vad_failure_is_observed_and_stops_the_adapter(
+        self,
+    ) -> None:
+        observations = []
+        model = FailingVadModel()
+
+        def normalize(source_path, output_path, context):
+            context.raise_if_cancelled()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_path, output_path)
+
+        adapter = FfmpegFunAsrPreparationAdapter(
+            vad_model_path=self.vad_model,
+            ffmpeg_executable=Path(__file__),
+            model_factory=lambda **_kwargs: model,
+            stage_observer=observations.append,
+        )
+        with (
+            mock.patch.object(adapter, "_normalize", side_effect=normalize),
+            mock.patch.object(
+                production_runners,
+                "_load_audio",
+                return_value=(FakePcmTimeline(16_000), 16_000),
+            ),
+            self.assertRaises(WorkerError) as captured,
+        ):
+            adapter.prepare(
+                self.audio,
+                normalization_profile="mono-16khz-f32-v1",
+                context=self.context,
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "FUNASR_VAD_INFERENCE_FAILED",
+        )
+        self.assertEqual(model.calls, 1)
+        self.assertEqual(
+            [
+                (event["stage"], event["status"])
+                for event in observations
+            ],
+            [
+                ("normalize", "started"),
+                ("normalize", "completed"),
+                ("pcm_load", "started"),
+                ("pcm_load", "completed"),
+                ("model_load", "started"),
+                ("model_load", "completed"),
+                ("inference", "started"),
+                ("inference", "failed"),
+            ],
+        )
+        self.assertEqual(
+            observations[-1]["errorCode"],
+            "FUNASR_VAD_INFERENCE_FAILED",
         )
 
     def test_model_paths_must_be_explicit_local_paths(self) -> None:

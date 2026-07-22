@@ -219,7 +219,7 @@ class ProductionRuntime:
     max_workers: int = 1
     max_pending_jobs: int = 1
     max_line_bytes: int = 1024 * 1024
-    vad_device: str = "cuda:0"
+    vad_device: str = "cpu"
     asr_device: str = "cuda:0"
     asr_dtype: str = "bfloat16"
     cam_plus_device: str = "cuda:0"
@@ -515,7 +515,7 @@ class ProductionConfig:
                 maximum=16 * 1024 * 1024,
             ),
             vad_device=_nonempty_text(
-                raw_runtime.get("vadDevice", "cuda:0"),
+                raw_runtime.get("vadDevice", "cpu"),
                 field="runtime.vadDevice",
             ),
             asr_device=_nonempty_text(

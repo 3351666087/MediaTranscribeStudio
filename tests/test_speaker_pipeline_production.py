@@ -95,6 +95,22 @@ class FakePreparationAdapter:
         )
 
 
+class FailingPreparationAdapter:
+    adapter_id = "normalize-vad-boundary-failing-fixture"
+    version = "1"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def prepare(self, source_path, *, normalization_profile, context):
+        context.raise_if_cancelled()
+        self.calls += 1
+        raise WorkerError(
+            "FUNASR_VAD_INFERENCE_FAILED",
+            "synthetic VAD inference failure",
+        )
+
+
 class FakeAsrAdapter:
     adapter_id = "qwen3-asr-1.7b-fixture"
     version = "1"
@@ -2099,6 +2115,28 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 AdapterContext("pipeline-job", self.output, cancellation),
             )
         self.assertEqual(preparation.calls, 0)
+
+    def test_vad_failure_stops_before_asr_embedding_and_overlap(self) -> None:
+        preparation = FailingPreparationAdapter()
+        pipeline, _, asr, cam, overlap = self.pipeline(
+            2,
+            preparation=preparation,
+        )
+
+        with self.assertRaises(WorkerError) as captured:
+            pipeline.transcribe(
+                self.request(2, "manual", job_id="vad-failure"),
+                self.context("vad-failure"),
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "FUNASR_VAD_INFERENCE_FAILED",
+        )
+        self.assertEqual(preparation.calls, 1)
+        self.assertEqual(asr.calls, [])
+        self.assertEqual(cam.calls, [])
+        self.assertEqual(overlap.calls, [])
 
     def test_dynamic_count_fail_closed_flag_forces_count_uncertainty_review(
         self,

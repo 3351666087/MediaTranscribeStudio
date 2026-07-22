@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/job-event/1.0.0",
+  "title": "MediaTranscribeStudio JobEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "eventId",
+    "jobId",
+    "sequence",
+    "timestamp",
+    "type",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "job.started",
+        "stage.started",
+        "stage.progress",
+        "artifact.created",
+        "review.required",
+        "warning",
+        "job.failed",
+        "job.completed",
+        "job.cancelled"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlationId": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "causationId": {
+          "type": "string",
+          "maxLength": 160
+        }
+      }
+    }
+  }
+}

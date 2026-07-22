@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0.0",
+  "source": "frontend-design-pack-global neutral machine baseline",
+  "designPackCutoffDate": "2026-07-19",
+  "implementationDate": "2026-07-21",
+  "offline": true,
+  "tokens": {
+    "surfaceCanvas": "#f4f2ee",
+    "surfaceRaised": "#ffffff",
+    "surfaceStrong": "#171816",
+    "textPrimary": "#171816",
+    "textSecondary": "#5c5f59",
+    "accentDefault": "#275d46",
+    "accentSoft": "#dbe9e1",
+    "borderSubtle": "#d3d5cf",
+    "statusDanger": "#a12622",
+    "radiusSmallMm": 2.5,
+    "radiusMediumMm": 3.0,
+    "bodyLineHeight": 1.55
+  },
+  "qualityContract": {
+    "minimumScore": 85,
+    "hardGatesNonCompensable": true,
+    "aestheticFacetCount": 14,
+    "maximumRepairRounds": 5,
+    "immutableTranscriptRequired": true,
+    "pageEvidenceRequired": true
+  },
+  "releaseCaveat": "The external template package remains implementationReady=false; this renderer only internalizes its applicable deterministic visual QA contract."
+}

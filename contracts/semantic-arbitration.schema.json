@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/semantic-arbitration/1.0.0",
+  "title": "MediaTranscribeStudio SemanticArbitration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "segmentId",
+    "constraints",
+    "proposal",
+    "validation"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "segmentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "language",
+        "translationAllowed",
+        "stylePolishAllowed",
+        "hallucinationAllowed",
+        "speakerChangeAllowed",
+        "overlapSplitAllowed",
+        "rawTextMutable"
+      ],
+      "properties": {
+        "language": {
+          "enum": [
+            "zh",
+            "zh-CN",
+            "zh-Hans"
+          ]
+        },
+        "translationAllowed": {
+          "const": false
+        },
+        "stylePolishAllowed": {
+          "const": false
+        },
+        "hallucinationAllowed": {
+          "const": false
+        },
+        "speakerChangeAllowed": {
+          "type": "boolean"
+        },
+        "overlapSplitAllowed": {
+          "type": "boolean"
+        },
+        "rawTextMutable": {
+          "const": false
+        },
+        "allowedSpeakerIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^speaker-[1-9][0-9]*$"
+          }
+        },
+        "lockedSpeakerId": {
+          "type": "string",
+          "pattern": "^speaker-[1-9][0-9]*$"
+        },
+        "glossaryTerms": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "normalizedText",
+        "speakerId",
+        "reasonCodes",
+        "evidenceSegmentIds",
+        "application"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "keep",
+            "normalize-text",
+            "suggest-speaker",
+            "review-required",
+            "reject"
+          ]
+        },
+        "normalizedText": {
+          "type": "string",
+          "minLength": 1
+        },
+        "speakerId": {
+          "type": "string",
+          "pattern": "^speaker-[1-9][0-9]*$"
+        },
+        "reasonCodes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_:-]+$"
+          }
+        },
+        "evidenceSegmentIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "application": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "suggestion",
+            "human-review",
+            "rejected"
+          ]
+        },
+        "modelRationale": {
+          "type": "string",
+          "maxLength": 1200
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaValid",
+        "sourceTraceable",
+        "textBoundarySafe",
+        "speakerConstraintSafe",
+        "deterministicDecision"
+      ],
+      "properties": {
+        "schemaValid": {
+          "type": "boolean"
+        },
+        "sourceTraceable": {
+          "type": "boolean"
+        },
+        "textBoundarySafe": {
+          "type": "boolean"
+        },
+        "speakerConstraintSafe": {
+          "type": "boolean"
+        },
+        "deterministicDecision": {
+          "type": "string",
+          "enum": [
+            "apply",
+            "suggest",
+            "review",
+            "reject"
+          ]
+        },
+        "failureCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_:-]+$"
+          }
+        }
+      }
+    }
+  }
+}

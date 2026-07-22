@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/artifact-manifest/1.0.0",
+  "title": "MediaTranscribeStudio ArtifactManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "jobId",
+    "documentId",
+    "rendererVersion",
+    "createdAt",
+    "artifacts"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "rendererVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "type",
+        "relativePath",
+        "mimeType",
+        "sha256",
+        "bytes",
+        "verified"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "report-document",
+            "canonical-xhtml",
+            "pdf",
+            "page-image",
+            "contact-sheet",
+            "quality-report",
+            "repair-queue",
+            "renderer-log"
+          ]
+        },
+        "relativePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^(?![A-Za-z]:[\\\\/])(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "verified": {
+          "const": true
+        },
+        "pageNumber": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "producedBy": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "sourceArtifactIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      }
+    }
+  }
+}

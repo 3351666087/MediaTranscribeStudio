@@ -1,0 +1,706 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/pdf-quality-report/1.0.0",
+  "title": "MediaTranscribeStudio PdfQualityReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "round",
+    "status",
+    "minimumScore",
+    "score",
+    "hardGatesPassed",
+    "hardGates",
+    "facets",
+    "evidence",
+    "repairQueue"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "repair-required",
+        "blocked",
+        "failed"
+      ]
+    },
+    "minimumScore": {
+      "type": "number",
+      "minimum": 85,
+      "maximum": 100
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "hardGatesPassed": {
+      "type": "boolean"
+    },
+    "hardGates": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-OPENABLE"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-PAGE-COUNT"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-PAGE-SIZE"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-TRANSCRIPT-TEXT-INTEGRITY"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-SEGMENT-COUNT"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-TIMESTAMP-INTEGRITY"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-SPEAKER-SET-INTEGRITY"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-FONT-EMBEDDED"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-NO-BLANK-PAGES"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-NO-CONTENT-OVERFLOW"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-OFFLINE-ASSETS"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-PAGE-EVIDENCE"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/hardGate"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "PDF-IMMUTABLE-CONTENT-HASH"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "facets": {
+      "type": "array",
+      "minItems": 14,
+      "maxItems": 14,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-COHERENCE"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-DISTINCTION"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-REFINEMENT"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-PROPORTION"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-HIERARCHY"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-TYPOGRAPHY"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-COLOR-RELATIONSHIPS"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-RHYTHM"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-DENSITY"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-RESTRAINT"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-REAL-CONTENT-STRESS"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-FONT-FAILURE"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-IMAGE-FAILURE"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/facet"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "AESTHETIC-SCRIPT-FAILURE"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "items": false
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "repairQueue": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/repair"
+      }
+    },
+    "regressions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "checkId",
+          "previousStatus",
+          "currentStatus"
+        ],
+        "properties": {
+          "checkId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "previousStatus": {
+            "type": "string"
+          },
+          "currentStatus": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hardGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "message",
+        "evidenceIds"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^PDF-[A-Z0-9-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "not-run"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "evidenceIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      }
+    },
+    "facet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "score",
+        "weight",
+        "message",
+        "evidenceIds"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "AESTHETIC-COHERENCE",
+            "AESTHETIC-DISTINCTION",
+            "AESTHETIC-REFINEMENT",
+            "AESTHETIC-PROPORTION",
+            "AESTHETIC-HIERARCHY",
+            "AESTHETIC-TYPOGRAPHY",
+            "AESTHETIC-COLOR-RELATIONSHIPS",
+            "AESTHETIC-RHYTHM",
+            "AESTHETIC-DENSITY",
+            "AESTHETIC-RESTRAINT",
+            "AESTHETIC-REAL-CONTENT-STRESS",
+            "AESTHETIC-FONT-FAILURE",
+            "AESTHETIC-IMAGE-FAILURE",
+            "AESTHETIC-SCRIPT-FAILURE"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "not-run"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "weight": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "evidenceIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "relativePath",
+        "sha256",
+        "verified"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "page-image",
+            "contact-sheet",
+            "text-extraction",
+            "font-inspection",
+            "layout-inspection",
+            "test-output"
+          ]
+        },
+        "relativePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verified": {
+          "const": true
+        },
+        "pageNumber": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "repair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "priority",
+        "severity",
+        "checkId",
+        "safeScope",
+        "action",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "checkId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "safeScope": {
+          "type": "string",
+          "enum": [
+            "template",
+            "css",
+            "design-token",
+            "font",
+            "image-size",
+            "pagination",
+            "page-margin",
+            "header-footer"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "applied",
+            "verified",
+            "blocked"
+          ]
+        }
+      }
+    }
+  }
+}

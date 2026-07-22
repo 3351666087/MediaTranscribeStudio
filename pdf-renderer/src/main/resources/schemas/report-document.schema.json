@@ -1,0 +1,716 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/report-document/1.0.0",
+  "title": "MediaTranscribeStudio ReportDocument",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentId",
+    "generatedAt",
+    "language",
+    "source",
+    "speakerPolicy",
+    "speakers",
+    "segments",
+    "provenance"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "documentId": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 240
+    },
+    "language": {
+      "type": "string",
+      "enum": [
+        "zh",
+        "zh-CN",
+        "zh-Hans"
+      ]
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "speakerPolicy": {
+      "$ref": "#/$defs/speakerPolicy"
+    },
+    "speakers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/speaker"
+      }
+    },
+    "segments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "analysis": {
+      "$ref": "#/$defs/analysis"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "privacy": {
+      "$ref": "#/$defs/privacy"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileName",
+        "mediaType",
+        "durationMs"
+      ],
+      "properties": {
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 260
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "speakerPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "resolvedCount",
+        "requireExactSet",
+        "speakerIds"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "manual",
+            "hybrid"
+          ]
+        },
+        "resolvedCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requestedCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minimumCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximumCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "requireExactSet": {
+          "const": true
+        },
+        "speakerIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^speaker-[1-9][0-9]*$"
+          }
+        },
+        "detection": {
+          "$ref": "#/$defs/speakerCountDetection"
+        },
+        "unknownSpeakerAllowed": {
+          "const": false
+        },
+        "speakerChangeRequiresEvidence": {
+          "const": true
+        }
+      }
+    },
+    "speakerCountDetection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "estimatedCount"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "estimatedCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "candidates": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "count",
+              "confidence"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "speaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "order",
+        "displayName",
+        "shortLabel",
+        "colorToken"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^speaker-[1-9][0-9]*$"
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "shortLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "colorToken": {
+          "type": "string",
+          "pattern": "^speaker\\.[1-9][0-9]*$"
+        },
+        "role": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "startMs",
+        "endMs",
+        "speakerId",
+        "rawText",
+        "normalizedText",
+        "displayText",
+        "confidence",
+        "evidence",
+        "revisions"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "speakerId": {
+          "type": "string",
+          "pattern": "^speaker-[1-9][0-9]*$"
+        },
+        "rawText": {
+          "type": "string",
+          "minLength": 1
+        },
+        "normalizedText": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayText": {
+          "type": "string",
+          "minLength": 1
+        },
+        "language": {
+          "type": "string",
+          "enum": [
+            "zh",
+            "zh-CN",
+            "zh-Hans"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reviewStatus": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "review-required",
+            "manually-reviewed",
+            "locked"
+          ]
+        },
+        "overlapGroupId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "sourceSegmentIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/revision"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asr",
+        "boundary",
+        "speaker"
+      ],
+      "properties": {
+        "asr": {
+          "$ref": "#/$defs/asrEvidence"
+        },
+        "boundary": {
+          "$ref": "#/$defs/boundaryEvidence"
+        },
+        "speaker": {
+          "$ref": "#/$defs/speakerEvidence"
+        },
+        "semantic": {
+          "$ref": "#/$defs/semanticEvidence"
+        },
+        "audioReview": {
+          "$ref": "#/$defs/audioReview"
+        }
+      }
+    },
+    "asrEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "model",
+        "confidence"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "modelRevision": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "wordCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "boundaryEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "confidence"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "overlapDetected": {
+          "type": "boolean"
+        }
+      }
+    },
+    "speakerEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "assignment",
+        "locked",
+        "scores"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "assignment": {
+          "type": "string",
+          "pattern": "^speaker-[1-9][0-9]*$"
+        },
+        "locked": {
+          "type": "boolean"
+        },
+        "margin": {
+          "type": "number",
+          "minimum": -2,
+          "maximum": 2
+        },
+        "scores": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "speakerId",
+              "score"
+            ],
+            "properties": {
+              "speakerId": {
+                "type": "string",
+                "pattern": "^speaker-[1-9][0-9]*$"
+              },
+              "score": {
+                "type": "number",
+                "minimum": -2,
+                "maximum": 2
+              }
+            }
+          }
+        }
+      }
+    },
+    "semanticEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "decision",
+        "autoApplied"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "keep",
+            "normalize",
+            "suggest-speaker",
+            "review-required",
+            "reject"
+          ]
+        },
+        "autoApplied": {
+          "type": "boolean"
+        },
+        "reasonCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z0-9_:-]+$"
+          }
+        }
+      }
+    },
+    "audioReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "not-needed",
+            "queued",
+            "model-reviewed",
+            "human-reviewed"
+          ]
+        },
+        "reviewer": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    },
+    "revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revisionId",
+        "type",
+        "source",
+        "reasonCode",
+        "before",
+        "after"
+      ],
+      "properties": {
+        "revisionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "text",
+            "speaker",
+            "boundary",
+            "split",
+            "merge"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "acoustic",
+            "deterministic",
+            "llm",
+            "manual"
+          ]
+        },
+        "reasonCode": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_:-]+$"
+        },
+        "before": {},
+        "after": {},
+        "model": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "actor": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "occurredAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "keyPoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "actionItems": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pipelineVersion",
+        "models",
+        "offline"
+      ],
+      "properties": {
+        "pipelineVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "models": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "name"
+            ],
+            "properties": {
+              "role": {
+                "type": "string",
+                "enum": [
+                  "asr",
+                  "vad",
+                  "boundary",
+                  "speaker",
+                  "semantic",
+                  "overlap"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "revision": {
+                "type": "string",
+                "maxLength": 160
+              },
+              "quantization": {
+                "type": "string",
+                "maxLength": 80
+              }
+            }
+          }
+        },
+        "offline": {
+          "const": true
+        },
+        "configSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "containsRealMeetingText": {
+          "type": "boolean"
+        },
+        "exportApproved": {
+          "type": "boolean"
+        },
+        "redactionNotes": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    }
+  }
+}

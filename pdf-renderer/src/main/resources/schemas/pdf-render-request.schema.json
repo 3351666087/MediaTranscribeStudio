@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/pdf-render-request/1.0.0",
+  "title": "MediaTranscribeStudio PdfRenderRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "jobId",
+    "reportDocumentPath",
+    "outputDirectory",
+    "renderer",
+    "qualityPolicy"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "reportDocumentPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "outputDirectory": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "renderer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "offline",
+        "page",
+        "fontPolicy"
+      ],
+      "properties": {
+        "provider": {
+          "const": "java-openhtmltopdf"
+        },
+        "offline": {
+          "const": true
+        },
+        "page": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "size",
+            "marginMm"
+          ],
+          "properties": {
+            "size": {
+              "type": "string",
+              "enum": [
+                "A4"
+              ]
+            },
+            "marginMm": {
+              "type": "number",
+              "minimum": 8,
+              "maximum": 30
+            }
+          }
+        },
+        "fontPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requireEmbeddedCjk",
+            "allowSystemFallback"
+          ],
+          "properties": {
+            "requireEmbeddedCjk": {
+              "const": true
+            },
+            "allowSystemFallback": {
+              "const": false
+            },
+            "preferredFont": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            }
+          }
+        },
+        "templateId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      }
+    },
+    "qualityPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requireHardGates",
+        "minimumScore",
+        "maxRounds",
+        "captureDpi",
+        "facetIds"
+      ],
+      "properties": {
+        "requireHardGates": {
+          "const": true
+        },
+        "minimumScore": {
+          "type": "number",
+          "minimum": 85,
+          "maximum": 100
+        },
+        "maxRounds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "captureDpi": {
+          "type": "integer",
+          "minimum": 96,
+          "maximum": 300
+        },
+        "facetIds": {
+          "const": [
+            "AESTHETIC-COHERENCE",
+            "AESTHETIC-DISTINCTION",
+            "AESTHETIC-REFINEMENT",
+            "AESTHETIC-PROPORTION",
+            "AESTHETIC-HIERARCHY",
+            "AESTHETIC-TYPOGRAPHY",
+            "AESTHETIC-COLOR-RELATIONSHIPS",
+            "AESTHETIC-RHYTHM",
+            "AESTHETIC-DENSITY",
+            "AESTHETIC-RESTRAINT",
+            "AESTHETIC-REAL-CONTENT-STRESS",
+            "AESTHETIC-FONT-FAILURE",
+            "AESTHETIC-IMAGE-FAILURE",
+            "AESTHETIC-SCRIPT-FAILURE"
+          ]
+        }
+      }
+    }
+  }
+}

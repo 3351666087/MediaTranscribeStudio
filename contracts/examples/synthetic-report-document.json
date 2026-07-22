@@ -1,0 +1,419 @@
+{
+  "schemaVersion": "1.0.0",
+  "documentId": "synthetic-five-speaker-demo",
+  "generatedAt": "2026-07-21T00:00:00Z",
+  "title": "五人中文会议逐字稿（合成测试）",
+  "language": "zh-CN",
+  "source": {
+    "fileName": "synthetic-meeting.wav",
+    "mediaType": "audio/wav",
+    "durationMs": 22500
+  },
+  "speakerPolicy": {
+    "mode": "auto",
+    "resolvedCount": 5,
+    "requireExactSet": true,
+    "speakerIds": [
+      "speaker-1",
+      "speaker-2",
+      "speaker-3",
+      "speaker-4",
+      "speaker-5"
+    ],
+    "detection": {
+      "provider": "synthetic-diarization-consensus",
+      "estimatedCount": 5,
+      "confidence": 0.96,
+      "candidates": [
+        {
+          "count": 5,
+          "confidence": 0.96
+        },
+        {
+          "count": 4,
+          "confidence": 0.03
+        },
+        {
+          "count": 6,
+          "confidence": 0.01
+        }
+      ]
+    },
+    "unknownSpeakerAllowed": false,
+    "speakerChangeRequiresEvidence": true
+  },
+  "speakers": [
+    {
+      "id": "speaker-1",
+      "order": 1,
+      "displayName": "角色一",
+      "shortLabel": "一",
+      "colorToken": "speaker.1"
+    },
+    {
+      "id": "speaker-2",
+      "order": 2,
+      "displayName": "角色二",
+      "shortLabel": "二",
+      "colorToken": "speaker.2"
+    },
+    {
+      "id": "speaker-3",
+      "order": 3,
+      "displayName": "角色三",
+      "shortLabel": "三",
+      "colorToken": "speaker.3"
+    },
+    {
+      "id": "speaker-4",
+      "order": 4,
+      "displayName": "角色四",
+      "shortLabel": "四",
+      "colorToken": "speaker.4"
+    },
+    {
+      "id": "speaker-5",
+      "order": 5,
+      "displayName": "角色五",
+      "shortLabel": "五",
+      "colorToken": "speaker.5"
+    }
+  ],
+  "segments": [
+    {
+      "id": "segment-001",
+      "startMs": 0,
+      "endMs": 3100,
+      "speakerId": "speaker-1",
+      "rawText": "我们先确认今天的测试范围。",
+      "normalizedText": "我们先确认今天的测试范围。",
+      "displayText": "我们先确认今天的测试范围。",
+      "language": "zh-CN",
+      "confidence": 0.96,
+      "reviewStatus": "accepted",
+      "sourceSegmentIds": [
+        "source-001"
+      ],
+      "evidence": {
+        "asr": {
+          "provider": "qwen-asr",
+          "model": "synthetic-model",
+          "confidence": 0.97,
+          "wordCount": 14
+        },
+        "boundary": {
+          "provider": "funasr",
+          "model": "synthetic-boundary",
+          "confidence": 0.95,
+          "overlapDetected": false
+        },
+        "speaker": {
+          "provider": "camp-plus",
+          "model": "synthetic-speaker",
+          "assignment": "speaker-1",
+          "locked": false,
+          "margin": 0.28,
+          "scores": [
+            {
+              "speakerId": "speaker-1",
+              "score": 0.91
+            },
+            {
+              "speakerId": "speaker-2",
+              "score": 0.63
+            },
+            {
+              "speakerId": "speaker-3",
+              "score": 0.21
+            },
+            {
+              "speakerId": "speaker-4",
+              "score": 0.18
+            },
+            {
+              "speakerId": "speaker-5",
+              "score": 0.15
+            }
+          ]
+        }
+      },
+      "revisions": []
+    },
+    {
+      "id": "segment-002",
+      "startMs": 3300,
+      "endMs": 7000,
+      "speakerId": "speaker-2",
+      "rawText": "我会负责核对时间边界和角色。",
+      "normalizedText": "我会负责核对时间边界和角色。",
+      "displayText": "我会负责核对时间边界和角色。",
+      "language": "zh-CN",
+      "confidence": 0.94,
+      "reviewStatus": "accepted",
+      "evidence": {
+        "asr": {
+          "provider": "qwen-asr",
+          "model": "synthetic-model",
+          "confidence": 0.95
+        },
+        "boundary": {
+          "provider": "funasr",
+          "confidence": 0.93,
+          "overlapDetected": false
+        },
+        "speaker": {
+          "provider": "camp-plus",
+          "assignment": "speaker-2",
+          "locked": false,
+          "scores": [
+            {
+              "speakerId": "speaker-1",
+              "score": 0.35
+            },
+            {
+              "speakerId": "speaker-2",
+              "score": 0.9
+            },
+            {
+              "speakerId": "speaker-3",
+              "score": 0.2
+            },
+            {
+              "speakerId": "speaker-4",
+              "score": 0.18
+            },
+            {
+              "speakerId": "speaker-5",
+              "score": 0.17
+            }
+          ]
+        }
+      },
+      "revisions": []
+    },
+    {
+      "id": "segment-003",
+      "startMs": 7200,
+      "endMs": 11100,
+      "speakerId": "speaker-3",
+      "rawText": "前端需要保持离线并展示复核队列。",
+      "normalizedText": "前端需要保持离线，并展示复核队列。",
+      "displayText": "前端需要保持离线，并展示复核队列。",
+      "language": "zh-CN",
+      "confidence": 0.92,
+      "reviewStatus": "manually-reviewed",
+      "evidence": {
+        "asr": {
+          "provider": "qwen-asr",
+          "model": "synthetic-model",
+          "confidence": 0.93
+        },
+        "boundary": {
+          "provider": "funasr",
+          "confidence": 0.91,
+          "overlapDetected": false
+        },
+        "speaker": {
+          "provider": "camp-plus",
+          "assignment": "speaker-3",
+          "locked": true,
+          "scores": [
+            {
+              "speakerId": "speaker-1",
+              "score": 0.25
+            },
+            {
+              "speakerId": "speaker-2",
+              "score": 0.2
+            },
+            {
+              "speakerId": "speaker-3",
+              "score": 0.88
+            },
+            {
+              "speakerId": "speaker-4",
+              "score": 0.19
+            },
+            {
+              "speakerId": "speaker-5",
+              "score": 0.16
+            }
+          ]
+        }
+      },
+      "revisions": [
+        {
+          "revisionId": "revision-001",
+          "type": "text",
+          "source": "manual",
+          "reasonCode": "PUNCTUATION_BOUNDARY",
+          "before": "前端需要保持离线并展示复核队列。",
+          "after": "前端需要保持离线，并展示复核队列。",
+          "actor": "synthetic-reviewer",
+          "occurredAt": "2026-07-21T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": "segment-004",
+      "startMs": 11500,
+      "endMs": 15400,
+      "speakerId": "speaker-4",
+      "rawText": "PDF要验证字体、分页和文本一致性。",
+      "normalizedText": "PDF 要验证字体、分页和文本一致性。",
+      "displayText": "PDF 要验证字体、分页和文本一致性。",
+      "language": "zh-CN",
+      "confidence": 0.93,
+      "reviewStatus": "accepted",
+      "evidence": {
+        "asr": {
+          "provider": "qwen-asr",
+          "model": "synthetic-model",
+          "confidence": 0.94
+        },
+        "boundary": {
+          "provider": "funasr",
+          "confidence": 0.92,
+          "overlapDetected": false
+        },
+        "speaker": {
+          "provider": "camp-plus",
+          "assignment": "speaker-4",
+          "locked": false,
+          "scores": [
+            {
+              "speakerId": "speaker-1",
+              "score": 0.22
+            },
+            {
+              "speakerId": "speaker-2",
+              "score": 0.18
+            },
+            {
+              "speakerId": "speaker-3",
+              "score": 0.2
+            },
+            {
+              "speakerId": "speaker-4",
+              "score": 0.89
+            },
+            {
+              "speakerId": "speaker-5",
+              "score": 0.17
+            }
+          ]
+        }
+      },
+      "revisions": [
+        {
+          "revisionId": "revision-002",
+          "type": "text",
+          "source": "deterministic",
+          "reasonCode": "LATIN_CJK_SPACING",
+          "before": "PDF要验证字体、分页和文本一致性。",
+          "after": "PDF 要验证字体、分页和文本一致性。"
+        }
+      ]
+    },
+    {
+      "id": "segment-005",
+      "startMs": 15800,
+      "endMs": 22500,
+      "speakerId": "speaker-5",
+      "rawText": "最后所有低置信结果都进入人工复核，不能静默猜测。",
+      "normalizedText": "最后，所有低置信结果都进入人工复核，不能静默猜测。",
+      "displayText": "最后，所有低置信结果都进入人工复核，不能静默猜测。",
+      "language": "zh-CN",
+      "confidence": 0.91,
+      "reviewStatus": "review-required",
+      "evidence": {
+        "asr": {
+          "provider": "qwen-asr",
+          "model": "synthetic-model",
+          "confidence": 0.92
+        },
+        "boundary": {
+          "provider": "funasr",
+          "confidence": 0.9,
+          "overlapDetected": false
+        },
+        "speaker": {
+          "provider": "camp-plus",
+          "assignment": "speaker-5",
+          "locked": false,
+          "scores": [
+            {
+              "speakerId": "speaker-1",
+              "score": 0.26
+            },
+            {
+              "speakerId": "speaker-2",
+              "score": 0.2
+            },
+            {
+              "speakerId": "speaker-3",
+              "score": 0.19
+            },
+            {
+              "speakerId": "speaker-4",
+              "score": 0.21
+            },
+            {
+              "speakerId": "speaker-5",
+              "score": 0.86
+            }
+          ]
+        },
+        "semantic": {
+          "provider": "local-llm",
+          "model": "synthetic-small-model",
+          "decision": "review-required",
+          "autoApplied": false,
+          "reasonCodes": [
+            "LOW_ACOUSTIC_MARGIN"
+          ]
+        },
+        "audioReview": {
+          "status": "queued"
+        }
+      },
+      "revisions": [
+        {
+          "revisionId": "revision-003",
+          "type": "text",
+          "source": "deterministic",
+          "reasonCode": "PUNCTUATION_BOUNDARY",
+          "before": "最后所有低置信结果都进入人工复核，不能静默猜测。",
+          "after": "最后，所有低置信结果都进入人工复核，不能静默猜测。"
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "pipelineVersion": "0.1.0-contract-fixture",
+    "models": [
+      {
+        "role": "asr",
+        "name": "synthetic-asr"
+      },
+      {
+        "role": "boundary",
+        "name": "synthetic-boundary"
+      },
+      {
+        "role": "speaker",
+        "name": "synthetic-speaker"
+      },
+      {
+        "role": "semantic",
+        "name": "synthetic-small-model"
+      }
+    ],
+    "offline": true
+  },
+  "privacy": {
+    "containsRealMeetingText": false,
+    "exportApproved": true,
+    "redactionNotes": "Synthetic contract and renderer fixture only."
+  }
+}

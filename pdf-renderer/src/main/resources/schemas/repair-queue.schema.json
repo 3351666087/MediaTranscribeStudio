@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/pdf-repair-queue/1.0.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentId", "round", "status", "repairs"],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "documentId": {"type": "string", "minLength": 1},
+    "round": {"type": "integer", "minimum": 1, "maximum": 5},
+    "status": {"enum": ["empty", "actionable", "blocked"]},
+    "repairs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "priority", "severity", "checkId", "safeScope", "action", "status"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "priority": {"type": "integer", "minimum": 0},
+          "severity": {"enum": ["critical", "high", "medium", "low"]},
+          "checkId": {"type": "string", "minLength": 1},
+          "safeScope": {
+            "enum": ["template", "css", "design-token", "font", "image-size", "pagination", "page-margin", "header-footer"]
+          },
+          "action": {"type": "string", "minLength": 1},
+          "status": {"enum": ["pending", "applied", "verified", "blocked"]}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/pdf-render-result/1.0.0",
+  "title": "MediaTranscribeStudio PdfRenderResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "requestId",
+    "jobId",
+    "status",
+    "rendererVersion",
+    "roundsCompleted",
+    "artifacts",
+    "quality"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "passed",
+        "blocked",
+        "failed"
+      ]
+    },
+    "rendererVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "roundsCompleted": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reportDocumentPath",
+        "htmlPath",
+        "pdfPath",
+        "manifestPath",
+        "qualityReportPath",
+        "repairQueuePath",
+        "screenshotsDirectory",
+        "contactSheetPath"
+      ],
+      "properties": {
+        "reportDocumentPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "htmlPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pdfPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifestPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "qualityReportPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repairQueuePath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "screenshotsDirectory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contactSheetPath": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "hardGatesPassed",
+        "score"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "blocked",
+            "failed"
+          ]
+        },
+        "hardGatesPassed": {
+          "type": "boolean"
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_:-]+$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

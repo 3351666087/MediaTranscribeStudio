@@ -38,6 +38,13 @@ dist_accept3/
 dist_accept4/
 packaging/build/
 packaging/dist/
+node_modules/
+target/
+apps/desktop/.cargo-home/
+apps/desktop/.cargo-target/
+apps/desktop/.runtime-tmp/
+apps/desktop/dist/
+pdf-renderer/target/
 
 # Generated inputs / outputs
 input_files/*
@@ -56,3 +63,6 @@ all_results_summary.txt
 
 # Optional local overrides
 config.local.yaml
+
+# Local Codex/design workflow state
+.codex/

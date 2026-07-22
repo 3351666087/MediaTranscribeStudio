@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "1.0.0",
+  "policyVersion": "frontend-design-pack-global-offline-2026-07-22",
+  "contract": "codex-offline-frontend-design-runtime/v1",
+  "networkRequired": false,
+  "deterministic": true,
+  "runtimeOfflineReady": true,
+  "implementationReady": false,
+  "quality": {
+    "minimumScore": 85,
+    "maximumPasses": 5
+  },
+  "paths": {
+    "localPathsOnly": true,
+    "rejectUrls": true,
+    "rejectUncShares": true,
+    "rejectSymlinksAndJunctions": true,
+    "sessionMustBeInsideProjectRoot": true,
+    "sessionMayEqualProjectRoot": false
+  }
+}

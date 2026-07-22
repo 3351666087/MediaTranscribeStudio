@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/schemas/semantic-cleanup-input.schema.json",
+  "title": "SemanticCleanupInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sampleId",
+    "language",
+    "sourceText",
+    "context",
+    "glossary",
+    "riskFlags",
+    "constraints"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "sampleId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "language": {
+      "const": "zh-CN"
+    },
+    "sourceText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "previousText",
+        "nextText"
+      ],
+      "properties": {
+        "previousText": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "nextText": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    },
+    "glossary": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "canonical",
+          "aliases"
+        ],
+        "properties": {
+          "canonical": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "aliases": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            }
+          }
+        }
+      }
+    },
+    "riskFlags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "overlap_candidate",
+          "speaker_assignment_uncertain",
+          "audio_evidence_insufficient"
+        ]
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speakerLocked",
+        "turnBoundaryLocked",
+        "translationForbidden",
+        "summarizationForbidden",
+        "stylePolishingForbidden",
+        "unglossedTermCorrectionForbidden"
+      ],
+      "properties": {
+        "speakerLocked": {
+          "const": true
+        },
+        "turnBoundaryLocked": {
+          "const": true
+        },
+        "translationForbidden": {
+          "const": true
+        },
+        "summarizationForbidden": {
+          "const": true
+        },
+        "stylePolishingForbidden": {
+          "const": true
+        },
+        "unglossedTermCorrectionForbidden": {
+          "const": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/schemas/benchmark-report.schema.json",
+  "title": "LocalLlmBenchmarkReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "harnessVersion",
+    "generatedAt",
+    "privacy",
+    "environment",
+    "sourceEvidence",
+    "dataset",
+    "configuration",
+    "model",
+    "run",
+    "metrics",
+    "failureModes",
+    "recommendation",
+    "sampleResults"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "harnessVersion": {
+      "type": "string"
+    },
+    "generatedAt": {
+      "type": "string"
+    },
+    "privacy": {
+      "type": "object"
+    },
+    "environment": {
+      "type": "object"
+    },
+    "sourceEvidence": {
+      "type": "object"
+    },
+    "dataset": {
+      "type": "object"
+    },
+    "configuration": {
+      "type": "object"
+    },
+    "model": {
+      "type": "object"
+    },
+    "run": {
+      "type": "object"
+    },
+    "metrics": {
+      "type": "object"
+    },
+    "failureModes": {
+      "type": "array"
+    },
+    "recommendation": {
+      "type": "object"
+    },
+    "sampleResults": {
+      "type": "array"
+    }
+  }
+}

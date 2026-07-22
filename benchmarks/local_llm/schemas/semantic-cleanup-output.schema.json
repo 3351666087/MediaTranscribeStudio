@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/schemas/semantic-cleanup-output.schema.json",
+  "title": "SemanticCleanupOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sampleId",
+    "decision",
+    "normalizedText",
+    "reasonCodes",
+    "riskFlags",
+    "needsHumanReview"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "sampleId": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{16}$"
+    },
+    "decision": {
+      "enum": [
+        "unchanged",
+        "normalized",
+        "review_required",
+        "refused"
+      ]
+    },
+    "normalizedText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "reasonCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 8,
+      "items": {
+        "enum": [
+          "punctuation",
+          "sentence_boundary",
+          "filler_removal",
+          "stutter_collapse",
+          "mechanical_repetition_removal",
+          "ordinary_homophone_correction",
+          "glossary_correction"
+        ]
+      }
+    },
+    "riskFlags": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 8,
+      "items": {
+        "enum": [
+          "overlap_possible",
+          "speaker_uncertain",
+          "ambiguous_audio",
+          "unsupported_term",
+          "meaning_change_risk",
+          "evidence_insufficient"
+        ]
+      }
+    },
+    "needsHumanReview": {
+      "type": "boolean"
+    }
+  }
+}

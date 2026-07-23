@@ -361,7 +361,64 @@ report_generator.py
 packaging
 ```
 
-If any protected path is removed before authorization, the checker reports a guardrail violation.
+The manifest records an approved baseline source commit and the exact Git
+mode, type, and object ID for every protected root. The checker verifies all
+of the following before legacy removal is authorized:
+
+- the recorded baseline object identities are the objects stored at the
+  baseline source commit;
+- the baseline source commit is an ancestor of the actual current `HEAD`;
+- every protected root at the actual current `HEAD` still has the approved
+  blob or tree identity;
+- every protected worktree file is read as raw bytes and compared with the
+  approved baseline blob bytes without invoking `git hash-object --path` or
+  any repository-configured clean filter;
+- the guard's only content equivalence rule is LF/CRLF normalization for
+  NUL-free, valid UTF-8 text; binary files require exact byte equality;
+- `filter`, `working-tree-encoding`, `ident`, and other declared
+  content-transforming Git attributes on protected files fail closed rather
+  than participating in comparison;
+- the protected filesystem tree has no missing or extra entries, empty-shell
+  replacement, file/directory type replacement, or executable-mode change;
+- no protected root or descendant is a symbolic link, junction, or other
+  reparse point.
+
+The guard obtains the actual current `HEAD` from Git and requires it to match
+the `head_commit` snapshot supplied by the audit. A caller cannot bypass the
+guard by passing a stale or invented commit. Renaming, deleting, modifying,
+emptying, or replacing a protected path therefore fails closed even when the
+path name itself still exists.
+
+The audit does not treat `git status --porcelain` as a sufficient clean-tree
+proof. Any tracked path carrying `assume-unchanged` or `skip-worktree` fails
+the clean-tree gate. The release manifest must also be a regular tracked file
+inside the repository, have no content-transforming Git attributes, and match
+the raw bytes of its blob at the actual current `HEAD` (with only the same
+explicit UTF-8 LF/CRLF equivalence rule). This prevents index flags from hiding
+an uncommitted approval or gate-policy rewrite.
+
+The manifest bytes are read once for parsing and passed unchanged into the Git
+binding check. The checker compares both those exact decision bytes and the
+current filesystem bytes with the committed manifest blob. Restoring or
+swapping the file between parsing and the later repository inspection cannot
+make a different in-memory approval payload pass the integrity gate.
+
+### Baseline trust boundary
+
+The baseline checks establish **internal repository consistency**, not an
+external trust anchor. The manifest's `sourceCommit` and protected object IDs
+are stored in the same repository as the checker. An actor who can rewrite the
+manifest, its source history, and the checker coherently can create a different
+internally consistent baseline.
+
+The external evidence directory provides storage separation but is not, by
+itself, a signed or independently trusted authorization source. This repository
+currently contains no verified signature, protected CI attestation, transparency
+log entry, or separately administered baseline digest that would make the
+manifest tamper-evident against a repository administrator. Release governance
+must supply and verify such an external anchor before treating the baseline as
+independently authorized. Until then, the checker claims detection of internal
+inconsistency and unauthorized local mutation only.
 
 ### Main replacement authorization
 
@@ -371,7 +428,30 @@ If any protected path is removed before authorization, the checker reports a gua
 2. Legacy removal has explicit approval.
 3. Main replacement has a separate explicit approval.
 
-Main replacement approval cannot precede legacy-removal approval. Until the requirements pass, the protected local and remote `main` refs must remain at the baselines recorded in the manifest.
+`approvedAt` values must be RFC3339 timestamps with an explicit `Z` or numeric
+timezone. Invalid, timezone-free, and future timestamps fail closed. Main
+replacement approval cannot precede legacy-removal approval:
+`mainReplacement.approvedAt` must be greater than or equal to
+`legacyRemoval.approvedAt`; equal timestamps are allowed. Until the
+requirements pass, the protected local and remote `main` refs must remain at
+the baselines recorded in the manifest.
+
+The checker resolves every protected ref directly from Git and verifies that
+the supplied ref snapshot matches the live value before comparing it with the
+approved ref baseline. Legacy-removal authorization and main-replacement
+authorization remain separate decisions; neither approval is inferred from
+the other.
+
+The public `legacyRemovalAllowed` and `mainReplacementAllowed` results are
+**pre-execution permissions**. They are computed only after the relevant HEAD,
+approved-baseline, worktree, protected-ref baseline, ref snapshot, and
+authorization-order checks complete. Approvals participate in the final
+conjunction but never disable any protection check. A valid-looking approval
+can never leave either result `true` when a required integrity check fails or
+after a protected path/ref has already changed.
+The complete evaluator additionally gates both results on repository
+integrity, including ordinary dirty-tree entries, hidden index flags, and the
+decision-byte-bound manifest check.
 
 ### Release eligibility
 
@@ -379,7 +459,10 @@ Main replacement approval cannot precede legacy-removal approval. Until the requ
 
 - every release gate passes;
 - both explicit approvals pass;
-- protected legacy paths and protected refs have no premature mutation;
+- the current `HEAD` is bound to the guard snapshot and descends from the
+  approved legacy baseline;
+- protected legacy Git/worktree identities and protected refs have no
+  premature mutation;
 - approval ordering is valid;
 - the evidence root is external and safe;
 - the working tree is clean.

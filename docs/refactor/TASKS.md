@@ -207,7 +207,7 @@
 - [x] Dynamic-N v7 缓存解析器拒绝旧版本、缺失字段、非有限数、频率/支持冲突和搜索审计冲突；正确缓存键上的畸形条目会重算而不是复用。
 - [x] Dynamic-N v7 聚焦门禁：`91 passed`（两个 Dynamic-N 模块加生产流水线畸形聚类缓存重算测试）。
 - [x] 独立复核 production CAM++/ERes2NetV2/pyannote 生命周期、OOM 和配置迁移切片；相关 Dynamic-N/production 门禁共 `193 passed, 48 subtests passed`，`compileall` 与定向 `git diff --check` 通过。
-- [ ] 独立复核并提交 Ultimate parity 原始字节、Git attributes/filter 和 RFC3339 授权时间顺序加固切片。
+- [x] 独立复核并提交 Ultimate parity 原始字节、Git attributes/filter、RFC3339 授权时间顺序、manifest 决策字节 TOCTOU、隐藏 index flags 与授权合取加固切片；`49 passed`，manifest validation、`py_compile`、定向 `git diff --check` 通过，两轮修复后独立复审结论为“无阻断项”。
 - [ ] 本地通过 TypeScript 多任务 UI 的 lint、typecheck、unit/component 和 production build。
 - [ ] 通过 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
 - [ ] 未知人数真实 `20260723_123047(1).m4a` 完成自动人数、角色分离、人工作证和分域性能验收。

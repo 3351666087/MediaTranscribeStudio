@@ -2,7 +2,7 @@
   "schemaVersion": "1.0.0",
   "auditId": "media-transcribe-studio-ultimate-parity-v1",
   "title": "MediaTranscribeStudio Ultimate Pre-release Parity Gate",
-  "updatedAt": "2026-07-22T00:00:00+08:00",
+  "updatedAt": "2026-07-23T00:00:00+08:00",
   "policy": {
     "defaultFailClosed": true,
     "forbidEvidenceInsideRepository": true,
@@ -88,6 +88,46 @@
       "report_generator.py",
       "packaging"
     ],
+    "protectedLegacyBaseline": {
+      "sourceCommit": "55a2876a07c18a180c3d88e0b246d567115d4419",
+      "entries": {
+        "main.py": {
+          "gitType": "blob",
+          "gitMode": "100755",
+          "gitObjectId": "767fd81339dcc28aa285e5020605e483c66e111e"
+        },
+        "ui_app.py": {
+          "gitType": "blob",
+          "gitMode": "100755",
+          "gitObjectId": "d1689c3fc0b2e05205ffbf7dabc9bbd5d1b530d8"
+        },
+        "mts_ui": {
+          "gitType": "tree",
+          "gitMode": "040000",
+          "gitObjectId": "9512371972075f160e8389875476563800e07480"
+        },
+        "pipeline.py": {
+          "gitType": "blob",
+          "gitMode": "100755",
+          "gitObjectId": "fef59d87b339505d73acfe7a611881268d2812ea"
+        },
+        "output_formatter.py": {
+          "gitType": "blob",
+          "gitMode": "100755",
+          "gitObjectId": "461e2c659a37804a8cb2299a98ad130cef633302"
+        },
+        "report_generator.py": {
+          "gitType": "blob",
+          "gitMode": "100755",
+          "gitObjectId": "2c1251cef3a49d730cf2a9e5ccdc85504cc0e4af"
+        },
+        "packaging": {
+          "gitType": "tree",
+          "gitMode": "040000",
+          "gitObjectId": "d85aecc465f5b5257fa71b434d2808c747a16816"
+        }
+      }
+    },
     "protectedMainRefs": {
       "refs/heads/main": "d42d6526d9a503c9ad6167609e0ae6cf4a77a649",
       "refs/remotes/origin/main": "d42d6526d9a503c9ad6167609e0ae6cf4a77a649"

@@ -10,6 +10,7 @@ import math
 import os
 import re
 import shutil
+import stat as stat_module
 import subprocess
 import sys
 import time
@@ -22,6 +23,18 @@ SCHEMA_VERSION = "1.0.0"
 ALLOWED_GATE_STATES = {"not_started", "in_progress", "blocked", "passed"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+GIT_MODE_RE = re.compile(r"^[0-7]{6}$")
+RFC3339_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+PROTECTED_BLOB_MODES = {"100644", "100755"}
+CONTENT_TRANSFORMING_GIT_ATTRIBUTES = (
+    "filter",
+    "working-tree-encoding",
+    "ident",
+)
+FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 CJK_RE = re.compile(
     r"[\u2e80-\u2eff\u3000-\u303f\u3040-\u30ff"
     r"\u31c0-\u31ef\u3400-\u4dbf\u4e00-\u9fff"
@@ -135,15 +148,21 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def load_json(path: Path) -> dict[str, Any]:
+def load_json_with_bytes(path: Path) -> tuple[dict[str, Any], bytes]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        raw_bytes = path.read_bytes()
+        value = json.loads(raw_bytes.decode("utf-8", errors="strict"))
     except FileNotFoundError as exc:
         raise ManifestError(f"JSON file does not exist: {path}") from exc
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ManifestError(f"Cannot read valid UTF-8 JSON from {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise ManifestError(f"JSON root must be an object: {path}")
+    return value, raw_bytes
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    value, _ = load_json_with_bytes(path)
     return value
 
 
@@ -178,6 +197,29 @@ def _require_string(
         errors.append(f"{context}.{key} must be a non-empty string")
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not RFC3339_TIMESTAMP_RE.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalize_evaluation_time(value: datetime) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return None
+    try:
+        return value.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+
+
 def _validate_authorization(
     errors: list[str], value: Any, context: str, expected_scope: str
 ) -> None:
@@ -192,6 +234,56 @@ def _validate_authorization(
         item = value.get(key)
         if item is not None and (not isinstance(item, str) or not item.strip()):
             errors.append(f"{context}.{key} must be null or a non-empty string")
+    approved_at = value.get("approvedAt")
+    if approved_at is not None and _parse_timestamp(approved_at) is None:
+        errors.append(
+            f"{context}.approvedAt must be an RFC3339 timestamp with an "
+            "explicit timezone"
+        )
+
+
+def _validate_protected_legacy_baseline(
+    errors: list[str],
+    protected_paths: Any,
+    value: Any,
+) -> None:
+    context = "policy.protectedLegacyBaseline"
+    if not isinstance(value, dict):
+        errors.append(f"{context} must be an object")
+        return
+    source_commit = value.get("sourceCommit")
+    if not isinstance(source_commit, str) or not GIT_SHA_RE.fullmatch(source_commit):
+        errors.append(f"{context}.sourceCommit must have a 40-char SHA")
+    entries = value.get("entries")
+    if not isinstance(entries, dict) or not entries:
+        errors.append(f"{context}.entries must be a non-empty object")
+        return
+    if isinstance(protected_paths, list) and set(entries) != set(protected_paths):
+        errors.append(
+            f"{context}.entries must exactly cover policy.protectedLegacyPaths"
+        )
+    for relative, entry in entries.items():
+        entry_context = f"{context}.entries[{relative!r}]"
+        if not _is_safe_relative_path(relative):
+            errors.append(f"{entry_context} uses an unsafe path")
+        if not isinstance(entry, dict):
+            errors.append(f"{entry_context} must be an object")
+            continue
+        git_type = entry.get("gitType")
+        git_mode = entry.get("gitMode")
+        object_id = entry.get("gitObjectId")
+        if git_type not in {"blob", "tree"}:
+            errors.append(f"{entry_context}.gitType must be 'blob' or 'tree'")
+        if not isinstance(git_mode, str) or not GIT_MODE_RE.fullmatch(git_mode):
+            errors.append(f"{entry_context}.gitMode must be a six-digit Git mode")
+        elif git_type == "tree" and git_mode != "040000":
+            errors.append(f"{entry_context}.gitMode must be '040000' for a tree")
+        elif git_type == "blob" and git_mode not in PROTECTED_BLOB_MODES:
+            errors.append(
+                f"{entry_context}.gitMode must be a regular-file mode, never a symlink"
+            )
+        if not isinstance(object_id, str) or not GIT_SHA_RE.fullmatch(object_id):
+            errors.append(f"{entry_context}.gitObjectId must have a 40-char SHA")
 
 
 def validate_manifest(manifest: Mapping[str, Any]) -> list[str]:
@@ -243,6 +335,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> list[str]:
         for value in protected_paths:
             if not _is_safe_relative_path(value):
                 errors.append(f"policy.protectedLegacyPaths contains unsafe path {value!r}")
+    _validate_protected_legacy_baseline(
+        errors,
+        protected_paths,
+        policy.get("protectedLegacyBaseline"),
+    )
 
     protected_refs = policy.get("protectedMainRefs")
     if not isinstance(protected_refs, dict) or not protected_refs:
@@ -258,18 +355,39 @@ def validate_manifest(manifest: Mapping[str, Any]) -> list[str]:
     if not isinstance(authorization, dict):
         errors.append("policy.authorization must be an object")
     else:
+        legacy_authorization = authorization.get("legacyRemoval")
+        main_authorization = authorization.get("mainReplacement")
         _validate_authorization(
             errors,
-            authorization.get("legacyRemoval"),
+            legacy_authorization,
             "policy.authorization.legacyRemoval",
             "legacy-removal",
         )
         _validate_authorization(
             errors,
-            authorization.get("mainReplacement"),
+            main_authorization,
             "policy.authorization.mainReplacement",
             "main-replacement",
         )
+        if isinstance(legacy_authorization, dict) and isinstance(
+            main_authorization, dict
+        ):
+            legacy_approved_at = _parse_timestamp(
+                legacy_authorization.get("approvedAt")
+            )
+            main_approved_at = _parse_timestamp(
+                main_authorization.get("approvedAt")
+            )
+            if (
+                legacy_approved_at is not None
+                and main_approved_at is not None
+                and main_approved_at < legacy_approved_at
+            ):
+                errors.append(
+                    "policy.authorization.mainReplacement.approvedAt must be "
+                    "greater than or equal to "
+                    "policy.authorization.legacyRemoval.approvedAt"
+                )
 
     capabilities = manifest.get("capabilities")
     if not isinstance(capabilities, list) or not capabilities:
@@ -649,11 +767,54 @@ def _run_git(repo_root: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _git_state(repo_root: Path, protected_refs: Iterable[str]) -> dict[str, Any]:
+def _git_index_flagged_paths(repo_root: Path) -> list[dict[str, str]]:
+    completed = subprocess.run(
+        ["git", "ls-files", "-v", "-z"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        raise ManifestError(
+            "Git command failed while checking index flags: "
+            f"{stderr or stdout}"
+        )
+    flagged: list[dict[str, str]] = []
+    for record in completed.stdout.split(b"\0"):
+        if not record:
+            continue
+        if len(record) < 3 or record[1:2] != b" ":
+            raise ManifestError("Cannot parse git ls-files -v output")
+        tag = record[:1].decode("ascii", errors="strict")
+        path = record[2:].decode("utf-8", errors="surrogateescape")
+        if tag.islower():
+            flagged.append({"flag": "assume-unchanged", "path": path})
+        elif tag == "S":
+            flagged.append({"flag": "skip-worktree", "path": path})
+    return flagged
+
+
+def _git_state(
+    repo_root: Path,
+    protected_refs: Iterable[str],
+    manifest_path: Path,
+    manifest_decision_bytes: bytes,
+) -> dict[str, Any]:
     head = _run_git(repo_root, "rev-parse", "HEAD")
     branch = _run_git(repo_root, "branch", "--show-current") or "(detached)"
     status = _run_git(
         repo_root, "status", "--porcelain=v1", "--untracked-files=all"
+    )
+    index_flagged_paths = _git_index_flagged_paths(repo_root)
+    manifest_integrity = _git_bound_file_integrity(
+        repo_root=repo_root,
+        head_commit=head,
+        path=manifest_path,
+        label="release manifest",
+        decision_bytes=manifest_decision_bytes,
     )
     refs: dict[str, str | None] = {}
     for ref_name in protected_refs:
@@ -670,13 +831,510 @@ def _git_state(repo_root: Path, protected_refs: Iterable[str]) -> dict[str, Any]
         refs[ref_name] = (
             completed.stdout.strip() if completed.returncode == 0 else None
         )
+    synthetic_changes = [
+        f"[index-{item['flag']}] {item['path']}" for item in index_flagged_paths
+    ]
+    synthetic_changes.extend(
+        f"[manifest-integrity] {message}"
+        for message in manifest_integrity["violations"]
+    )
     return {
         "headCommit": head,
         "branch": branch,
-        "workingTreeClean": not bool(status),
-        "workingTreeChanges": status.splitlines(),
+        "workingTreeClean": (
+            not bool(status)
+            and not index_flagged_paths
+            and manifest_integrity["passed"]
+        ),
+        "workingTreeChanges": status.splitlines() + synthetic_changes,
+        "indexFlagsClean": not index_flagged_paths,
+        "indexFlaggedPaths": index_flagged_paths,
+        "manifestIntegrity": manifest_integrity,
         "refs": refs,
     }
+
+
+def _git_ref(repo_root: Path, ref_name: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "rev-parse", "--verify", ref_name],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    if completed.returncode == 0:
+        return completed.stdout.strip()
+    if completed.returncode == 128:
+        return None
+    message = completed.stderr.strip() or completed.stdout.strip()
+    raise ManifestError(f"Git command failed: git rev-parse --verify {ref_name}: {message}")
+
+
+def _git_is_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    completed = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+    )
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    message = completed.stderr.strip() or completed.stdout.strip()
+    raise ManifestError(
+        "Git command failed: "
+        f"git merge-base --is-ancestor {ancestor} {descendant}: {message}"
+    )
+
+
+def _git_tree_entries(
+    repo_root: Path,
+    commit: str,
+    relative: str,
+    *,
+    recursive: bool,
+) -> dict[str, dict[str, str]]:
+    normalized = relative.replace("\\", "/")
+    argv = ["git", "ls-tree", "-z", "--full-tree"]
+    if recursive:
+        argv.extend(["-r", "-t"])
+    argv.extend([commit, "--", normalized])
+    completed = subprocess.run(
+        argv,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        raise ManifestError(
+            f"Git command failed: {' '.join(argv)}: {stderr or stdout}"
+        )
+    entries: dict[str, dict[str, str]] = {}
+    for raw_record in completed.stdout.split(b"\0"):
+        if not raw_record:
+            continue
+        try:
+            raw_metadata, raw_path = raw_record.split(b"\t", 1)
+            git_mode, git_type, object_id = raw_metadata.decode("ascii").split()
+            entry_path = raw_path.decode("utf-8", errors="surrogateescape")
+        except (ValueError, UnicodeError) as exc:
+            raise ManifestError(
+                f"Cannot parse git ls-tree output for {normalized!r}"
+            ) from exc
+        entries[entry_path] = {
+            "gitMode": git_mode,
+            "gitType": git_type,
+            "gitObjectId": object_id,
+        }
+    return entries
+
+
+def _git_tree_entry(
+    repo_root: Path,
+    commit: str,
+    relative: str,
+) -> dict[str, str] | None:
+    normalized = relative.replace("\\", "/")
+    return _git_tree_entries(
+        repo_root,
+        commit,
+        normalized,
+        recursive=False,
+    ).get(normalized)
+
+
+def _git_blob_bytes(repo_root: Path, object_id: str) -> bytes:
+    completed = subprocess.run(
+        ["git", "cat-file", "blob", object_id],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        raise ManifestError(
+            f"Git command failed while reading baseline blob {object_id}: "
+            f"{stderr or stdout}"
+        )
+    return completed.stdout
+
+
+def _git_path_attributes(repo_root: Path, relative: str) -> dict[str, str]:
+    normalized = relative.replace("\\", "/")
+    argv = [
+        "git",
+        "check-attr",
+        "-z",
+        "--all",
+        "--",
+        normalized,
+    ]
+    completed = subprocess.run(
+        argv,
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+        raise ManifestError(
+            f"Git command failed while checking attributes for {normalized!r}: "
+            f"{stderr or stdout}"
+        )
+    fields = completed.stdout.split(b"\0")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 3 != 0:
+        raise ManifestError(
+            f"Cannot parse git check-attr output for protected path {normalized!r}"
+        )
+    attributes: dict[str, str] = {}
+    for index in range(0, len(fields), 3):
+        try:
+            resolved_path = fields[index].decode(
+                "utf-8", errors="surrogateescape"
+            )
+            attribute = fields[index + 1].decode("ascii")
+            value = fields[index + 2].decode("utf-8", errors="surrogateescape")
+        except UnicodeError as exc:
+            raise ManifestError(
+                f"Cannot decode git attributes for protected path {normalized!r}"
+            ) from exc
+        if resolved_path != normalized:
+            raise ManifestError(
+                "Git returned attributes for an unexpected protected path: "
+                f"expected {normalized!r}, got {resolved_path!r}"
+            )
+        if attribute in attributes:
+            raise ManifestError(
+                f"Git returned duplicate {attribute!r} attributes for "
+                f"{normalized!r}"
+            )
+        if attribute in CONTENT_TRANSFORMING_GIT_ATTRIBUTES:
+            attributes[attribute] = value
+    return attributes
+
+
+def _content_transform_attribute_violations(
+    repo_root: Path,
+    relative: str,
+) -> list[str]:
+    normalized = relative.replace("\\", "/")
+    attributes = _git_path_attributes(repo_root, normalized)
+    return [
+        "protected legacy path has a content-transforming Git attribute before "
+        f"authorization: {normalized} ({attribute}={value})"
+        for attribute, value in attributes.items()
+    ]
+
+
+def _is_utf8_text_without_nul(value: bytes) -> bool:
+    if b"\0" in value:
+        return False
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _guard_content_equivalent(expected: bytes, actual: bytes) -> bool:
+    if actual == expected:
+        return True
+    if not (
+        _is_utf8_text_without_nul(expected)
+        and _is_utf8_text_without_nul(actual)
+    ):
+        return False
+    return expected.replace(b"\r\n", b"\n") == actual.replace(b"\r\n", b"\n")
+
+
+def _git_bound_file_integrity(
+    *,
+    repo_root: Path,
+    head_commit: str,
+    path: Path,
+    label: str,
+    decision_bytes: bytes | None = None,
+) -> dict[str, Any]:
+    resolved_root = repo_root.resolve()
+    requested_path = path if path.is_absolute() else resolved_root / path
+    absolute_path = Path(os.path.abspath(requested_path))
+    violations: list[str] = []
+    try:
+        relative_path = absolute_path.relative_to(resolved_root)
+    except ValueError:
+        return {
+            "passed": False,
+            "path": str(absolute_path),
+            "gitObjectId": None,
+            "decisionSha256": (
+                hashlib.sha256(decision_bytes).hexdigest()
+                if decision_bytes is not None
+                else None
+            ),
+            "violations": [f"{label} must be a tracked file inside the repository"],
+        }
+    relative = relative_path.as_posix()
+    kind = _filesystem_entry_kind(absolute_path)
+    if kind != "blob":
+        violations.append(
+            f"{label} must be a regular non-reparse file: {relative} (got {kind})"
+        )
+    try:
+        entry = _git_tree_entry(repo_root, head_commit, relative)
+    except ManifestError as exc:
+        entry = None
+        violations.append(str(exc))
+    if entry is None:
+        violations.append(f"{label} is not tracked at current HEAD: {relative}")
+    elif entry["gitType"] != "blob":
+        violations.append(
+            f"{label} is not a Git blob at current HEAD: {relative}"
+        )
+    if kind == "blob":
+        try:
+            attributes = _git_path_attributes(repo_root, relative)
+            violations.extend(
+                f"{label} has a content-transforming Git attribute: "
+                f"{relative} ({attribute}={value})"
+                for attribute, value in attributes.items()
+            )
+            if entry is not None and entry["gitType"] == "blob":
+                expected_bytes = _git_blob_bytes(
+                    repo_root,
+                    entry["gitObjectId"],
+                )
+                actual_bytes = absolute_path.read_bytes()
+                if decision_bytes is not None and not _guard_content_equivalent(
+                    expected_bytes,
+                    decision_bytes,
+                ):
+                    violations.append(
+                        f"{label} decision bytes differ from current HEAD: {relative} "
+                        f"(expected Git blob {entry['gitObjectId']}, decision "
+                        f"SHA-256 {hashlib.sha256(decision_bytes).hexdigest()})"
+                    )
+                if not _guard_content_equivalent(expected_bytes, actual_bytes):
+                    violations.append(
+                        f"{label} raw bytes differ from current HEAD: {relative} "
+                        f"(expected Git blob {entry['gitObjectId']}, raw worktree "
+                        f"SHA-256 {hashlib.sha256(actual_bytes).hexdigest()})"
+                    )
+        except (ManifestError, OSError) as exc:
+            violations.append(f"Cannot verify {label} {relative}: {exc}")
+    return {
+        "passed": not violations,
+        "path": relative,
+        "gitObjectId": entry["gitObjectId"] if entry is not None else None,
+        "decisionSha256": (
+            hashlib.sha256(decision_bytes).hexdigest()
+            if decision_bytes is not None
+            else None
+        ),
+        "violations": violations,
+    }
+
+
+def _filesystem_entry_kind(path: Path) -> str:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        raise ManifestError(f"Cannot inspect protected path {path}: {exc}") from exc
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    junction_check = getattr(path, "is_junction", None)
+    try:
+        is_junction = bool(junction_check()) if junction_check is not None else False
+    except OSError as exc:
+        raise ManifestError(f"Cannot inspect protected path {path}: {exc}") from exc
+    if (
+        stat_module.S_ISLNK(metadata.st_mode)
+        or bool(attributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        or is_junction
+    ):
+        return "reparse"
+    if stat_module.S_ISREG(metadata.st_mode):
+        return "blob"
+    if stat_module.S_ISDIR(metadata.st_mode):
+        return "tree"
+    return "unsupported"
+
+
+def _filesystem_tree_entries(
+    repo_root: Path,
+    relative: str,
+) -> dict[str, str]:
+    normalized = relative.replace("\\", "/")
+    root_path = repo_root / Path(normalized)
+    entries: dict[str, str] = {}
+    pending: list[tuple[str, Path]] = [(normalized, root_path)]
+    while pending:
+        entry_relative, entry_path = pending.pop()
+        kind = _filesystem_entry_kind(entry_path)
+        entries[entry_relative] = kind
+        if kind != "tree":
+            continue
+        try:
+            children = sorted(
+                os.scandir(entry_path),
+                key=lambda item: item.name.encode("utf-8", errors="surrogateescape"),
+                reverse=True,
+            )
+        except OSError as exc:
+            raise ManifestError(
+                f"Cannot enumerate protected directory {entry_path}: {exc}"
+            ) from exc
+        for child in children:
+            child_relative = f"{entry_relative}/{child.name}"
+            pending.append((child_relative, Path(child.path)))
+    return entries
+
+
+def _describe_git_entry(entry: Mapping[str, str] | None) -> str:
+    if entry is None:
+        return "missing"
+    return (
+        f"{entry.get('gitMode', 'unknown')} "
+        f"{entry.get('gitType', 'unknown')} "
+        f"{entry.get('gitObjectId', 'unknown')}"
+    )
+
+
+def _protected_worktree_violations(
+    *,
+    repo_root: Path,
+    source_commit: str,
+    relative: str,
+) -> list[str]:
+    normalized = relative.replace("\\", "/")
+    violations: list[str] = []
+    try:
+        expected_entries = _git_tree_entries(
+            repo_root,
+            source_commit,
+            normalized,
+            recursive=True,
+        )
+        actual_entries = _filesystem_tree_entries(repo_root, normalized)
+    except ManifestError as exc:
+        return [str(exc)]
+    root_kind = actual_entries.get(normalized, "missing")
+    if root_kind == "missing":
+        return [
+            f"protected legacy path was removed before authorization: {normalized}"
+        ]
+    if root_kind == "reparse":
+        return [
+            "protected legacy path uses a symlink or junction before "
+            f"authorization: {normalized}"
+        ]
+    expected_root = expected_entries.get(normalized)
+    if expected_root is None:
+        return [
+            f"approved legacy baseline is missing protected path: {normalized}"
+        ]
+    expected_root_kind = expected_root["gitType"]
+    if root_kind != expected_root_kind:
+        return [
+            "protected legacy path type changed before authorization: "
+            f"{normalized} (expected {expected_root_kind}, got {root_kind})"
+        ]
+
+    expected_paths = set(expected_entries)
+    actual_paths = set(actual_entries)
+    for entry_relative in sorted(expected_paths - actual_paths):
+        violations.append(
+            "protected legacy content was removed before authorization: "
+            f"{entry_relative}"
+        )
+    for entry_relative in sorted(actual_paths - expected_paths):
+        violations.append(
+            "protected legacy path contains an unapproved filesystem entry before "
+            f"authorization: {entry_relative}"
+        )
+    for entry_relative in sorted(expected_paths & actual_paths):
+        expected = expected_entries[entry_relative]
+        actual_kind = actual_entries[entry_relative]
+        if actual_kind == "reparse":
+            violations.append(
+                "protected legacy path uses a symlink or junction before "
+                f"authorization: {entry_relative}"
+            )
+            continue
+        if actual_kind == "unsupported":
+            violations.append(
+                "protected legacy path has an unsupported filesystem type before "
+                f"authorization: {entry_relative}"
+            )
+            continue
+        if actual_kind != expected["gitType"]:
+            violations.append(
+                "protected legacy path type changed before authorization: "
+                f"{entry_relative} (expected {expected['gitType']}, "
+                f"got {actual_kind})"
+            )
+            continue
+        if actual_kind != "blob":
+            continue
+        if expected["gitMode"] not in PROTECTED_BLOB_MODES:
+            violations.append(
+                "approved legacy baseline contains a non-regular blob mode: "
+                f"{entry_relative} ({expected['gitMode']})"
+            )
+            continue
+        if os.name != "nt":
+            executable = bool(os.stat(repo_root / Path(entry_relative)).st_mode & 0o111)
+            expected_executable = expected["gitMode"] == "100755"
+            if executable != expected_executable:
+                violations.append(
+                    "protected legacy executable mode changed before authorization: "
+                    f"{entry_relative}"
+                )
+        try:
+            violations.extend(
+                _content_transform_attribute_violations(
+                    repo_root,
+                    entry_relative,
+                )
+            )
+            expected_bytes = _git_blob_bytes(
+                repo_root,
+                expected["gitObjectId"],
+            )
+            actual_bytes = (repo_root / Path(entry_relative)).read_bytes()
+        except ManifestError as exc:
+            violations.append(str(exc))
+            continue
+        except OSError as exc:
+            violations.append(
+                f"Cannot read protected legacy path {entry_relative}: {exc}"
+            )
+            continue
+        if not _guard_content_equivalent(expected_bytes, actual_bytes):
+            violations.append(
+                "protected legacy content changed before authorization: "
+                f"{entry_relative} (expected Git blob "
+                f"{expected['gitObjectId']}, raw worktree SHA-256 "
+                f"{hashlib.sha256(actual_bytes).hexdigest()})"
+            )
+    return violations
 
 
 def _read_text(path: Path) -> str:
@@ -875,18 +1533,6 @@ def _coerce_tail(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")[-2000:]
     return value[-2000:]
-
-
-def _parse_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc)
 
 
 def _sha256_file(path: Path) -> str:
@@ -1804,6 +2450,9 @@ def _command_check_result(
 
 
 def _authorization_ready(value: Mapping[str, Any], now: datetime) -> tuple[bool, str]:
+    normalized_now = _normalize_evaluation_time(now)
+    if normalized_now is None:
+        return False, "evaluation time must be a timezone-aware datetime"
     if value.get("approved") is not True:
         return False, "approval is false"
     for key in ("approvedBy", "approvedAt", "changeTicket"):
@@ -1811,8 +2460,8 @@ def _authorization_ready(value: Mapping[str, Any], now: datetime) -> tuple[bool,
             return False, f"{key} is missing"
     approved_at = _parse_timestamp(value.get("approvedAt"))
     if approved_at is None:
-        return False, "approvedAt is invalid"
-    if approved_at > now + timedelta(minutes=5):
+        return False, "approvedAt is not a valid timezone-qualified RFC3339 timestamp"
+    if approved_at > normalized_now:
         return False, "approvedAt is in the future"
     return True, "approved"
 
@@ -1826,10 +2475,11 @@ def evaluate_guardrails(
     head_commit: str,
     refs: Mapping[str, str | None],
     now: datetime,
+    repository_integrity_passed: bool = True,
+    repository_integrity_violations: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Evaluate legacy and main protection independently from capability scores."""
 
-    del head_commit  # The current implementation binds evidence, not approvals, to HEAD.
     policy = manifest["policy"]
     authorization = policy["authorization"]
     legacy_auth, legacy_auth_message = _authorization_ready(
@@ -1838,32 +2488,138 @@ def evaluate_guardrails(
     main_auth, main_auth_message = _authorization_ready(
         authorization["mainReplacement"], now
     )
-    legacy_allowed = parity_eligible and legacy_auth
-    main_allowed = release_gates_passed and legacy_auth and main_auth
-
-    legacy_violations: list[str] = []
-    if not legacy_allowed:
-        for relative in policy["protectedLegacyPaths"]:
-            if not _resolve_under(repo_root, relative).exists():
-                legacy_violations.append(
-                    f"protected legacy path was removed before authorization: {relative}"
-                )
-
-    main_violations: list[str] = []
-    if not main_allowed:
-        for ref_name, expected in policy["protectedMainRefs"].items():
-            actual = refs.get(ref_name)
-            if actual != expected:
-                main_violations.append(
-                    f"protected ref {ref_name} changed before authorization: "
-                    f"expected {expected}, got {actual or 'missing'}"
-                )
-
     authorization_order: list[str] = []
+    legacy_approved_at = (
+        _parse_timestamp(authorization["legacyRemoval"].get("approvedAt"))
+        if legacy_auth
+        else None
+    )
+    main_approved_at = (
+        _parse_timestamp(authorization["mainReplacement"].get("approvedAt"))
+        if main_auth
+        else None
+    )
     if main_auth and not legacy_auth:
         authorization_order.append(
             "main replacement cannot be approved before legacy removal approval"
         )
+    elif (
+        legacy_approved_at is not None
+        and main_approved_at is not None
+        and main_approved_at < legacy_approved_at
+    ):
+        authorization_order.append(
+            "main replacement approvedAt must be greater than or equal to "
+            "legacy removal approvedAt"
+        )
+    authorization_order_passed = not authorization_order
+    legacy_provisionally_allowed = (
+        parity_eligible
+        and legacy_auth
+        and repository_integrity_passed
+    )
+    main_provisionally_allowed = (
+        release_gates_passed
+        and legacy_auth
+        and main_auth
+        and authorization_order_passed
+        and repository_integrity_passed
+    )
+
+    head_violations: list[str] = []
+    actual_head: str | None = None
+    baseline = policy["protectedLegacyBaseline"]
+    source_commit = baseline["sourceCommit"]
+    try:
+        actual_head = _run_git(repo_root, "rev-parse", "HEAD")
+    except ManifestError as exc:
+        head_violations.append(str(exc))
+    if actual_head is not None and actual_head != head_commit:
+        head_violations.append(
+            "guardrail HEAD snapshot mismatch: "
+            f"expected current HEAD {actual_head}, got {head_commit}"
+        )
+    if actual_head is not None:
+        try:
+            if not _git_is_ancestor(repo_root, source_commit, actual_head):
+                head_violations.append(
+                    "approved legacy baseline commit is not an ancestor of current "
+                    f"HEAD: baseline {source_commit}, HEAD {actual_head}"
+                )
+        except ManifestError as exc:
+            head_violations.append(str(exc))
+
+    legacy_violations: list[str] = []
+    for relative in policy["protectedLegacyPaths"]:
+        expected_entry = baseline["entries"][relative]
+        try:
+            source_entry = _git_tree_entry(repo_root, source_commit, relative)
+        except ManifestError as exc:
+            legacy_violations.append(str(exc))
+            source_entry = None
+        if source_entry != expected_entry:
+            legacy_violations.append(
+                "approved legacy baseline identity does not match its source commit: "
+                f"{relative} (expected {_describe_git_entry(expected_entry)}, "
+                f"got {_describe_git_entry(source_entry)})"
+            )
+        if actual_head is None:
+            legacy_violations.append(
+                "cannot verify protected legacy identity without a current Git HEAD: "
+                f"{relative}"
+            )
+            continue
+        try:
+            current_entry = _git_tree_entry(repo_root, actual_head, relative)
+        except ManifestError as exc:
+            legacy_violations.append(str(exc))
+            current_entry = None
+        if current_entry != expected_entry:
+            legacy_violations.append(
+                "protected legacy Git identity changed before authorization: "
+                f"{relative} (expected {_describe_git_entry(expected_entry)}, "
+                f"got {_describe_git_entry(current_entry)})"
+            )
+        legacy_violations.extend(
+            _protected_worktree_violations(
+                repo_root=repo_root,
+                source_commit=source_commit,
+                relative=relative,
+            )
+        )
+
+    main_violations: list[str] = []
+    actual_refs: dict[str, str | None] = {}
+    for ref_name, expected in policy["protectedMainRefs"].items():
+        try:
+            actual = _git_ref(repo_root, ref_name)
+        except ManifestError as exc:
+            main_violations.append(str(exc))
+            actual = None
+        actual_refs[ref_name] = actual
+        supplied = refs.get(ref_name)
+        if supplied != actual:
+            main_violations.append(
+                f"guardrail ref snapshot mismatch for {ref_name}: "
+                f"current value is {actual or 'missing'}, "
+                f"supplied value is {supplied or 'missing'}"
+            )
+        if actual != expected:
+            main_violations.append(
+                f"protected ref {ref_name} changed before cutover execution: "
+                f"expected {expected}, got {actual or 'missing'}"
+            )
+
+    legacy_allowed = (
+        legacy_provisionally_allowed
+        and not head_violations
+        and not legacy_violations
+    )
+    main_allowed = (
+        main_provisionally_allowed
+        and legacy_allowed
+        and not main_violations
+    )
 
     return {
         "legacyRemovalAuthorization": {
@@ -1874,17 +2630,29 @@ def evaluate_guardrails(
             "passed": main_auth,
             "message": main_auth_message,
         },
+        "headProtection": {
+            "passed": not head_violations,
+            "evaluatedHead": head_commit,
+            "actualHead": actual_head,
+            "baselineSourceCommit": source_commit,
+            "violations": head_violations,
+        },
         "legacyProtection": {
             "passed": not legacy_violations,
             "violations": legacy_violations,
         },
         "mainProtection": {
             "passed": not main_violations,
+            "actualRefs": actual_refs,
             "violations": main_violations,
         },
         "authorizationOrder": {
             "passed": not authorization_order,
             "violations": authorization_order,
+        },
+        "repositoryIntegrity": {
+            "passed": repository_integrity_passed,
+            "violations": list(repository_integrity_violations),
         },
         "legacyRemovalAllowed": legacy_allowed,
         "mainReplacementAllowed": main_allowed,
@@ -1922,8 +2690,24 @@ def evaluate(
 ) -> dict[str, Any]:
     """Run the complete audit and return a stable machine-readable result."""
 
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    manifest = load_json(manifest_path)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    else:
+        normalized_now = _normalize_evaluation_time(now)
+        if normalized_now is None:
+            error = "evaluation time must be a timezone-aware datetime"
+            return {
+                "schemaVersion": SCHEMA_VERSION,
+                "manifestValid": False,
+                "configurationErrors": [error],
+                "releaseEligible": False,
+                "parityEligible": False,
+                "legacyRemovalAllowed": False,
+                "mainReplacementAllowed": False,
+                "blockingReasons": [error],
+            }
+        now = normalized_now
+    manifest, manifest_decision_bytes = load_json_with_bytes(manifest_path)
     manifest_errors = validate_manifest(manifest)
     if manifest_errors:
         return {
@@ -1939,7 +2723,12 @@ def evaluate(
 
     repo_root = repo_root.resolve()
     try:
-        git = _git_state(repo_root, manifest["policy"]["protectedMainRefs"].keys())
+        git = _git_state(
+            repo_root,
+            manifest["policy"]["protectedMainRefs"].keys(),
+            manifest_path,
+            manifest_decision_bytes,
+        )
     except ManifestError as exc:
         return {
             "schemaVersion": SCHEMA_VERSION,
@@ -2056,13 +2845,17 @@ def evaluate(
         head_commit=git["headCommit"],
         refs=git["refs"],
         now=now,
+        repository_integrity_passed=git["workingTreeClean"],
+        repository_integrity_violations=git["workingTreeChanges"],
     )
     guardrails_passed = all(
         guardrails[key]["passed"]
         for key in (
+            "headProtection",
             "legacyProtection",
             "mainProtection",
             "authorizationOrder",
+            "repositoryIntegrity",
         )
     )
     release_eligible = (
@@ -2081,7 +2874,13 @@ def evaluate(
             blocking_reasons.append(f"{gate['id']} did not pass")
     if not git["workingTreeClean"]:
         blocking_reasons.append("working tree is not clean")
-    for key in ("legacyProtection", "mainProtection", "authorizationOrder"):
+    for key in (
+        "headProtection",
+        "legacyProtection",
+        "mainProtection",
+        "authorizationOrder",
+        "repositoryIntegrity",
+    ):
         blocking_reasons.extend(guardrails[key]["violations"])
     if not guardrails["legacyRemovalAllowed"]:
         blocking_reasons.append("legacy removal is not authorized")
@@ -2102,6 +2901,9 @@ def evaluate(
         "branch": git["branch"],
         "workingTreeClean": git["workingTreeClean"],
         "workingTreeChanges": git["workingTreeChanges"],
+        "indexFlagsClean": git["indexFlagsClean"],
+        "indexFlaggedPaths": git["indexFlaggedPaths"],
+        "manifestIntegrity": git["manifestIntegrity"],
         "evidenceRootConfigured": resolved_evidence is not None,
         "evidenceRootSafe": not evidence_configuration_errors,
         "gateSummary": {

@@ -228,6 +228,10 @@ class ProductionRunnerTests(unittest.TestCase):
             requested_language="auto",
         )
         self.assertTrue(captured["local_files_only"])
+        self.assertEqual(captured["dtype"], "float32")
+        self.assertNotIn("torch_dtype", captured)
+        self.assertTrue(captured["low_cpu_mem_usage"])
+        self.assertEqual(captured["max_inference_batch_size"], 2)
         self.assertEqual(
             [item.text for item in results],
             ["中文窗口1", "中文窗口2"],
@@ -269,6 +273,202 @@ class ProductionRunnerTests(unittest.TestCase):
             "en",
             captured.exception.details["supportedPrimaryLanguageTags"],
         )
+
+    def test_qwen3_windows_balanced_policy_uses_bounded_memory(self) -> None:
+        with (
+            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_cuda_total_memory_bytes",
+                return_value=8 * 1024 * 1024 * 1024,
+            ),
+        ):
+            asr = production_runners._qwen_load_policy(
+                "cuda:0",
+                forced_aligner=False,
+                probe_accelerator=True,
+            )
+            aligner = production_runners._qwen_load_policy(
+                "cuda:0",
+                forced_aligner=True,
+                probe_accelerator=True,
+            )
+
+        self.assertEqual(asr["device_map"], "balanced")
+        self.assertEqual(
+            asr["max_memory"],
+            {0: "2GiB", "cpu": "8GiB"},
+        )
+        self.assertTrue(asr["offload_state_dict"])
+        self.assertEqual(aligner["device_map"], "balanced")
+        self.assertEqual(
+            aligner["max_memory"],
+            {0: "1500MiB", "cpu": "6GiB"},
+        )
+
+    def test_qwen3_cpu_policy_and_fake_factory_avoid_gpu_probe(self) -> None:
+        with (
+            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_cuda_total_memory_bytes",
+            ) as probe,
+        ):
+            cpu = production_runners._qwen_load_policy(
+                "cpu",
+                forced_aligner=False,
+                probe_accelerator=True,
+            )
+            injected = production_runners._qwen_load_policy(
+                "cuda:0",
+                forced_aligner=False,
+                probe_accelerator=False,
+            )
+
+        self.assertEqual(cpu, {"device_map": "cpu"})
+        self.assertEqual(injected, {"device_map": "cuda:0"})
+        probe.assert_not_called()
+
+    def test_qwen3_forced_aligner_receives_safe_canonical_kwargs(self) -> None:
+        captured: dict[str, object] = {}
+
+        def factory(**kwargs):
+            captured.update(kwargs)
+            return FakeQwenModel()
+
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            forced_aligner_path=self.forced_aligner_model,
+            model_factory=factory,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+        adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        aligner = captured["forced_aligner_kwargs"]
+        self.assertIsInstance(aligner, dict)
+        assert isinstance(aligner, dict)
+        self.assertEqual(aligner["device_map"], "cpu")
+        self.assertEqual(aligner["dtype"], "float32")
+        self.assertTrue(aligner["local_files_only"])
+        self.assertTrue(aligner["low_cpu_mem_usage"])
+
+    def test_qwen3_windows_rejects_oversized_shard_without_path_leak(
+        self,
+    ) -> None:
+        shard = self.qwen_model / "model.safetensors"
+        shard.write_bytes(b"xx")
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: FakeQwenModel(),
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        with (
+            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_WINDOWS_SAFE_SHARD_LIMIT_BYTES",
+                1,
+            ),
+            self.assertRaises(WorkerError) as captured,
+        ):
+            adapter.transcribe_batch(
+                self.prepared(),
+                self.prepared().windows,
+                self.context,
+                requested_language="auto",
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "QWEN3_CHECKPOINT_RESHARD_REQUIRED",
+        )
+        serialized = json.dumps(captured.exception.as_payload())
+        self.assertNotIn(str(self.qwen_model), serialized)
+        self.assertFalse(captured.exception.details["modelQualityChanged"])
+
+    def test_qwen3_converts_windows_1455_without_path_leak(self) -> None:
+        private_path = str(self.qwen_model)
+
+        def factory(**kwargs):
+            error = OSError(f"{private_path}: os error 1455")
+            error.winerror = 1455
+            raise error
+
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=factory,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+        with (
+            mock.patch.object(production_runners.os, "name", "nt"),
+            self.assertRaises(WorkerError) as captured,
+        ):
+            adapter.transcribe_batch(
+                self.prepared(),
+                self.prepared().windows,
+                self.context,
+                requested_language="auto",
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "QWEN3_WINDOWS_COMMIT_EXHAUSTED",
+        )
+        serialized = json.dumps(captured.exception.as_payload())
+        self.assertNotIn(private_path, serialized)
+
+    def test_qwen3_serializes_inference_calls(self) -> None:
+        active = 0
+        maximum_active = 0
+        state_lock = threading.Lock()
+
+        class SerialModel:
+            def transcribe(self, *, audio, return_time_stamps, language=None):
+                nonlocal active, maximum_active
+                with state_lock:
+                    active += 1
+                    maximum_active = max(maximum_active, active)
+                time.sleep(0.03)
+                with state_lock:
+                    active -= 1
+                return [
+                    SimpleNamespace(
+                        text=f"window {index}",
+                        language="English",
+                        time_stamps=None,
+                    )
+                    for index in range(len(audio))
+                ]
+
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: SerialModel(),
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        def run(_index: int):
+            return adapter.transcribe_batch(
+                self.prepared(),
+                self.prepared().windows,
+                self.context,
+                requested_language="auto",
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(run, range(3)))
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(maximum_active, 1)
 
     def test_qwen3_runner_normalizes_or_defaults_result_languages(self) -> None:
         result_languages = ("pt_br", None, "not a valid tag")

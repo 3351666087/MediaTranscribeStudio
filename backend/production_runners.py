@@ -7,6 +7,7 @@ lazy so the worker can validate jobs before reserving GPU memory.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import io
 import json
@@ -52,6 +53,12 @@ from .speaker_pipeline import (
 
 VadStageObserver = Callable[[Mapping[str, Any]], None]
 _THIRD_PARTY_STDOUT_LOCK = threading.Lock()
+_WINDOWS_SAFE_SHARD_LIMIT_BYTES = 1024 * 1024 * 1024
+_WINDOWS_FULL_GPU_MINIMUM_BYTES = 14 * 1024 * 1024 * 1024
+_WINDOWS_ASR_GPU_BUDGET = "2GiB"
+_WINDOWS_ASR_CPU_BUDGET = "8GiB"
+_WINDOWS_ALIGNER_GPU_BUDGET = "1500MiB"
+_WINDOWS_ALIGNER_CPU_BUDGET = "6GiB"
 
 
 def _local_model_path(value: str | Path, label: str) -> Path:
@@ -108,6 +115,191 @@ def _resource_snapshot() -> dict[str, float]:
     except (ImportError, RuntimeError):
         pass
     return output
+
+
+def _checkpoint_layout(path: Path) -> dict[str, int]:
+    shards = tuple(
+        item.stat().st_size
+        for item in path.glob("*.safetensors")
+        if item.is_file()
+    )
+    return {
+        "shardCount": len(shards),
+        "largestShardBytes": max(shards, default=0),
+        "totalShardBytes": sum(shards),
+    }
+
+
+def _windows_low_commit_layout_required(path: Path, label: str) -> None:
+    if os.name != "nt":
+        return
+    layout = _checkpoint_layout(path)
+    if layout["largestShardBytes"] <= _WINDOWS_SAFE_SHARD_LIMIT_BYTES:
+        return
+    raise WorkerError(
+        "QWEN3_CHECKPOINT_RESHARD_REQUIRED",
+        (
+            f"{label} contains a safetensors shard that is too large for "
+            "reliable low-commit Windows loading"
+        ),
+        details={
+            **layout,
+            "safeShardLimitBytes": _WINDOWS_SAFE_SHARD_LIMIT_BYTES,
+            "remediation": "STREAM_RESHARD_WITH_TOOLS_RESHARD_SAFETENSORS",
+            "modelQualityChanged": False,
+        },
+    )
+
+
+def _is_windows_pagefile_error(error: BaseException) -> bool:
+    if os.name != "nt":
+        return False
+    if isinstance(error, OSError) and getattr(error, "winerror", None) == 1455:
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "os error 1455",
+            "winerror 1455",
+            "页面文件太小",
+            "paging file is too small",
+        )
+    )
+
+
+def _is_accelerator_out_of_memory(error: BaseException) -> bool:
+    if type(error).__name__ == "OutOfMemoryError":
+        return True
+    message = str(error).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "cuda out of memory",
+            "cuda error: out of memory",
+            "hip out of memory",
+            "mps backend out of memory",
+            "defaultcpuallocator: not enough memory",
+        )
+    )
+
+
+def _cuda_device_index(device_map: str) -> int:
+    normalized = str(device_map).strip().casefold()
+    if normalized.startswith("cuda:"):
+        try:
+            return max(0, int(normalized.split(":", 1)[1]))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _cuda_total_memory_bytes(device_index: int) -> int | None:
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        return int(torch.cuda.get_device_properties(device_index).total_memory)
+    except (ImportError, RuntimeError, ValueError):
+        return None
+
+
+def _qwen_load_policy(
+    device_map: str,
+    *,
+    forced_aligner: bool,
+    probe_accelerator: bool,
+) -> dict[str, Any]:
+    """Return a stable Windows policy without probing injected test factories."""
+
+    normalized = str(device_map).strip().casefold()
+    if os.name != "nt" or normalized in {"cpu", "cpu:0"}:
+        return {"device_map": device_map}
+    if not probe_accelerator:
+        return {"device_map": device_map}
+
+    device_index = _cuda_device_index(device_map)
+    total_memory = _cuda_total_memory_bytes(device_index)
+    explicit_full_gpu = normalized in {
+        "cuda",
+        f"cuda:{device_index}",
+    }
+    if (
+        explicit_full_gpu
+        and total_memory is not None
+        and total_memory >= _WINDOWS_FULL_GPU_MINIMUM_BYTES
+    ):
+        return {"device_map": device_map}
+
+    return {
+        "device_map": "balanced",
+        "max_memory": {
+            device_index: (
+                _WINDOWS_ALIGNER_GPU_BUDGET
+                if forced_aligner
+                else _WINDOWS_ASR_GPU_BUDGET
+            ),
+            "cpu": (
+                _WINDOWS_ALIGNER_CPU_BUDGET
+                if forced_aligner
+                else _WINDOWS_ASR_CPU_BUDGET
+            ),
+        },
+        "offload_state_dict": True,
+    }
+
+
+def _qwen_resource_error(
+    error: BaseException,
+    *,
+    phase: str,
+    requested_device_map: str,
+    max_inference_batch_size: int,
+) -> WorkerError | None:
+    details = {
+        "phase": phase,
+        "requestedDeviceMap": requested_device_map,
+        "maxInferenceBatchSize": max_inference_batch_size,
+        "modelQualityChanged": False,
+    }
+    if _is_windows_pagefile_error(error):
+        return WorkerError(
+            "QWEN3_WINDOWS_COMMIT_EXHAUSTED",
+            (
+                "Windows committed-memory capacity was exhausted while "
+                "loading or running Qwen3-ASR"
+            ),
+            details={
+                **details,
+                "remediation": (
+                    "USE_STREAM_RESHARDED_CHECKPOINT_OR_INCREASE_WINDOWS_PAGEFILE"
+                ),
+            },
+        )
+    if isinstance(error, MemoryError) or _is_accelerator_out_of_memory(error):
+        return WorkerError(
+            "QWEN3_ACCELERATOR_MEMORY_EXHAUSTED",
+            "Qwen3-ASR exceeded the bounded accelerator memory budget",
+            details={
+                **details,
+                "remediation": (
+                    "REDUCE_CONCURRENT_GPU_WORK_OR_USE_BALANCED_DEVICE_MAP"
+                ),
+            },
+        )
+    return None
+
+
+def _release_accelerator_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except (ImportError, RuntimeError):
+        return
 
 
 def _load_audio(path: str | Path) -> tuple[Any, int]:
@@ -650,7 +842,7 @@ class LocalQwen3AsrAdapter:
     """Qwen3-ASR-1.7B runner using explicit local model directories only."""
 
     adapter_id = "Qwen3-ASR-1.7B"
-    version = "1.1.0"
+    version = "1.2.0"
 
     def __init__(
         self,
@@ -659,6 +851,7 @@ class LocalQwen3AsrAdapter:
         forced_aligner_path: str | Path | None = None,
         device_map: str = "cuda:0",
         torch_dtype: str = "bfloat16",
+        max_inference_batch_size: int = 2,
         model_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.model_path = _local_model_path(model_path, "Qwen3-ASR model")
@@ -669,13 +862,29 @@ class LocalQwen3AsrAdapter:
         )
         self.device_map = str(device_map)
         self.torch_dtype = str(torch_dtype)
+        if (
+            isinstance(max_inference_batch_size, bool)
+            or int(max_inference_batch_size) < 1
+        ):
+            raise ValueError("max_inference_batch_size must be positive")
+        self.max_inference_batch_size = int(max_inference_batch_size)
         self._model_factory = model_factory
         self._model_instance: Any = None
         self._load_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
 
     def _model(self) -> Any:
         with self._load_lock:
             if self._model_instance is None:
+                _windows_low_commit_layout_required(
+                    self.model_path,
+                    "Qwen3-ASR model",
+                )
+                if self.forced_aligner_path is not None:
+                    _windows_low_commit_layout_required(
+                        self.forced_aligner_path,
+                        "Qwen3 forced aligner",
+                    )
                 factory = self._model_factory
                 if factory is None:
                     try:
@@ -686,18 +895,50 @@ class LocalQwen3AsrAdapter:
                             "qwen-asr is required for production transcription",
                         ) from exc
                     factory = Qwen3ASRModel.from_pretrained
+                probe_accelerator = self._model_factory is None
+                model_policy = _qwen_load_policy(
+                    self.device_map,
+                    forced_aligner=False,
+                    probe_accelerator=probe_accelerator,
+                )
                 kwargs: dict[str, Any] = {
                     "pretrained_model_name_or_path": str(self.model_path),
-                    "device_map": self.device_map,
-                    "torch_dtype": self.torch_dtype,
+                    **model_policy,
+                    "dtype": self.torch_dtype,
                     "local_files_only": True,
+                    "low_cpu_mem_usage": True,
+                    "max_inference_batch_size": (
+                        self.max_inference_batch_size
+                    ),
                 }
                 if self.forced_aligner_path is not None:
                     kwargs["forced_aligner"] = str(self.forced_aligner_path)
+                    aligner_policy = _qwen_load_policy(
+                        self.device_map,
+                        forced_aligner=True,
+                        probe_accelerator=probe_accelerator,
+                    )
                     kwargs["forced_aligner_kwargs"] = {
-                        "local_files_only": True
+                        **aligner_policy,
+                        "dtype": self.torch_dtype,
+                        "local_files_only": True,
+                        "low_cpu_mem_usage": True,
                     }
-                self._model_instance = factory(**kwargs)
+                try:
+                    self._model_instance = factory(**kwargs)
+                except Exception as exc:
+                    resource_error = _qwen_resource_error(
+                        exc,
+                        phase="model-load",
+                        requested_device_map=self.device_map,
+                        max_inference_batch_size=(
+                            self.max_inference_batch_size
+                        ),
+                    )
+                    if resource_error is None:
+                        raise
+                    _release_accelerator_memory()
+                    raise resource_error from exc
             return self._model_instance
 
     def validate_requested_language(self, requested_language: str) -> str:
@@ -741,28 +982,47 @@ class LocalQwen3AsrAdapter:
                 "PREPARED_AUDIO_MISSING",
                 "Qwen3-ASR requires a persisted normalized audio path",
             )
-        samples, sample_rate, pcm_buffer_id = _shared_pcm_for_prepared(
-            prepared
-        )
-        audio_batch = [
-            (
-                _slice_audio(
-                    samples,
-                    sample_rate,
-                    window.start_ms,
-                    window.end_ms,
-                ),
-                sample_rate,
+        model = self._model()
+        with self._inference_lock:
+            context.raise_if_cancelled()
+            samples, sample_rate, pcm_buffer_id = _shared_pcm_for_prepared(
+                prepared
             )
-            for window in windows
-        ]
-        transcribe_kwargs: dict[str, Any] = {
-            "audio": audio_batch,
-            "return_time_stamps": self.forced_aligner_path is not None,
-        }
-        if qwen_language is not None:
-            transcribe_kwargs["language"] = [qwen_language] * len(audio_batch)
-        results = self._model().transcribe(**transcribe_kwargs)
+            audio_batch = [
+                (
+                    _slice_audio(
+                        samples,
+                        sample_rate,
+                        window.start_ms,
+                        window.end_ms,
+                    ),
+                    sample_rate,
+                )
+                for window in windows
+            ]
+            transcribe_kwargs: dict[str, Any] = {
+                "audio": audio_batch,
+                "return_time_stamps": self.forced_aligner_path is not None,
+            }
+            if qwen_language is not None:
+                transcribe_kwargs["language"] = [qwen_language] * len(
+                    audio_batch
+                )
+            try:
+                results = model.transcribe(**transcribe_kwargs)
+            except Exception as exc:
+                resource_error = _qwen_resource_error(
+                    exc,
+                    phase="inference",
+                    requested_device_map=self.device_map,
+                    max_inference_batch_size=(
+                        self.max_inference_batch_size
+                    ),
+                )
+                if resource_error is None:
+                    raise
+                _release_accelerator_memory()
+                raise resource_error from exc
         context.raise_if_cancelled()
         if (
             not isinstance(results, Sequence)

@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/subtitle-output/1.0.0",
+  "title": "MediaTranscribeStudio Subtitle Output Request",
+  "description": "Source-preserving subtitle output configuration. Runtime validation must additionally reject sourcePath == outputPath.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "mode",
+    "format",
+    "theme",
+    "sourcePath",
+    "outputPath",
+    "sourceProtection",
+    "cuePolicy"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "sidecar",
+        "soft-mux",
+        "burn-in"
+      ]
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "srt",
+        "webvtt",
+        "ass"
+      ]
+    },
+    "theme": {
+      "type": "string",
+      "enum": [
+        "youtube-clean",
+        "youtube-bold",
+        "minimal-glass",
+        "karaoke-highlight",
+        "speaker-color",
+        "documentary",
+        "news-lower-third",
+        "custom"
+      ]
+    },
+    "sourcePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Immutable source media path."
+    },
+    "outputPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A new sidecar or derived-media path; it must not alias sourcePath."
+    },
+    "subtitlePath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Sidecar input used by soft mux or burn-in."
+    },
+    "includeSpeakerLabels": {
+      "type": "boolean",
+      "default": false
+    },
+    "sourceProtection": {
+      "$ref": "#/$defs/sourceProtection"
+    },
+    "cuePolicy": {
+      "$ref": "#/$defs/cuePolicy"
+    },
+    "style": {
+      "$ref": "#/$defs/style"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "enum": [
+              "soft-mux",
+              "burn-in"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "required": [
+          "subtitlePath"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "theme": {
+            "const": "custom"
+          }
+        },
+        "required": [
+          "theme"
+        ]
+      },
+      "then": {
+        "required": [
+          "style"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sourceProtection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preserveSource",
+        "overwriteSource",
+        "copyToNewFile"
+      ],
+      "properties": {
+        "preserveSource": {
+          "const": true
+        },
+        "overwriteSource": {
+          "const": false
+        },
+        "copyToNewFile": {
+          "const": true
+        }
+      }
+    },
+    "cuePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxCharactersPerLine",
+        "maxLines",
+        "maxReadingSpeed",
+        "minCueMs",
+        "maxCueMs",
+        "gapMs",
+        "punctuationPriority"
+      ],
+      "properties": {
+        "maxCharactersPerLine": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 160
+        },
+        "maxLines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6
+        },
+        "maxReadingSpeed": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximum non-whitespace Unicode code points per second."
+        },
+        "minCueMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 30000
+        },
+        "maxCueMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 60000
+        },
+        "gapMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "punctuationPriority": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1
+          }
+        },
+        "speakerLabelTemplate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9A-Fa-f]{6}$"
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "font",
+        "primaryColor",
+        "activeWordColor",
+        "outline",
+        "shadow",
+        "background",
+        "safeArea",
+        "alignment"
+      ],
+      "properties": {
+        "font": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "family",
+            "fallbacks",
+            "size",
+            "weight",
+            "italic"
+          ],
+          "properties": {
+            "family": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "fallbacks": {
+              "type": "array",
+              "maxItems": 12,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              }
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 8,
+              "maximum": 240
+            },
+            "weight": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 900,
+              "multipleOf": 50
+            },
+            "italic": {
+              "type": "boolean"
+            }
+          }
+        },
+        "primaryColor": {
+          "$ref": "#/$defs/color"
+        },
+        "activeWordColor": {
+          "$ref": "#/$defs/color"
+        },
+        "outline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "color",
+            "width"
+          ],
+          "properties": {
+            "color": {
+              "$ref": "#/$defs/color"
+            },
+            "width": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 12
+            }
+          }
+        },
+        "shadow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "depth"
+          ],
+          "properties": {
+            "depth": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 12
+            }
+          }
+        },
+        "background": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "color",
+            "opacity"
+          ],
+          "properties": {
+            "color": {
+              "$ref": "#/$defs/color"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "safeArea": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "horizontal",
+            "vertical"
+          ],
+          "properties": {
+            "horizontal": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "vertical": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            }
+          }
+        },
+        "alignment": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        }
+      }
+    }
+  }
+}

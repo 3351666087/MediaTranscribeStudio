@@ -1,0 +1,452 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/report-style/1.0.0",
+  "title": "MediaTranscribeStudio Report Appearance Configuration",
+  "description": "A fully resolved, offline, presentation-only report style. This contract never authorizes changes to source transcript content.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "preset",
+    "layoutTemplate",
+    "font",
+    "density",
+    "coverStyle",
+    "speakerColorMode",
+    "timestampDetail",
+    "sectionInclusion",
+    "page",
+    "margins",
+    "header",
+    "footer",
+    "logo",
+    "brandAccent",
+    "highContrast",
+    "sourceProtection"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "preset": {
+      "$ref": "#/$defs/preset"
+    },
+    "layoutTemplate": {
+      "$ref": "#/$defs/layoutTemplate"
+    },
+    "font": {
+      "$ref": "#/$defs/font"
+    },
+    "density": {
+      "type": "string",
+      "enum": [
+        "relaxed",
+        "comfortable",
+        "compact"
+      ]
+    },
+    "coverStyle": {
+      "type": "string",
+      "enum": [
+        "immersive",
+        "editorial",
+        "minimal",
+        "none"
+      ]
+    },
+    "speakerColorMode": {
+      "type": "string",
+      "enum": [
+        "distinct",
+        "accent",
+        "monochrome",
+        "accessible"
+      ]
+    },
+    "timestampDetail": {
+      "type": "string",
+      "enum": [
+        "none",
+        "section",
+        "segment",
+        "milliseconds"
+      ]
+    },
+    "sectionInclusion": {
+      "$ref": "#/$defs/sectionInclusion"
+    },
+    "page": {
+      "$ref": "#/$defs/page"
+    },
+    "margins": {
+      "$ref": "#/$defs/margins"
+    },
+    "header": {
+      "$ref": "#/$defs/runningText"
+    },
+    "footer": {
+      "$ref": "#/$defs/runningText"
+    },
+    "logo": {
+      "$ref": "#/$defs/logo"
+    },
+    "brandAccent": {
+      "$ref": "#/$defs/color"
+    },
+    "highContrast": {
+      "type": "boolean"
+    },
+    "sourceProtection": {
+      "$ref": "#/$defs/sourceProtection"
+    }
+  },
+  "$defs": {
+    "preset": {
+      "type": "string",
+      "enum": [
+        "modern-editorial",
+        "conversation-focus",
+        "executive-brief",
+        "compact-review",
+        "accessible-high-contrast",
+        "archive-monochrome",
+        "custom"
+      ]
+    },
+    "layoutTemplate": {
+      "type": "string",
+      "enum": [
+        "modern-editorial",
+        "conversation-focus",
+        "executive-brief",
+        "compact-review",
+        "accessible-large-print",
+        "archive-monochrome"
+      ]
+    },
+    "fontName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001F\\u007F]{1,160}$"
+    },
+    "fontList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/fontName"
+      }
+    },
+    "font": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "fallbacks",
+        "availability",
+        "embedding"
+      ],
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/fontName"
+        },
+        "fallbacks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "latin",
+            "cjk",
+            "rtl"
+          ],
+          "properties": {
+            "latin": {
+              "$ref": "#/$defs/fontList"
+            },
+            "cjk": {
+              "$ref": "#/$defs/fontList"
+            },
+            "rtl": {
+              "$ref": "#/$defs/fontList"
+            }
+          }
+        },
+        "availability": {
+          "const": "declared-not-verified",
+          "description": "The names are renderer preferences only; local availability has not been verified by this configuration."
+        },
+        "embedding": {
+          "const": "not-embedded",
+          "description": "The configuration does not claim that any font is embedded in a generated document."
+        }
+      }
+    },
+    "sectionInclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cover",
+        "tableOfContents",
+        "metadata",
+        "speakerDirectory",
+        "transcript",
+        "translation",
+        "polishNotes",
+        "summary",
+        "qualityAppendix",
+        "provenance"
+      ],
+      "properties": {
+        "cover": {
+          "type": "boolean"
+        },
+        "tableOfContents": {
+          "type": "boolean"
+        },
+        "metadata": {
+          "type": "boolean"
+        },
+        "speakerDirectory": {
+          "type": "boolean"
+        },
+        "transcript": {
+          "type": "boolean"
+        },
+        "translation": {
+          "type": "boolean"
+        },
+        "polishNotes": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "boolean"
+        },
+        "qualityAppendix": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "type": "boolean"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "transcript": {
+              "const": true
+            }
+          }
+        },
+        {
+          "properties": {
+            "translation": {
+              "const": true
+            }
+          }
+        },
+        {
+          "properties": {
+            "polishNotes": {
+              "const": true
+            }
+          }
+        },
+        {
+          "properties": {
+            "summary": {
+              "const": true
+            }
+          }
+        },
+        {
+          "properties": {
+            "qualityAppendix": {
+              "const": true
+            }
+          }
+        },
+        {
+          "properties": {
+            "provenance": {
+              "const": true
+            }
+          }
+        }
+      ]
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "orientation"
+      ],
+      "properties": {
+        "size": {
+          "type": "string",
+          "enum": [
+            "A4",
+            "A5",
+            "Letter",
+            "Legal"
+          ]
+        },
+        "orientation": {
+          "type": "string",
+          "enum": [
+            "portrait",
+            "landscape"
+          ]
+        }
+      }
+    },
+    "margins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "topMm",
+        "rightMm",
+        "bottomMm",
+        "leftMm"
+      ],
+      "properties": {
+        "topMm": {
+          "$ref": "#/$defs/margin"
+        },
+        "rightMm": {
+          "$ref": "#/$defs/margin"
+        },
+        "bottomMm": {
+          "$ref": "#/$defs/margin"
+        },
+        "leftMm": {
+          "$ref": "#/$defs/margin"
+        }
+      }
+    },
+    "margin": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 50
+    },
+    "runningText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "text",
+        "showDocumentTitle",
+        "showPageNumber"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]{0,200}$"
+        },
+        "showDocumentTitle": {
+          "type": "boolean"
+        },
+        "showPageNumber": {
+          "type": "boolean"
+        }
+      }
+    },
+    "logo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "path",
+        "altText",
+        "maxWidthMm"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "path": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/safeLogoPath"
+            }
+          ]
+        },
+        "altText": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]{0,200}$"
+        },
+        "maxWidthMm": {
+          "type": "number",
+          "minimum": 5,
+          "maximum": 80
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/safeLogoPath"
+              },
+              "altText": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F]{1,200}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "safeLogoPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 517,
+      "pattern": "^(?!\\s)(?![\\\\/])(?!.*[\\\\/]{2})(?!\\.{1,2}(?:[\\\\/]|$))(?!.*[\\\\/]\\.{1,2}(?:[\\\\/]|$))(?!.*[. ][\\\\/])(?!.*[. ]$)[^\\u0000-\\u001F\\u007F:%?#]{1,512}\\.(?:[Pp][Nn][Gg]|[Jj][Pp][Ee]?[Gg]|[Ww][Ee][Bb][Pp])$",
+      "description": "A local relative raster-image path. URL schemes, drive paths, UNC paths, root paths, percent escapes, empty segments, and dot traversal are rejected."
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9A-Fa-f]{6}$"
+    },
+    "sourceProtection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preserveOriginalTranscript",
+        "mutatesOriginalTranscript",
+        "presentationOnly"
+      ],
+      "properties": {
+        "preserveOriginalTranscript": {
+          "const": true
+        },
+        "mutatesOriginalTranscript": {
+          "const": false
+        },
+        "presentationOnly": {
+          "const": true
+        }
+      }
+    }
+  }
+}

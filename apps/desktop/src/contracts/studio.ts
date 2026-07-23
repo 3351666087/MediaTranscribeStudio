@@ -1,3 +1,5 @@
+import type { OutputCustomization } from "./output-customization";
+
 export const STUDIO_CONTRACT_VERSION = "1.6.0" as const;
 
 export const PDF_HARD_GATE_IDS = [
@@ -379,6 +381,11 @@ export interface CreateJobRequest {
   summary: boolean;
   outputLocale: string;
   businessPromptVersion: "business-v1";
+  /**
+   * Canonical native output recipe forwarded unchanged through Tauri to the
+   * worker trust boundary after strict TypeScript and Rust validation.
+   */
+  outputCustomization?: OutputCustomization;
 }
 
 export interface CreateJobResult {

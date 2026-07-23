@@ -6,6 +6,7 @@ import {
   getMediaExtensionsForGroup,
   inspectMediaExtension,
   inspectMediaPath,
+  planMediaIntake,
 } from "./media-capabilities";
 
 function sorted(values: readonly string[]): string[] {
@@ -84,7 +85,7 @@ describe("media capability registry", () => {
     expect(h265Inspection.capability.probeRequirement).toBe("required");
   });
 
-  it("fails closed into an explicit future-probe state for unknown or missing extensions", () => {
+  it("routes unknown or missing extensions to content probing instead of rejecting them", () => {
     expect(inspectMediaPath("D:\\Media\\recording")).toEqual({
       status: "probe-required",
       extension: null,
@@ -100,17 +101,47 @@ describe("media capability registry", () => {
       extension: null,
       reason: "missing-extension",
     });
+    expect(inspectMediaPath("D:\\Media.with.dot\\recording")).toEqual({
+      status: "probe-required",
+      extension: null,
+      reason: "missing-extension",
+    });
+    expect(inspectMediaPath("D:\\Media\\recording.")).toEqual({
+      status: "probe-required",
+      extension: null,
+      reason: "missing-extension",
+    });
   });
 
-  it("derives sorted group lists and native picker filters from the registry", () => {
+  it.each([
+    ["recognized", "D:\\Media\\meeting.M4A", "recognized"],
+    ["unknown", "D:\\Media\\meeting.futuremedia", "probe-required"],
+    ["extensionless", "D:\\Media\\meeting", "probe-required"],
+  ] as const)(
+    "admits %s filenames to the same local FFmpeg content-probe route",
+    (_label, path, expectedHintStatus) => {
+      expect(planMediaIntake(path)).toMatchObject({
+        admitted: true,
+        verification: "local-ffmpeg-content-probe",
+        extensionHint: {
+          status: expectedHintStatus,
+        },
+      });
+    },
+  );
+
+  it("derives sorted extension-hint groups without turning them into an allowlist", () => {
     const filters = createMediaPickerFilters();
     expect(filters.map(({ name }) => name)).toEqual([
-      "Known media",
-      "Audio",
-      "Video streams",
-      "Media containers",
+      "Common media filename hints",
+      "Audio filename hints",
+      "Video filename hints",
+      "Container filename hints",
     ]);
     expect(filters[0].extensions).toEqual(KNOWN_MEDIA_EXTENSIONS);
+    expect(planMediaIntake("D:\\Media\\not-in-the-hints.custom").admitted).toBe(
+      true,
+    );
 
     MEDIA_CAPABILITY_GROUPS.forEach((group, index) => {
       const groupExtensions = getMediaExtensionsForGroup(group);

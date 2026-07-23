@@ -1,4 +1,5 @@
 import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
 import { installMatchMediaMock } from "./match-media";
 
 window.requestAnimationFrame = (callback) =>
@@ -18,4 +19,8 @@ beforeEach(() => {
   delete document.documentElement.dataset.themePreference;
   document.documentElement.style.colorScheme = "";
   document.title = "";
+});
+
+afterEach(() => {
+  cleanup();
 });

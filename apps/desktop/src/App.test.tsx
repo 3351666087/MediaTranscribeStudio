@@ -166,11 +166,19 @@ describe("MediaTranscribe Studio desktop scaffold", () => {
     expect(companionLayer).toHaveAttribute("inert");
     expect(companionLayer).toHaveAttribute("aria-hidden", "true");
     expect(dialog).toHaveAccessibleDescription(
-      "Register local paths only. Media is not uploaded and remote models are never contacted.",
+      "Register one or more local paths only. Media is not uploaded and remote models are never contacted.",
+    );
+    await user.click(
+      within(dialog).getByRole("tab", { name: /^Speakers\b/u }),
     );
     expect(
-      within(dialog).getAllByRole("textbox", { name: /Initial name for speaker-\d+/ }),
+      within(dialog).getAllByRole("textbox", {
+        name: /Initial name for speaker-\d+/u,
+      }),
     ).toHaveLength(8);
+    await user.click(
+      within(dialog).getByRole("tab", { name: /^Output\b/u }),
+    );
     expect(within(dialog).getByText("Offline guarantee")).toBeInTheDocument();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "Create transcription job" })).not.toBeInTheDocument();

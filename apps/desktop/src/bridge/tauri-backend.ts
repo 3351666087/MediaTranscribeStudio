@@ -42,7 +42,11 @@ export class TauriDesktopBackend implements DesktopBackend {
 
   async createJob(request: CreateJobRequest): Promise<CreateJobResult> {
     assertCreateJobRequest(request);
-    return parseCreateJobResult(await this.call("create_job", { request }));
+    return parseCreateJobResult(
+      await this.call("create_job", {
+        request,
+      }),
+    );
   }
 
   async cancelJob(jobId: string): Promise<void> {

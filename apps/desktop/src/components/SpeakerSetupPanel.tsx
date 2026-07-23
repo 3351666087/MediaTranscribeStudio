@@ -124,6 +124,7 @@ function SpeakerSetupPanelEditor({
   const [splitEvidence, setSplitEvidence] = useState("");
   const [splitConfidence, setSplitConfidence] = useState("");
   const [governanceDrafts, setGovernanceDrafts] = useState<GovernanceDraft[]>([]);
+  const [governanceOpen, setGovernanceOpen] = useState(false);
 
   const speakerMetadata = useMemo(() => {
     const metadata = new Map<
@@ -615,20 +616,41 @@ function SpeakerSetupPanelEditor({
       ) : null}
 
       <section className="governance-panel" aria-labelledby="governance-panel-title">
-        <div className="governance-panel__header">
-          <div>
-            <span className="panel__eyebrow">
-              {text("speakerSetup.governance.eyebrow")}
+        <button
+          className="governance-panel__toggle"
+          type="button"
+          aria-expanded={governanceOpen}
+          aria-controls="governance-panel-content"
+          onClick={() => setGovernanceOpen((current) => !current)}
+        >
+          <span className="governance-panel__header">
+            <span>
+              <span className="panel__eyebrow">
+                {text("speakerSetup.governance.eyebrow")}
+              </span>
+              <span id="governance-panel-title" className="governance-panel__title">
+                {text("speakerSetup.governance.title")}
+              </span>
             </span>
-            <h3 id="governance-panel-title">
-              {text("speakerSetup.governance.title")}
-            </h3>
-          </div>
-          <strong>{text("speakerSetup.governance.draftOnly")}</strong>
-        </div>
-        <p>{text("speakerSetup.governance.description")}</p>
+            <strong>{text("speakerSetup.governance.draftOnly")}</strong>
+          </span>
+          <span
+            className={
+              governanceOpen
+                ? "governance-panel__chevron governance-panel__chevron--open"
+                : "governance-panel__chevron"
+            }
+            aria-hidden="true"
+          >
+            <Icon name="chevron-down" size={17} />
+          </span>
+        </button>
 
-        <div className="governance-panel__forms">
+        {governanceOpen ? (
+          <div id="governance-panel-content" className="governance-panel__content">
+            <p>{text("speakerSetup.governance.description")}</p>
+
+            <div className="governance-panel__forms">
           <fieldset className="governance-form">
             <legend>{text("speakerSetup.merge.legend")}</legend>
             <div className="governance-form__pair">
@@ -838,40 +860,42 @@ function SpeakerSetupPanelEditor({
               {text("speakerSetup.split.create")}
             </button>
           </fieldset>
-        </div>
+            </div>
 
-        {governanceDrafts.length > 0 ? (
-          <ol
-            className="governance-drafts"
-            aria-label={text("speakerSetup.governance.draftsAria")}
-          >
-            {governanceDrafts.map((draft) => (
-              <li key={draft.id}>
-                <span>
-                  {text("speakerSetup.governance.draftBadge", {
-                    kind:
-                      draft.kind === "merge"
-                        ? text("speakerSetup.governance.kindMerge")
-                        : text("speakerSetup.governance.kindSplit"),
-                    state: text("speakerSetup.governance.draftOnly"),
-                  })}
-                </span>
-                <strong>{draft.title}</strong>
-                <p>
-                  {text("speakerSetup.governance.draftReason", {
-                    detail: draft.detail,
-                    reason: draft.reason,
-                  })}
-                </p>
-                <small>
-                  {text("speakerSetup.governance.draftEvidence", {
-                    evidence: draft.evidence,
-                    confidence: (draft.confidence * 100).toFixed(0),
-                  })}
-                </small>
-              </li>
-            ))}
-          </ol>
+            {governanceDrafts.length > 0 ? (
+              <ol
+                className="governance-drafts"
+                aria-label={text("speakerSetup.governance.draftsAria")}
+              >
+                {governanceDrafts.map((draft) => (
+                  <li key={draft.id}>
+                    <span>
+                      {text("speakerSetup.governance.draftBadge", {
+                        kind:
+                          draft.kind === "merge"
+                            ? text("speakerSetup.governance.kindMerge")
+                            : text("speakerSetup.governance.kindSplit"),
+                        state: text("speakerSetup.governance.draftOnly"),
+                      })}
+                    </span>
+                    <strong>{draft.title}</strong>
+                    <p>
+                      {text("speakerSetup.governance.draftReason", {
+                        detail: draft.detail,
+                        reason: draft.reason,
+                      })}
+                    </p>
+                    <small>
+                      {text("speakerSetup.governance.draftEvidence", {
+                        evidence: draft.evidence,
+                        confidence: (draft.confidence * 100).toFixed(0),
+                      })}
+                    </small>
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+          </div>
         ) : null}
       </section>
 

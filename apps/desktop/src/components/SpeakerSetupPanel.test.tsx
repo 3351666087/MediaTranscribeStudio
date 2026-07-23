@@ -165,6 +165,15 @@ function getMountedSpeakerNameInputs(): HTMLInputElement[] {
   );
 }
 
+function openGovernancePanel(): void {
+  const toggle = screen.getByRole("button", {
+    name: /Speaker-governance audit drafts/u,
+  });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+}
+
 describe("SpeakerSetupPanel scalable Dynamic-N management", () => {
   it("ships complete speaker-workspace copy for all nine locales", () => {
     const englishKeys = Object.keys(speakerSetupCatalogs.en).sort();
@@ -405,6 +414,7 @@ describe("SpeakerSetupPanel scalable Dynamic-N management", () => {
       />,
     );
 
+    openGovernancePanel();
     const mergeForm = screen.getByRole("group", { name: "Merge draft" });
     expect(
       within(mergeForm).getByRole("combobox", {

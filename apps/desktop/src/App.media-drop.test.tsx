@@ -7,10 +7,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import {
-  ControlledMediaDropAdapter,
-  MediaDropError,
-} from "./bridge/media-drop";
+import { ControlledMediaDropAdapter } from "./bridge/media-drop";
 
 const OUTPUT_BY_SOURCE: Readonly<Record<string, string>> = {
   "D:\\Media\\one.mov": "D:\\Media\\one-MediaTranscribeStudio",
@@ -21,10 +18,9 @@ const OUTPUT_BY_SOURCE: Readonly<Record<string, string>> = {
 function createAdapter(): ControlledMediaDropAdapter {
   return new ControlledMediaDropAdapter(async (path) => {
     await Promise.resolve();
-    if (path.endsWith(".exe")) {
-      throw new MediaDropError(
-        "unsupportedExtension",
-        "Unsupported media extension.",
+    if (path.endsWith("not-media.bin")) {
+      throw new Error(
+        "Local FFmpeg found no decodable audio or video stream.",
       );
     }
     return {
@@ -154,7 +150,7 @@ describe("Tauri desktop media-drop integration", () => {
     );
   });
 
-  it("retains supported files when a sibling path fails and reports the failure", async () => {
+  it("retains valid candidates when a sibling content probe fails and reports the failure", async () => {
     const adapter = createAdapter();
 
     render(<App mediaDropAdapter={adapter} />);
@@ -166,7 +162,7 @@ describe("Tauri desktop media-drop integration", () => {
 
     const dialog = await openDropDialog(adapter, [
       "D:\\Media\\one.mov",
-      "D:\\Media\\tool.exe",
+      "D:\\Media\\not-media.bin",
       "D:\\Media\\two.wav",
     ]);
 
@@ -186,7 +182,7 @@ describe("Tauri desktop media-drop integration", () => {
       "Media drop rejected",
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "That file type is not supported.",
+      "Local FFmpeg found no decodable audio or video stream.",
     );
   });
 });

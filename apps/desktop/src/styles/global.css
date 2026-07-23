@@ -8846,6 +8846,26 @@ body::after {
     rgba(255, 255, 255, 0.58);
 }
 
+.governance-panel__toggle {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.governance-panel__toggle:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--violet-500) 42%, transparent);
+  outline-offset: 7px;
+  border-radius: 10px;
+}
+
 .governance-panel__header {
   display: flex;
   align-items: center;
@@ -8853,15 +8873,57 @@ body::after {
   gap: 12px;
 }
 
-.governance-panel__header h3 {
+.governance-panel__title {
+  display: block;
+  margin-top: 2px;
   color: var(--ink-900);
   font-size: 15px;
+  font-weight: 780;
+  line-height: 1.25;
 }
 
-.governance-panel > p {
+.governance-panel__chevron {
+  display: inline-grid;
+  place-items: center;
+  color: var(--violet-700);
+  transition:
+    transform 340ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 180ms ease;
+}
+
+.governance-panel__chevron--open {
+  transform: rotate(180deg);
+}
+
+.governance-panel__content {
+  animation: governance-panel-reveal 380ms cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top center;
+}
+
+.governance-panel__content > p {
   margin-top: 8px;
   color: var(--ink-500);
   font-size: 9px;
+}
+
+@keyframes governance-panel-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scaleY(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .governance-panel__chevron,
+  .governance-panel__content {
+    animation: none;
+    transition: none;
+  }
 }
 
 .governance-panel__forms {
@@ -9293,5 +9355,428 @@ body:has(.scene-backdrop)::after {
 
   .progress-ring__label {
     color: CanvasText;
+  }
+}
+
+/*
+ * Task Creator rooms — a compact, native-first workflow based on the
+ * Design Pack's Emil Kowalski motion and Apple interface guidance.
+ * Only the active room renders, while header, step rail, content viewport,
+ * and footer remain spatially stable.
+ */
+.task-dialog {
+  display: grid;
+  width: min(1040px, calc(100vw - 32px));
+  height: min(92vh, 900px);
+  max-height: 900px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+  border-radius: 30px 30px 30px 12px;
+  background:
+    radial-gradient(
+      circle at 4% 2%,
+      color-mix(in srgb, var(--violet-100) 72%, transparent),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 96% 100%,
+      color-mix(in srgb, var(--rose-100) 58%, transparent),
+      transparent 34%
+    ),
+    color-mix(in srgb, var(--surface-strong) 91%, transparent);
+  box-shadow:
+    0 34px 90px color-mix(in srgb, var(--ink-950) 24%, transparent),
+    inset 0 1px 0 var(--glass-highlight);
+}
+
+.task-dialog__header {
+  position: relative;
+  top: auto;
+  padding: 20px 24px 14px;
+  border-bottom: 0;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.task-dialog__header p {
+  max-width: 720px;
+}
+
+.task-steps {
+  position: relative;
+  z-index: 2;
+  min-width: 0;
+  padding: 0 20px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+}
+
+.task-steps__rail {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--glass-border) 84%, transparent);
+  border-radius: 20px 20px 20px 8px;
+  background: color-mix(in srgb, var(--surface-glass) 72%, transparent);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 12px 28px color-mix(in srgb, var(--violet-700) 7%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+  backdrop-filter: blur(18px) saturate(1.1);
+}
+
+.task-step-tab {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 54px;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 15px 15px 15px 6px;
+  color: var(--ink-500);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transform-origin: 50% 100%;
+  transition:
+    color 140ms var(--mts-ease-enter),
+    border-color 140ms var(--mts-ease-enter),
+    background-color 160ms var(--mts-ease-enter),
+    box-shadow 180ms var(--mts-ease-enter),
+    transform 140ms var(--mts-ease-enter);
+}
+
+.task-step-tab::after {
+  position: absolute;
+  right: -18px;
+  bottom: -24px;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--rose-100) 68%, transparent);
+  content: "";
+  opacity: 0;
+  transform: scale(0.6);
+  transition:
+    opacity 160ms var(--mts-ease-enter),
+    transform 200ms var(--mts-ease-enter);
+}
+
+.task-step-tab[data-state="current"] {
+  border-color: color-mix(in srgb, var(--violet-600) 24%, var(--glass-border));
+  color: var(--violet-700);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--violet-100) 82%, var(--surface-control)),
+      color-mix(in srgb, var(--rose-100) 62%, var(--surface-control))
+    );
+  box-shadow:
+    0 9px 20px color-mix(in srgb, var(--violet-700) 13%, transparent),
+    inset 0 1px 0 var(--glass-highlight);
+  transform: translateY(-1px);
+}
+
+.task-step-tab[data-state="current"]::after {
+  opacity: 0.74;
+  transform: scale(1);
+}
+
+.task-step-tab[data-state="complete"]:not([data-state="current"]) {
+  color: var(--mint-700);
+}
+
+.task-step-tab__number {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 10px 10px 10px 4px;
+  background: color-mix(in srgb, var(--surface-control) 78%, transparent);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  font-weight: 820;
+}
+
+.task-step-tab__copy {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.task-step-tab__copy strong,
+.task-step-tab__copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-step-tab__copy strong {
+  color: inherit;
+  font-size: 10px;
+  font-weight: 790;
+}
+
+.task-step-tab__copy small {
+  color: var(--ink-400);
+  font-size: 8px;
+}
+
+.task-step-tab:focus-visible {
+  outline: 3px solid var(--violet-700);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--paper-0);
+}
+
+.task-form {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 0;
+  padding: 0;
+}
+
+.task-form__controls {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.task-form__viewport {
+  min-height: 0;
+  height: 100%;
+  padding: 20px 24px 24px;
+  overflow: auto;
+  outline: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.task-form__viewport:focus-visible {
+  box-shadow: inset 0 0 0 3px
+    color-mix(in srgb, var(--violet-600) 48%, transparent);
+}
+
+.task-step-panel {
+  width: 100%;
+  min-width: 0;
+  animation: task-step-room-enter 190ms var(--mts-ease-enter) both;
+  transform-origin: 16% 0;
+}
+
+.task-step-panel--strategy {
+  max-width: 760px;
+  margin-inline: auto;
+}
+
+.task-step-panel--output {
+  display: grid;
+  gap: 18px;
+}
+
+.task-step-panel > .form-section {
+  gap: 18px;
+}
+
+.task-dialog__actions {
+  min-height: 72px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 24px 15px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
+  box-shadow: 0 -16px 32px color-mix(in srgb, var(--ink-950) 5%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(1.12);
+  backdrop-filter: blur(22px) saturate(1.12);
+}
+
+.task-dialog__actions-primary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.task-dialog__actions-primary .button--primary {
+  min-width: 132px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .task-step-tab:hover {
+    color: var(--violet-700);
+    background: color-mix(in srgb, var(--violet-100) 46%, transparent);
+    transform: translateY(-1px);
+  }
+
+  .task-step-tab:active {
+    transform: translateY(0) scale(0.985);
+    transition-duration: 80ms;
+  }
+}
+
+@keyframes task-step-room-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(10px, 4px, 0) scale(0.994);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@media (max-width: 760px) {
+  .task-dialog {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+    max-height: none;
+    border-radius: 24px 24px 24px 9px;
+  }
+
+  .task-dialog__header {
+    padding: 17px 17px 11px;
+  }
+
+  .task-dialog__header p {
+    display: none;
+  }
+
+  .task-steps {
+    padding: 0 12px 10px;
+    overflow: hidden;
+  }
+
+  .task-steps__rail {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    scrollbar-width: none;
+  }
+
+  .task-steps__rail::-webkit-scrollbar {
+    display: none;
+  }
+
+  .task-step-tab {
+    min-width: 112px;
+    flex: 1 0 112px;
+    scroll-snap-align: center;
+  }
+
+  .task-form__viewport {
+    padding: 17px 16px 20px;
+  }
+
+  .task-dialog__actions {
+    min-height: 68px;
+    padding: 11px 16px 13px;
+  }
+}
+
+@media (max-width: 520px) {
+  .task-step-tab {
+    min-width: 98px;
+    min-height: 46px;
+    flex-basis: 98px;
+    grid-template-columns: 24px minmax(0, 1fr);
+    padding: 6px 7px;
+  }
+
+  .task-step-tab__number {
+    width: 24px;
+    height: 24px;
+  }
+
+  .task-step-tab__copy small {
+    display: none;
+  }
+
+  .task-dialog__actions {
+    align-items: stretch;
+    flex-direction: row;
+    gap: 8px;
+  }
+
+  .task-dialog__actions > .button {
+    width: auto;
+    flex: 0 0 auto;
+  }
+
+  .task-dialog__actions-primary {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .task-dialog__actions-primary .button {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-step-tab,
+  .task-step-tab::after,
+  .task-step-panel {
+    transform: none !important;
+  }
+
+  .task-step-panel {
+    animation: emil-reduced-fade 140ms linear both !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .task-dialog,
+  .task-steps__rail,
+  .task-dialog__actions {
+    background: var(--surface-strong);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .task-dialog,
+  .task-steps__rail,
+  .task-step-tab,
+  .task-step-tab__number,
+  .task-dialog__actions {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    forced-color-adjust: auto;
+  }
+
+  .task-step-tab::after {
+    display: none;
+  }
+
+  .task-step-tab[aria-selected="true"] {
+    color: HighlightText;
+    background: Highlight;
+  }
+
+  .task-step-tab:focus-visible,
+  .task-form__viewport:focus-visible {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+    box-shadow: none;
   }
 }

@@ -4,16 +4,25 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type SyntheticEvent,
 } from "react";
 import {
   pathsAreDistinct,
   type MediaSelection,
 } from "../bridge/media-drop";
+import { planMediaIntake } from "../bridge/media-capabilities";
 import {
   selectNativeMediaFiles,
   selectNativeOutputDirectory,
 } from "../bridge/native-path-picker";
+import {
+  DEFAULT_OUTPUT_CUSTOMIZATION,
+  cloneOutputCustomization,
+  normalizeOutputCustomization,
+  type OutputCustomization,
+  type OutputCustomizationQuality,
+} from "../contracts/output-customization";
 import type {
   CreateJobRequest,
   CreateJobResult,
@@ -23,7 +32,6 @@ import type {
   SpeakerProfile,
   SystemStatus,
 } from "../contracts/studio";
-import { isPracticalLanguageTag } from "../contracts/runtime-validation";
 import {
   mediaDropErrorMessageKey,
   useI18n,
@@ -31,6 +39,7 @@ import {
   type MessageParams,
 } from "../i18n";
 import { Icon } from "./Icon";
+import { OutputCustomizationPanel } from "./OutputCustomizationPanel";
 import { SpeakerDetectionSummary } from "./SpeakerDetectionSummary";
 
 export interface InitialMediaSelection extends MediaSelection {
@@ -88,6 +97,7 @@ interface TaskCreatorProps {
   strategies: ModelStrategy[];
   selectedStrategyId: ModelStrategyId;
   backendMode: SystemStatus["backendMode"];
+  outputQuality?: OutputCustomizationQuality;
   busy: boolean;
   onClose: () => void;
   onCreate: (request: CreateJobRequest) => Promise<unknown>;
@@ -102,6 +112,36 @@ const DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434";
 const DEFAULT_SOURCE_LANGUAGE = "auto";
 const DEFAULT_OUTPUT_LOCALE = "en-US";
 const MAX_MEDIA_QUEUE_ITEMS = 32;
+const TASK_CREATOR_STEPS = [
+  "media",
+  "speakers",
+  "language",
+  "strategy",
+  "output",
+] as const;
+type TaskCreatorStep = (typeof TASK_CREATOR_STEPS)[number];
+const TASK_CREATOR_STEP_COPY = {
+  media: {
+    label: "creator.steps.media.label",
+    description: "creator.steps.media.description",
+  },
+  speakers: {
+    label: "creator.steps.speakers.label",
+    description: "creator.steps.speakers.description",
+  },
+  language: {
+    label: "creator.steps.language.label",
+    description: "creator.steps.language.description",
+  },
+  strategy: {
+    label: "creator.steps.strategy.label",
+    description: "creator.steps.strategy.description",
+  },
+  output: {
+    label: "creator.steps.output.label",
+    description: "creator.steps.output.description",
+  },
+} as const;
 type TaskCreatorMessageKey = Extract<MessageKey, `creator.${string}`>;
 const LANGUAGE_PRESETS = [
   ["auto", "creator.language.auto"],
@@ -124,27 +164,11 @@ const OUTPUT_LOCALE_PRESETS = LANGUAGE_PRESETS.filter(
   ([tag]) => tag !== "auto",
 );
 const TRANSLATION_TARGET_PRESETS = OUTPUT_LOCALE_PRESETS;
-function isConcreteLanguageTag(value: string): boolean {
-  return isPracticalLanguageTag(value);
-}
-
-function parseLanguageTags(value: string): string[] {
-  return value
-    .split(/[,;\n]/u)
-    .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0);
-}
-
-function uniqueLanguageTags(tags: readonly string[]): string[] {
-  const seen = new Set<string>();
-  return tags.filter((tag) => {
-    const normalized = tag.toLocaleLowerCase("en-US");
-    if (seen.has(normalized)) {
-      return false;
-    }
-    seen.add(normalized);
-    return true;
-  });
+function isListedLanguage(
+  value: string,
+  presets: ReadonlyArray<readonly [string, TaskCreatorMessageKey]>,
+): boolean {
+  return presets.some(([tag]) => tag === value);
 }
 
 function materializeLabels(
@@ -191,7 +215,7 @@ function queueItemFromSelection(
     outputEdited: false,
     mediaError,
     resolving: false,
-    status: "pending",
+    status: mediaError === null ? "pending" : "failed",
     submitError: null,
   };
 }
@@ -204,6 +228,32 @@ function comparableLocalPath(path: string): string {
     .toLocaleLowerCase("en-US");
 }
 
+function deduplicateLocalPaths(paths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return paths.filter((path) => {
+    const comparable = comparableLocalPath(path);
+    if (seen.has(comparable)) {
+      return false;
+    }
+    seen.add(comparable);
+    return true;
+  });
+}
+
+function deduplicateMediaSelections(
+  selections: readonly MediaSelection[],
+): MediaSelection[] {
+  const seen = new Set<string>();
+  return selections.filter((selection) => {
+    const comparable = comparableLocalPath(selection.sourcePath);
+    if (seen.has(comparable)) {
+      return false;
+    }
+    seen.add(comparable);
+    return true;
+  });
+}
+
 export function TaskCreator({
   open,
   initialMediaBatch,
@@ -211,12 +261,13 @@ export function TaskCreator({
   resolveMediaPath,
   selectMediaFiles,
   selectMediaFile,
-  selectOutputDirectory = selectNativeOutputDirectory,
+  selectOutputDirectory,
   speakers,
   initialSpeakerPolicy,
   strategies,
   selectedStrategyId,
   backendMode,
+  outputQuality,
   busy,
   onClose,
   onCreate,
@@ -231,10 +282,12 @@ export function TaskCreator({
     taskT("creator.speaker.defaultName", { number });
   const languageLabel = (tag: string): string => {
     const preset = LANGUAGE_PRESETS.find(([presetTag]) => presetTag === tag);
-    return preset ? taskT(preset[1]) : tag;
+    return preset ? taskT(preset[1]) : "";
   };
   const titleInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const stepPanelRef = useRef<HTMLDivElement>(null);
+  const stepButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const busyRef = useRef(busy);
   const previousOpenRef = useRef(false);
@@ -249,6 +302,8 @@ export function TaskCreator({
   const [pathPickerError, setPathPickerError] = useState<string | null>(null);
   const [activePathPicker, setActivePathPicker] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [activeStep, setActiveStep] =
+    useState<TaskCreatorStep>("media");
   const [strategyId, setStrategyId] = useState<ModelStrategyId>(selectedStrategyId);
   const [speakerMode, setSpeakerMode] =
     useState<SpeakerCountPolicy["mode"]>(initialSpeakerPolicy.mode);
@@ -276,28 +331,24 @@ export function TaskCreator({
   const [sourceLanguageChoice, setSourceLanguageChoice] = useState(
     DEFAULT_SOURCE_LANGUAGE,
   );
-  const [customSourceLanguageEnabled, setCustomSourceLanguageEnabled] =
-    useState(false);
-  const [customSourceLanguage, setCustomSourceLanguage] = useState("");
   const [businessEnabled, setBusinessEnabled] = useState(false);
   const [translationEnabled, setTranslationEnabled] = useState(false);
   const [selectedTranslationTargets, setSelectedTranslationTargets] = useState<
     string[]
   >([]);
-  const [customTranslationTargetsText, setCustomTranslationTargetsText] =
-    useState("");
   const [polishEnabled, setPolishEnabled] = useState(false);
   const [summaryEnabled, setSummaryEnabled] = useState(false);
   const [outputLocaleChoice, setOutputLocaleChoice] = useState(
     DEFAULT_OUTPUT_LOCALE,
   );
-  const [customOutputLocaleEnabled, setCustomOutputLocaleEnabled] =
-    useState(false);
-  const [customOutputLocale, setCustomOutputLocale] = useState("");
   const [localLlmModel, setLocalLlmModel] = useState(DEFAULT_LOCAL_MODEL);
   const [localLlmEndpoint, setLocalLlmEndpoint] = useState(
     DEFAULT_LOCAL_ENDPOINT,
   );
+  const [outputCustomization, setOutputCustomization] =
+    useState<OutputCustomization>(() =>
+      cloneOutputCustomization(DEFAULT_OUTPUT_CUSTOMIZATION),
+    );
   const incomingMediaBatch = useMemo<InitialMediaBatch | null>(() => {
     if (initialMediaBatch) {
       return initialMediaBatch;
@@ -318,8 +369,20 @@ export function TaskCreator({
             const selected = await selectMediaFile();
             return selected === null ? [] : [selected];
           }
-        : selectNativeMediaFiles),
-    [selectMediaFile, selectMediaFiles],
+        : async () =>
+            selectNativeMediaFiles({
+              title: t("creator.mediaDialogTitle"),
+            })),
+    [selectMediaFile, selectMediaFiles, t],
+  );
+  const openNativeOutputPicker = useMemo(
+    () =>
+      selectOutputDirectory ??
+      (async () =>
+        selectNativeOutputDirectory({
+          title: t("creator.outputDialogTitle"),
+        })),
+    [selectOutputDirectory, t],
   );
 
   const nextQueueId = useCallback((): string => {
@@ -332,7 +395,7 @@ export function TaskCreator({
       if (selections.length === 0) {
         return [queueItemFromSelection(nextQueueId())];
       }
-      return selections
+      return deduplicateMediaSelections(selections)
         .slice(0, MAX_MEDIA_QUEUE_ITEMS)
         .map((selection) =>
           queueItemFromSelection(nextQueueId(), selection),
@@ -361,6 +424,7 @@ export function TaskCreator({
     setPathPickerError(null);
     setActivePathPicker(null);
     setSubmitting(false);
+    setActiveStep("media");
     submissionLockRef.current = false;
     setStrategyId(selectedStrategyId);
     setSpeakerMode(initialSpeakerPolicy.mode);
@@ -396,19 +460,17 @@ export function TaskCreator({
       ),
     );
     setSourceLanguageChoice(DEFAULT_SOURCE_LANGUAGE);
-    setCustomSourceLanguageEnabled(false);
-    setCustomSourceLanguage("");
     setBusinessEnabled(false);
     setTranslationEnabled(false);
     setSelectedTranslationTargets([]);
-    setCustomTranslationTargetsText("");
     setPolishEnabled(false);
     setSummaryEnabled(false);
     setOutputLocaleChoice(DEFAULT_OUTPUT_LOCALE);
-    setCustomOutputLocaleEnabled(false);
-    setCustomOutputLocale("");
     setLocalLlmModel(DEFAULT_LOCAL_MODEL);
     setLocalLlmEndpoint(DEFAULT_LOCAL_ENDPOINT);
+    setOutputCustomization(
+      cloneOutputCustomization(DEFAULT_OUTPUT_CUSTOMIZATION),
+    );
   }, [
     incomingMediaBatch,
     initialSpeakerPolicy,
@@ -534,36 +596,28 @@ export function TaskCreator({
       : speakerMode === "hybrid" && hybridValid
         ? hybridPriorCount
         : null;
-  const language = customSourceLanguageEnabled
-    ? customSourceLanguage.trim()
-    : sourceLanguageChoice;
-  const sourceLanguageValid =
-    language === "auto" || isConcreteLanguageTag(language);
-  const customTranslationTargets = parseLanguageTags(
-    customTranslationTargetsText,
-  );
+  const language = sourceLanguageChoice;
+  const sourceLanguageValid = isListedLanguage(language, LANGUAGE_PRESETS);
   const translationTargets =
     businessEnabled && translationEnabled
-      ? [...selectedTranslationTargets, ...customTranslationTargets]
+      ? selectedTranslationTargets
       : [];
   const normalizedTranslationTargets = translationTargets.map((target) =>
     target.toLocaleLowerCase("en-US"),
   );
-  const visibleTranslationTargets = uniqueLanguageTags(translationTargets);
+  const visibleTranslationTargets = translationTargets;
   const translationTargetsValid =
     !businessEnabled ||
     !translationEnabled ||
     (translationTargets.length > 0 &&
-      translationTargets.every(isConcreteLanguageTag) &&
+      translationTargets.every((target) =>
+        isListedLanguage(target, TRANSLATION_TARGET_PRESETS),
+      ) &&
       new Set(normalizedTranslationTargets).size === translationTargets.length);
-  const translationTargetsHaveInputIssue =
-    customTranslationTargetsText.trim().length > 0 &&
-    !translationTargetsValid;
-  const outputLocale = customOutputLocaleEnabled
-    ? customOutputLocale.trim()
-    : outputLocaleChoice;
+  const outputLocale = outputLocaleChoice;
   const outputLocaleValid =
-    !businessEnabled || isConcreteLanguageTag(outputLocale);
+    !businessEnabled ||
+    isListedLanguage(outputLocale, OUTPUT_LOCALE_PRESETS);
   const localRuntimeValid =
     !businessEnabled ||
     (localLlmModel.trim().length > 0 &&
@@ -573,8 +627,11 @@ export function TaskCreator({
   const actionableMediaItems = mediaQueue.filter(
     (item) => item.status !== "accepted",
   );
+  const submittableMediaItems = actionableMediaItems.filter(
+    (item) => item.mediaError === null,
+  );
   const outputDirectoryCounts = new Map<string, number>();
-  actionableMediaItems.forEach((item) => {
+  submittableMediaItems.forEach((item) => {
     const comparable = comparableLocalPath(item.outputDirectory);
     if (comparable.length > 0) {
       outputDirectoryCounts.set(
@@ -584,8 +641,8 @@ export function TaskCreator({
     }
   });
   const mediaQueueValid =
-    actionableMediaItems.length > 0 &&
-    actionableMediaItems.every((item) => {
+    submittableMediaItems.length > 0 &&
+    submittableMediaItems.every((item) => {
       const comparableOutput = comparableLocalPath(item.outputDirectory);
       return (
         item.sourcePath.trim().length > 0 &&
@@ -654,6 +711,7 @@ export function TaskCreator({
             : selection.outputDirectory,
           mediaError: null,
           resolving: false,
+          status: "pending",
         };
       });
     } catch (error: unknown) {
@@ -661,6 +719,7 @@ export function TaskCreator({
         updateQueueItem(itemId, {
           resolving: false,
           mediaError: t(mediaDropErrorMessageKey(error)),
+          status: "failed",
         });
       }
     } finally {
@@ -681,10 +740,9 @@ export function TaskCreator({
     setActivePathPicker("media");
     setPathPickerError(null);
     try {
-      const selectedPaths = [...(await openNativeMediaPicker())].slice(
-        0,
-        MAX_MEDIA_QUEUE_ITEMS,
-      );
+      const selectedPaths = deduplicateLocalPaths(
+        await openNativeMediaPicker(),
+      ).slice(0, MAX_MEDIA_QUEUE_ITEMS);
       if (selectedPaths.length === 0) {
         return;
       }
@@ -762,7 +820,7 @@ export function TaskCreator({
     setActivePathPicker(`output:${itemId}`);
     setPathPickerError(null);
     try {
-      const selectedPath = await selectOutputDirectory();
+      const selectedPath = await openNativeOutputPicker();
       if (selectedPath === null) {
         return;
       }
@@ -797,6 +855,48 @@ export function TaskCreator({
     });
   };
 
+  const activeStepIndex = TASK_CREATOR_STEPS.indexOf(activeStep);
+  const moveToStep = (
+    step: TaskCreatorStep,
+    focusPanel = false,
+  ) => {
+    setActiveStep(step);
+    if (focusPanel) {
+      window.requestAnimationFrame(() => stepPanelRef.current?.focus());
+    }
+  };
+  const moveByStep = (offset: -1 | 1) => {
+    const nextIndex = Math.min(
+      TASK_CREATOR_STEPS.length - 1,
+      Math.max(0, activeStepIndex + offset),
+    );
+    moveToStep(TASK_CREATOR_STEPS[nextIndex], true);
+  };
+  const handleStepNavigationKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (index + 1) % TASK_CREATOR_STEPS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex =
+        (index - 1 + TASK_CREATOR_STEPS.length) %
+        TASK_CREATOR_STEPS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = TASK_CREATOR_STEPS.length - 1;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    const nextStep = TASK_CREATOR_STEPS[nextIndex];
+    moveToStep(nextStep);
+    stepButtonRefs.current[nextIndex]?.focus();
+  };
+
   if (!open) {
     return null;
   }
@@ -823,6 +923,17 @@ export function TaskCreator({
     translationTargetsValid &&
     outputLocaleValid &&
     localRuntimeValid;
+  const stepCompletion: Record<TaskCreatorStep, boolean> = {
+    media: title.trim().length > 0 && mediaQueueValid,
+    speakers: countPolicyValid && speakerLabelsValid,
+    language:
+      sourceLanguageValid &&
+      translationTargetsValid &&
+      outputLocaleValid &&
+      localRuntimeValid,
+    strategy: strategies.some((strategy) => strategy.id === strategyId),
+    output: true,
+  };
   let previewPolicy: SpeakerCountPolicy | null = null;
   if (speakerMode === "auto") {
     previewPolicy = { mode: "auto" };
@@ -888,7 +999,10 @@ export function TaskCreator({
     submissionLockRef.current = true;
     setSubmitting(true);
     const submittedItems = mediaQueue.filter(
-      (item) => item.status !== "accepted",
+      (item) => item.status !== "accepted" && item.mediaError === null,
+    );
+    const hasIsolatedIntakeFailures = mediaQueue.some(
+      (item) => item.status !== "accepted" && item.mediaError !== null,
     );
     const requests = submittedItems.map(
       (item, index): CreateJobRequest => ({
@@ -919,6 +1033,9 @@ export function TaskCreator({
         summary: businessEnabled && summaryEnabled,
         outputLocale,
         businessPromptVersion: "business-v1",
+        outputCustomization: cloneOutputCustomization(
+          normalizeOutputCustomization(outputCustomization),
+        ),
       }),
     );
 
@@ -1020,7 +1137,8 @@ export function TaskCreator({
 
       if (
         batchResult.failedCount === 0 &&
-        batchResult.acceptedCount === submittedItems.length
+        batchResult.acceptedCount === submittedItems.length &&
+        !hasIsolatedIntakeFailures
       ) {
         onClose();
       }
@@ -1069,6 +1187,56 @@ export function TaskCreator({
           </button>
         </div>
 
+        <nav
+          className="task-steps"
+          aria-label={taskT("creator.steps.label")}
+        >
+          <div className="task-steps__rail" role="tablist">
+            {TASK_CREATOR_STEPS.map((step, index) => {
+              const copy = TASK_CREATOR_STEP_COPY[step];
+              const selected = step === activeStep;
+              return (
+                <button
+                  className="task-step-tab"
+                  type="button"
+                  role="tab"
+                  id={`task-step-tab-${step}`}
+                  aria-controls="task-step-panel"
+                  aria-selected={selected}
+                  tabIndex={selected ? 0 : -1}
+                  data-state={
+                    selected
+                      ? "current"
+                      : stepCompletion[step]
+                        ? "complete"
+                        : "upcoming"
+                  }
+                  key={step}
+                  ref={(element) => {
+                    stepButtonRefs.current[index] = element;
+                  }}
+                  onClick={() => moveToStep(step)}
+                  onKeyDown={(event) =>
+                    handleStepNavigationKeyDown(event, index)
+                  }
+                >
+                  <span className="task-step-tab__number" aria-hidden="true">
+                    {stepCompletion[step] && !selected ? (
+                      <Icon name="check" size={14} />
+                    ) : (
+                      String(index + 1).padStart(2, "0")
+                    )}
+                  </span>
+                  <span className="task-step-tab__copy">
+                    <strong>{taskT(copy.label)}</strong>
+                    <small>{taskT(copy.description)}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+
         <form
           className="task-form"
           onSubmit={(event) => {
@@ -1081,6 +1249,16 @@ export function TaskCreator({
             className="task-form__controls"
             disabled={busy || submitting}
           >
+          <div
+            className="task-form__viewport"
+            ref={stepPanelRef}
+            role="tabpanel"
+            id="task-step-panel"
+            aria-labelledby={`task-step-tab-${activeStep}`}
+            tabIndex={-1}
+          >
+          {activeStep === "media" ? (
+          <section className="task-step-panel task-step-panel--media">
           <div className="form-section">
             <div className="form-section__heading">
               <span>01</span>
@@ -1176,6 +1354,20 @@ export function TaskCreator({
                         : `creator-output-directory-${item.id}`;
                     const mediaHelpId = `${mediaInputId}-help`;
                     const outputHelpId = `${outputInputId}-help`;
+                    const mediaIntakePlan =
+                      item.sourcePath.trim().length > 0
+                        ? planMediaIntake(item.sourcePath)
+                        : null;
+                    const idleMediaHint =
+                      mediaIntakePlan?.extensionHint.status === "recognized"
+                        ? taskT("creator.batch.extensionHint", {
+                            extension: `.${mediaIntakePlan.extensionHint.extension.toLocaleUpperCase(
+                              "en-US",
+                            )}`,
+                          })
+                        : mediaIntakePlan
+                          ? taskT("creator.batch.contentProbeRequired")
+                          : t("creator.mediaHint");
                     const outputPathDistinct = pathsAreDistinct(
                       item.sourcePath,
                       item.outputDirectory,
@@ -1288,7 +1480,7 @@ export function TaskCreator({
                               {item.mediaError ??
                                 (item.resolving
                                   ? t("common.checking")
-                                  : t("creator.mediaHint"))}
+                                  : idleMediaHint)}
                             </small>
                           </div>
 
@@ -1389,7 +1581,11 @@ export function TaskCreator({
               </section>
             </div>
           </div>
+          </section>
+          ) : null}
 
+          {activeStep === "speakers" ? (
+          <section className="task-step-panel task-step-panel--speakers">
           <div className="form-section">
             <div className="form-section__heading">
               <span>02</span>
@@ -1639,7 +1835,11 @@ export function TaskCreator({
               </div>
             ) : null}
           </div>
+          </section>
+          ) : null}
 
+          {activeStep === "language" ? (
+          <section className="task-step-panel task-step-panel--language">
           <div className="form-section">
             <div className="form-section__heading">
               <span>03</span>
@@ -1660,8 +1860,6 @@ export function TaskCreator({
                   aria-invalid={!sourceLanguageValid}
                   onChange={(event) => {
                     setSourceLanguageChoice(event.target.value);
-                    setCustomSourceLanguageEnabled(false);
-                    setCustomSourceLanguage("");
                   }}
                 >
                   {LANGUAGE_PRESETS.map(([tag, labelKey]) => (
@@ -1770,9 +1968,7 @@ export function TaskCreator({
                   <span>{taskT("creator.business.translationTargets")}</span>
                   <select
                     value=""
-                    aria-invalid={
-                      translationTargetsHaveInputIssue ? "true" : undefined
-                    }
+                    aria-invalid={!translationTargetsValid}
                     onChange={(event) => {
                       const target = event.target.value;
                       if (
@@ -1832,15 +2028,6 @@ export function TaskCreator({
                                     normalizedTarget,
                                 ),
                               );
-                              setCustomTranslationTargetsText((current) =>
-                                parseLanguageTags(current)
-                                  .filter(
-                                    (item) =>
-                                      item.toLocaleLowerCase("en-US") !==
-                                      normalizedTarget,
-                                  )
-                                  .join(", "),
-                              );
                             }}
                           >
                             <Icon name="x" size={13} />
@@ -1849,7 +2036,7 @@ export function TaskCreator({
                       ))}
                     </span>
                   ) : null}
-                  {translationTargetsHaveInputIssue ? (
+                  {!translationTargetsValid ? (
                     <small className="field__error">
                       {taskT("creator.validation.translationTargets")}
                     </small>
@@ -1867,8 +2054,6 @@ export function TaskCreator({
                         aria-invalid={!outputLocaleValid}
                         onChange={(event) => {
                           setOutputLocaleChoice(event.target.value);
-                          setCustomOutputLocaleEnabled(false);
-                          setCustomOutputLocale("");
                         }}
                         >
                           {OUTPUT_LOCALE_PRESETS.map(([tag, labelKey]) => (
@@ -1914,125 +2099,6 @@ export function TaskCreator({
                 </>
               ) : null}
 
-              <details className="runtime-details">
-                <summary>{taskT("creator.language.advanced")}</summary>
-                <div className="runtime-details__grid">
-                  <label className="business-option">
-                    <input
-                      type="checkbox"
-                      checked={customSourceLanguageEnabled}
-                      onChange={(event) =>
-                        setCustomSourceLanguageEnabled(event.target.checked)
-                      }
-                    />
-                    <span>
-                      <strong>
-                        {taskT("creator.sourceLanguage.customEnabled")}
-                      </strong>
-                      <small>
-                        {taskT("creator.sourceLanguage.customEnabledHelp")}
-                      </small>
-                    </span>
-                    <Icon name="check" size={16} />
-                  </label>
-                  <label className="field">
-                    <span>{taskT("creator.sourceLanguage.customLabel")}</span>
-                    <input
-                      value={customSourceLanguage}
-                      placeholder={taskT(
-                        "creator.sourceLanguage.customPlaceholder",
-                      )}
-                      disabled={!customSourceLanguageEnabled}
-                      spellCheck={false}
-                      autoComplete="off"
-                      aria-invalid={
-                        customSourceLanguageEnabled && !sourceLanguageValid
-                      }
-                      onChange={(event) =>
-                        setCustomSourceLanguage(event.target.value)
-                      }
-                    />
-                    {customSourceLanguageEnabled && !sourceLanguageValid ? (
-                      <small className="field__error">
-                        {taskT("creator.validation.sourceLanguageTag")}
-                      </small>
-                    ) : null}
-                  </label>
-
-                  {businessEnabled && translationEnabled ? (
-                    <label className="field">
-                      <span>
-                        {taskT("creator.business.customTranslationTargets")}
-                      </span>
-                      <input
-                        value={customTranslationTargetsText}
-                        placeholder={taskT(
-                          "creator.business.customTranslationTargetsPlaceholder",
-                        )}
-                        spellCheck={false}
-                        autoComplete="off"
-                        aria-invalid={
-                          translationTargetsHaveInputIssue
-                            ? "true"
-                            : undefined
-                        }
-                        onChange={(event) =>
-                          setCustomTranslationTargetsText(event.target.value)
-                        }
-                      />
-                      <small>
-                        {taskT(
-                          "creator.business.customTranslationTargetsHelp",
-                        )}
-                      </small>
-                    </label>
-                  ) : null}
-
-                  {businessEnabled ? (
-                    <>
-                      <label className="business-option">
-                        <input
-                          type="checkbox"
-                          checked={customOutputLocaleEnabled}
-                          onChange={(event) =>
-                            setCustomOutputLocaleEnabled(event.target.checked)
-                          }
-                        />
-                        <span>
-                          <strong>
-                            {taskT("creator.business.customOutputEnabled")}
-                          </strong>
-                          <small>
-                            {taskT("creator.business.customOutputEnabledHelp")}
-                          </small>
-                        </span>
-                        <Icon name="check" size={16} />
-                      </label>
-                      <label className="field">
-                        <span>
-                          {taskT("creator.business.customOutputLocale")}
-                        </span>
-                        <input
-                          value={customOutputLocale}
-                          placeholder={taskT(
-                            "creator.business.customOutputPlaceholder",
-                          )}
-                          disabled={!customOutputLocaleEnabled}
-                          spellCheck={false}
-                          autoComplete="off"
-                          aria-invalid={
-                            customOutputLocaleEnabled && !outputLocaleValid
-                          }
-                          onChange={(event) =>
-                            setCustomOutputLocale(event.target.value)
-                          }
-                        />
-                      </label>
-                    </>
-                  ) : null}
-                </div>
-              </details>
-
               <div className="immutable-transcript-callout" role="note">
                 <Icon name="shield" size={19} />
                 <span>
@@ -2044,7 +2110,11 @@ export function TaskCreator({
               </div>
             </section>
           </div>
+          </section>
+          ) : null}
 
+          {activeStep === "strategy" ? (
+          <section className="task-step-panel task-step-panel--strategy">
           <div className="form-section">
             <div className="form-section__heading">
               <span>04</span>
@@ -2068,13 +2138,39 @@ export function TaskCreator({
                   />
                   <span>
                     <strong>{strategy.label}</strong>
-                    <small>{strategy.asrModel} · {strategy.estimatedVramGb.toFixed(1)} GB</small>
+                    <small>
+                      {strategy.asrModel} ·{" "}
+                      {strategy.estimatedVramGb.toFixed(1)} GB
+                    </small>
                   </span>
                   <Icon name="check" size={17} />
                 </label>
               ))}
             </div>
           </div>
+          </section>
+          ) : null}
+
+          {activeStep === "output" ? (
+          <section className="task-step-panel task-step-panel--output">
+          <OutputCustomizationPanel
+            className="task-output-diy"
+            value={outputCustomization}
+            speakerCount={configuredSpeakerCount ?? speakers.length}
+            speakerLabels={
+              speakerMode === "auto"
+                ? speakers.map((speaker) => speaker.label)
+                : speakerLabels
+            }
+            quality={outputQuality}
+            disabled={busy || submitting}
+            showActions={false}
+            onChange={(nextValue) => {
+              setOutputCustomization(
+                cloneOutputCustomization(nextValue),
+              );
+            }}
+          />
 
           <div className="offline-callout">
             <Icon name="cloud-off" size={20} />
@@ -2087,19 +2183,55 @@ export function TaskCreator({
               </p>
             </div>
           </div>
+          </section>
+          ) : null}
+          </div>
 
+          </fieldset>
           <div className="task-dialog__actions">
-            <button className="button button--soft" type="button" disabled={busy || submitting} onClick={onClose}>
+            <button
+              className="button button--soft"
+              type="button"
+              disabled={busy || submitting}
+              onClick={onClose}
+            >
               {t("common.cancel")}
             </button>
-            <button className="button button--primary" type="submit" disabled={!canSubmit || busy || submitting}>
-              <Icon name="sparkles" size={18} />
-              {busy || submitting
-                ? taskT("creator.actions.creating")
-                : taskT("creator.actions.create")}
-            </button>
+            <div className="task-dialog__actions-primary">
+              {activeStepIndex > 0 ? (
+                <button
+                  className="button button--soft"
+                  type="button"
+                  disabled={busy || submitting}
+                  onClick={() => moveByStep(-1)}
+                >
+                  {taskT("creator.actions.back")}
+                </button>
+              ) : null}
+              {activeStepIndex < TASK_CREATOR_STEPS.length - 1 ? (
+                <button
+                  className="button button--primary"
+                  type="button"
+                  disabled={busy || submitting}
+                  onClick={() => moveByStep(1)}
+                >
+                  {taskT("creator.actions.continue")}
+                  <span aria-hidden="true">→</span>
+                </button>
+              ) : (
+                <button
+                  className="button button--primary"
+                  type="submit"
+                  disabled={!canSubmit || busy || submitting}
+                >
+                  <Icon name="sparkles" size={18} />
+                  {busy || submitting
+                    ? taskT("creator.actions.creating")
+                    : taskT("creator.actions.create")}
+                </button>
+              )}
+            </div>
           </div>
-          </fieldset>
         </form>
       </div>
     </div>

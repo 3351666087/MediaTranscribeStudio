@@ -11,6 +11,7 @@ type OpenDialog = (
 export interface NativePathPickerOptions {
   openDialog?: OpenDialog;
   tauriRuntime?: boolean;
+  title?: string;
 }
 
 function parseSafePath(value: unknown): string {
@@ -52,7 +53,7 @@ export async function selectNativeMediaFiles(
   }
   const openDialog = options.openDialog ?? open;
   const result = await openDialog({
-    title: "Select media files",
+    title: options.title ?? "Select media files",
     multiple: true,
     directory: false,
   });
@@ -68,7 +69,7 @@ export async function selectNativeOutputDirectory(
   }
   const openDialog = options.openDialog ?? open;
   const result = await openDialog({
-    title: "Select output folder",
+    title: options.title ?? "Select output folder",
     multiple: false,
     directory: true,
     canCreateDirectories: true,

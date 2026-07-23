@@ -32,7 +32,8 @@ import {
 import { TaskHero } from "./components/TaskHero";
 import { Toast } from "./components/Toast";
 import { TopBar } from "./components/TopBar";
-import type { AppSection } from "./contracts/studio";
+import type { OutputCustomizationQuality } from "./contracts/output-customization";
+import type { AppSection, PdfQualityReport } from "./contracts/studio";
 import { useNativeMediaDrop } from "./hooks/use-native-media-drop";
 import { useStudio } from "./hooks/use-studio";
 import {
@@ -54,6 +55,25 @@ const SECTION_ORDER: readonly AppSection[] = [
   "artifacts",
   "pdf-qa",
 ];
+
+function outputQualityFromPdf(
+  report: PdfQualityReport,
+): OutputCustomizationQuality {
+  return {
+    score: report.status === "pending" ? null : report.score,
+    minimumScore: report.minimumScore,
+    status:
+      report.status === "repair-required"
+        ? "review-required"
+        : report.status,
+    gates: report.hardGates.map((gate) => ({
+      id: gate.id,
+      label: gate.label,
+      detail: gate.detail,
+      status: gate.status,
+    })),
+  };
+}
 
 export default function App({ mediaDropAdapter }: AppProps) {
   return (
@@ -482,6 +502,7 @@ function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
         strategies={snapshot.strategies}
         selectedStrategyId={snapshot.job.activeStrategyId}
         backendMode={snapshot.system.backendMode}
+        outputQuality={outputQualityFromPdf(snapshot.pdfQuality)}
         busy={studio.busyAction === "create-job"}
         onClose={closeTaskCreator}
         onCreate={studio.createJob}

@@ -3,6 +3,7 @@ import type {
   ReviewDecision,
   UpdateSpeakerRequest,
 } from "../contracts/studio";
+import { DEFAULT_OUTPUT_CUSTOMIZATION } from "../contracts/output-customization";
 import { ContractValidationError } from "../contracts/runtime-validation";
 import { studioFixture } from "../mocks/studio-fixture";
 import { TauriDesktopBackend } from "./tauri-backend";
@@ -56,6 +57,31 @@ function createBackend(
 }
 
 describe("TauriDesktopBackend strict IPC boundary", () => {
+  it("forwards the validated output recipe unchanged to Rust IPC", async () => {
+    const request = validCreateRequest();
+    request.outputCustomization = structuredClone(
+      DEFAULT_OUTPUT_CUSTOMIZATION,
+    );
+    const { backend, invokeMock } = createBackend(async () => {
+      await Promise.resolve();
+      return {
+        accepted: true,
+        jobId: "job-output-recipe",
+        message: "accepted",
+      };
+    });
+
+    await backend.createJob(request);
+
+    expect(invokeMock).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenCalledWith("create_job", { request });
+    expect(
+      (
+        invokeMock.mock.calls[0]?.[1]?.request as CreateJobRequest
+      ).outputCustomization,
+    ).toEqual(DEFAULT_OUTPUT_CUSTOMIZATION);
+  });
+
   it("uses fixed command names with exact typed argument envelopes", async () => {
     const request = validCreateRequest();
     const speakerRequest: UpdateSpeakerRequest = {

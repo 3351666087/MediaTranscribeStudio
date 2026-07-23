@@ -25,8 +25,9 @@ describe("native path picker bridge", () => {
         ) => Promise<string | string[] | null>
       >()
       .mockResolvedValue([
-        "D:\\Media\\first.mov",
-        "D:\\Media\\second.wav",
+        "D:\\Media\\FIRST.MOV",
+        "D:\\Media\\extensionless",
+        "D:\\Media\\second.futuremedia",
       ]);
 
     await expect(
@@ -35,8 +36,9 @@ describe("native path picker bridge", () => {
         tauriRuntime: true,
       }),
     ).resolves.toEqual([
-      "D:\\Media\\first.mov",
-      "D:\\Media\\second.wav",
+      "D:\\Media\\FIRST.MOV",
+      "D:\\Media\\extensionless",
+      "D:\\Media\\second.futuremedia",
     ]);
 
     expect(openDialog).toHaveBeenCalledWith({
@@ -64,6 +66,40 @@ describe("native path picker bridge", () => {
 
     expect(openDialog).toHaveBeenCalledWith({
       title: "Select output folder",
+      multiple: false,
+      directory: true,
+      canCreateDirectories: true,
+    });
+  });
+
+  it("passes localized titles to the native Windows dialogs", async () => {
+    const openDialog = vi
+      .fn<
+        (
+          options: OpenDialogOptions,
+        ) => Promise<string | string[] | null>
+      >()
+      .mockResolvedValueOnce(["D:\\Media\\meeting.m4a"])
+      .mockResolvedValueOnce("D:\\Media\\meeting-output");
+
+    await selectNativeMediaFiles({
+      openDialog,
+      tauriRuntime: true,
+      title: "Choose local media",
+    });
+    await selectNativeOutputDirectory({
+      openDialog,
+      tauriRuntime: true,
+      title: "Choose local output folder",
+    });
+
+    expect(openDialog).toHaveBeenNthCalledWith(1, {
+      title: "Choose local media",
+      multiple: true,
+      directory: false,
+    });
+    expect(openDialog).toHaveBeenNthCalledWith(2, {
+      title: "Choose local output folder",
       multiple: false,
       directory: true,
       canCreateDirectories: true,

@@ -33,6 +33,16 @@ export type MediaCapabilityInspection =
       readonly reason: "unknown-extension";
     };
 
+export interface MediaIntakePlan {
+  /**
+   * Filename extensions never decide admission. Every path that passes the
+   * separate local-path safety checks proceeds to content probing.
+   */
+  readonly admitted: true;
+  readonly verification: "local-ffmpeg-content-probe";
+  readonly extensionHint: MediaCapabilityInspection;
+}
+
 export interface MediaPickerFilter {
   readonly name: string;
   readonly extensions: readonly string[];
@@ -259,7 +269,8 @@ export const KNOWN_MEDIA_EXTENSIONS: readonly string[] = Object.freeze(
 );
 
 // Backward-compatible export for callers that previously imported the
-// eleven-item list from media-drop.ts. The registry above is the only source.
+// eleven-item list from media-drop.ts. Despite the legacy name, this is a
+// filename-hint registry, not an admission allowlist.
 export const SUPPORTED_MEDIA_EXTENSIONS = KNOWN_MEDIA_EXTENSIONS;
 
 export function getMediaExtensionsForGroup(
@@ -275,19 +286,19 @@ export function getMediaExtensionsForGroup(
 export function createMediaPickerFilters(): MediaPickerFilter[] {
   return [
     {
-      name: "Known media",
+      name: "Common media filename hints",
       extensions: [...KNOWN_MEDIA_EXTENSIONS],
     },
     {
-      name: "Audio",
+      name: "Audio filename hints",
       extensions: [...getMediaExtensionsForGroup("audio")],
     },
     {
-      name: "Video streams",
+      name: "Video filename hints",
       extensions: [...getMediaExtensionsForGroup("video")],
     },
     {
-      name: "Media containers",
+      name: "Container filename hints",
       extensions: [...getMediaExtensionsForGroup("container")],
     },
   ];
@@ -341,4 +352,19 @@ export function inspectMediaPath(path: string): MediaCapabilityInspection {
       ? leaf.slice(finalDot + 1)
       : null,
   );
+}
+
+/**
+ * Plans extension-agnostic media intake after local path-safety validation.
+ *
+ * Recognized extensions can improve UX and diagnostics, while unknown or
+ * extensionless filenames take the same admission route. The local FFmpeg
+ * probe remains authoritative for codec/container support and file validity.
+ */
+export function planMediaIntake(path: string): MediaIntakePlan {
+  return Object.freeze({
+    admitted: true,
+    verification: "local-ffmpeg-content-probe",
+    extensionHint: inspectMediaPath(path),
+  });
 }

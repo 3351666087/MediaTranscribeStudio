@@ -400,16 +400,21 @@ describe("ReviewQueue scalable review and lock semantics", () => {
       name: "Confirm and lock",
     });
 
-    await user.type(reason, "The reviewer verified punctuation and segmentation.");
-    await user.type(
-      evidence,
-      "The immutable recognition evidence and local context were compared.",
-    );
-    await user.type(confidence, "0.95");
+    fireEvent.change(reason, {
+      target: {
+        value: "The reviewer verified punctuation and segmentation.",
+      },
+    });
+    fireEvent.change(evidence, {
+      target: {
+        value:
+          "The immutable recognition evidence and local context were compared.",
+      },
+    });
+    fireEvent.change(confidence, { target: { value: "0.95" } });
     expect(submit).toBeEnabled();
 
-    await user.clear(suggestion);
-    await user.type(suggestion, revisedText);
+    fireEvent.change(suggestion, { target: { value: revisedText } });
     expect(screen.getByText("Awaiting human acceptance")).toBeInTheDocument();
     expect(submit).toBeDisabled();
 
@@ -417,8 +422,7 @@ describe("ReviewQueue scalable review and lock semantics", () => {
     expect(suggestion).toHaveValue(activeReview.normalizedText);
     expect(submit).toBeEnabled();
 
-    await user.clear(suggestion);
-    await user.type(suggestion, revisedText);
+    fireEvent.change(suggestion, { target: { value: revisedText } });
     await user.click(
       screen.getByRole("button", {
         name: "Accept as human-corrected transcript",

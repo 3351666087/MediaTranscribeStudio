@@ -17,6 +17,24 @@ import {
   type StudioSnapshot,
   type UpdateSpeakerRequest,
 } from "./studio";
+import {
+  CHAPTER_STYLE_IDS,
+  EXPORT_FORMAT_IDS,
+  OUTPUT_CUSTOMIZATION_LIMITS,
+  OUTPUT_CUSTOMIZATION_SCHEMA_VERSION,
+  REPORT_DENSITIES,
+  REPORT_FONT_IDS,
+  REPORT_PAGE_SIZES,
+  REPORT_TEMPLATE_IDS,
+  SPEAKER_PALETTE_IDS,
+  SUBTITLE_DELIVERY_MODE_IDS,
+  SUBTITLE_EXPORT_FORMAT_IDS,
+  SUBTITLE_POSITION_IDS,
+  SUBTITLE_SAFE_AREA_IDS,
+  SUBTITLE_SIZE_IDS,
+  SUBTITLE_THEME_IDS,
+  TIMESTAMP_STYLE_IDS,
+} from "./output-customization";
 
 export class ContractValidationError extends Error {
   constructor(message: string) {
@@ -1565,6 +1583,233 @@ export function parseStudioSnapshot(value: unknown): StudioSnapshot {
   return value as StudioSnapshot;
 }
 
+function validateOutputCustomization(value: unknown, path: string): void {
+  const customization = record(value, path);
+  exactKeys(customization, path, [
+    "schemaVersion",
+    "report",
+    "subtitles",
+    "delivery",
+    "finishing",
+  ]);
+  if (customization.schemaVersion !== OUTPUT_CUSTOMIZATION_SCHEMA_VERSION) {
+    fail(
+      `${path}.schemaVersion`,
+      `must be exactly "${OUTPUT_CUSTOMIZATION_SCHEMA_VERSION}".`,
+    );
+  }
+
+  const report = record(customization.report, `${path}.report`);
+  exactKeys(report, `${path}.report`, [
+    "template",
+    "font",
+    "customFontFamily",
+    "pageSize",
+    "density",
+    "accentColor",
+  ]);
+  enumeration(report.template, `${path}.report.template`, REPORT_TEMPLATE_IDS);
+  enumeration(report.font, `${path}.report.font`, REPORT_FONT_IDS);
+  const customFontFamily = string(
+    report.customFontFamily,
+    `${path}.report.customFontFamily`,
+    { max: OUTPUT_CUSTOMIZATION_LIMITS.customText },
+  );
+  ensureNoControlCharacters(
+    customFontFamily,
+    `${path}.report.customFontFamily`,
+  );
+  enumeration(report.pageSize, `${path}.report.pageSize`, REPORT_PAGE_SIZES);
+  enumeration(report.density, `${path}.report.density`, REPORT_DENSITIES);
+  const accentColor = string(report.accentColor, `${path}.report.accentColor`, {
+    min: 7,
+    max: 7,
+  });
+  if (!/^#[0-9a-f]{6}$/iu.test(accentColor)) {
+    fail(`${path}.report.accentColor`, "must be a six-digit hexadecimal color.");
+  }
+
+  const subtitles = record(customization.subtitles, `${path}.subtitles`);
+  exactKeys(subtitles, `${path}.subtitles`, [
+    "enabled",
+    "theme",
+    "size",
+    "safeArea",
+    "position",
+    "speakerPalette",
+    "backgroundOpacity",
+    "maximumLines",
+    "avoidVisualCollisions",
+    "wordProgressHighlight",
+  ]);
+  const subtitlesEnabled = boolean(
+    subtitles.enabled,
+    `${path}.subtitles.enabled`,
+  );
+  enumeration(subtitles.theme, `${path}.subtitles.theme`, SUBTITLE_THEME_IDS);
+  enumeration(subtitles.size, `${path}.subtitles.size`, SUBTITLE_SIZE_IDS);
+  enumeration(
+    subtitles.safeArea,
+    `${path}.subtitles.safeArea`,
+    SUBTITLE_SAFE_AREA_IDS,
+  );
+  enumeration(
+    subtitles.position,
+    `${path}.subtitles.position`,
+    SUBTITLE_POSITION_IDS,
+  );
+  enumeration(
+    subtitles.speakerPalette,
+    `${path}.subtitles.speakerPalette`,
+    SPEAKER_PALETTE_IDS,
+  );
+  finiteNumber(
+    subtitles.backgroundOpacity,
+    `${path}.subtitles.backgroundOpacity`,
+    { min: 0, max: 100, integer: true },
+  );
+  finiteNumber(subtitles.maximumLines, `${path}.subtitles.maximumLines`, {
+    min: 1,
+    max: 3,
+    integer: true,
+  });
+  boolean(
+    subtitles.avoidVisualCollisions,
+    `${path}.subtitles.avoidVisualCollisions`,
+  );
+  boolean(
+    subtitles.wordProgressHighlight,
+    `${path}.subtitles.wordProgressHighlight`,
+  );
+
+  const delivery = record(customization.delivery, `${path}.delivery`);
+  exactKeys(delivery, `${path}.delivery`, [
+    "formats",
+    "subtitleModes",
+    "includeMediaMetadata",
+    "preserveSourceMedia",
+    "fileNamePattern",
+  ]);
+  const formats = array(delivery.formats, `${path}.delivery.formats`);
+  if (formats.length === 0 || formats.length > EXPORT_FORMAT_IDS.length) {
+    fail(
+      `${path}.delivery.formats`,
+      `must contain 1–${EXPORT_FORMAT_IDS.length} unique formats.`,
+    );
+  }
+  const seenFormats = new Set<string>();
+  formats.forEach((format, index) => {
+    const selected = enumeration(
+      format,
+      `${path}.delivery.formats[${index}]`,
+      EXPORT_FORMAT_IDS,
+    );
+    if (seenFormats.has(selected)) {
+      fail(`${path}.delivery.formats[${index}]`, "duplicates another format.");
+    }
+    if (
+      !subtitlesEnabled &&
+      SUBTITLE_EXPORT_FORMAT_IDS.includes(
+        selected as (typeof SUBTITLE_EXPORT_FORMAT_IDS)[number],
+      )
+    ) {
+      fail(
+        `${path}.delivery.formats[${index}]`,
+        "must not contain subtitle formats while subtitles are disabled.",
+      );
+    }
+    seenFormats.add(selected);
+  });
+  const subtitleModes = array(
+    delivery.subtitleModes,
+    `${path}.delivery.subtitleModes`,
+  );
+  if (
+    subtitleModes.length > SUBTITLE_DELIVERY_MODE_IDS.length ||
+    (subtitlesEnabled && subtitleModes.length === 0) ||
+    (!subtitlesEnabled && subtitleModes.length > 0)
+  ) {
+    fail(
+      `${path}.delivery.subtitleModes`,
+      subtitlesEnabled
+        ? `must contain 1–${SUBTITLE_DELIVERY_MODE_IDS.length} unique modes when subtitles are enabled.`
+        : "must be empty when subtitles are disabled.",
+    );
+  }
+  const seenSubtitleModes = new Set<string>();
+  subtitleModes.forEach((mode, index) => {
+    const selected = enumeration(
+      mode,
+      `${path}.delivery.subtitleModes[${index}]`,
+      SUBTITLE_DELIVERY_MODE_IDS,
+    );
+    if (seenSubtitleModes.has(selected)) {
+      fail(
+        `${path}.delivery.subtitleModes[${index}]`,
+        "duplicates another subtitle delivery mode.",
+      );
+    }
+    seenSubtitleModes.add(selected);
+  });
+  boolean(
+    delivery.includeMediaMetadata,
+    `${path}.delivery.includeMediaMetadata`,
+  );
+  if (delivery.preserveSourceMedia !== true) {
+    fail(`${path}.delivery.preserveSourceMedia`, "must remain exactly true.");
+  }
+  const fileNamePattern = string(
+    delivery.fileNamePattern,
+    `${path}.delivery.fileNamePattern`,
+    { min: 1, max: OUTPUT_CUSTOMIZATION_LIMITS.fileNamePattern },
+  );
+  ensureNoControlCharacters(
+    fileNamePattern,
+    `${path}.delivery.fileNamePattern`,
+  );
+
+  const finishing = record(customization.finishing, `${path}.finishing`);
+  exactKeys(finishing, `${path}.finishing`, [
+    "includeCover",
+    "includeChapters",
+    "includeTimestamps",
+    "includeHeader",
+    "includeFooter",
+    "includeSpeakerIndex",
+    "includeConfidenceNotes",
+    "chapterStyle",
+    "timestampStyle",
+    "customTitle",
+  ]);
+  [
+    "includeCover",
+    "includeChapters",
+    "includeTimestamps",
+    "includeHeader",
+    "includeFooter",
+    "includeSpeakerIndex",
+    "includeConfidenceNotes",
+  ].forEach((key) => {
+    boolean(finishing[key], `${path}.finishing.${key}`);
+  });
+  enumeration(
+    finishing.chapterStyle,
+    `${path}.finishing.chapterStyle`,
+    CHAPTER_STYLE_IDS,
+  );
+  enumeration(
+    finishing.timestampStyle,
+    `${path}.finishing.timestampStyle`,
+    TIMESTAMP_STYLE_IDS,
+  );
+  const customTitle = string(
+    finishing.customTitle,
+    `${path}.finishing.customTitle`,
+    { max: OUTPUT_CUSTOMIZATION_LIMITS.customText },
+  );
+  ensureNoControlCharacters(customTitle, `${path}.finishing.customTitle`);
+}
+
 export function assertCreateJobRequest(value: unknown): asserts value is CreateJobRequest {
   const request = record(value, "createJobRequest");
   exactKeys(request, "createJobRequest", [
@@ -1585,6 +1830,7 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     "summary",
     "outputLocale",
     "businessPromptVersion",
+    "outputCustomization",
   ]);
   const title = string(request.title, "createJobRequest.title", { min: 1, max: 80 });
   ensureNoControlCharacters(title, "createJobRequest.title");
@@ -1694,6 +1940,12 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
       hasBusinessTask
         ? 'must be "business" when translation, polishing, or summary output is selected.'
         : 'must be "disabled" when no business-processing output is selected.',
+    );
+  }
+  if (request.outputCustomization !== undefined) {
+    validateOutputCustomization(
+      request.outputCustomization,
+      "createJobRequest.outputCustomization",
     );
   }
 }

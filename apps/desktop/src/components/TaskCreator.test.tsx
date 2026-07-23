@@ -7,7 +7,10 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
-import type { MediaSelection } from "../bridge/media-drop";
+import {
+  MediaDropError,
+  type MediaSelection,
+} from "../bridge/media-drop";
 import type {
   CreateJobRequest,
   SpeakerCountPolicy,
@@ -16,6 +19,7 @@ import type {
 import {
   ENGLISH_MESSAGES,
   LOCALE_OPTIONS,
+  MESSAGE_CATALOGS,
   type I18nContextValue,
   type MessageParams,
 } from "../i18n";
@@ -37,6 +41,31 @@ const taskCreatorLocales = [
   "pt-BR",
 ] as const;
 const placeholderPattern = /\{([a-zA-Z][a-zA-Z0-9]*)\}/gu;
+const finiteFormatListPattern =
+  /MOV.*MP4.*(?:M4V|MKV)|WAV.*MP3.*(?:M4A|FLAC)/iu;
+const multiFileCopyPatterns = {
+  en: [/one or more/iu, /one or more|multi-file/iu, /one or more/iu],
+  "zh-Hans": [/一个或多个/u, /一个或多个|多文件/u, /一个或多个/u],
+  "zh-Hant": [/一個或多個/u, /一個或多個|多檔/u, /一個或多個/u],
+  ja: [/1件以上/u, /1件以上|複数/u, /1つ以上/u],
+  ko: [/하나 이상의/u, /하나 이상의|다중/u, /하나 이상의/u],
+  es: [/uno o varios/iu, /uno o varios|selección múltiple/iu, /uno o varios/iu],
+  fr: [
+    /un ou plusieurs/iu,
+    /un ou plusieurs|sélection multiple/iu,
+    /un ou plusieurs/iu,
+  ],
+  de: [
+    /eine oder mehrere/iu,
+    /eine oder mehrere|Mehrfachauswahl/iu,
+    /eine oder mehrere/iu,
+  ],
+  "pt-BR": [
+    /um ou mais/iu,
+    /um ou mais|seleção múltipla/iu,
+    /uma ou mais/iu,
+  ],
+} as const;
 const testMessages: Readonly<Record<string, string>> = {
   ...ENGLISH_MESSAGES,
   ...taskCreatorMessages.en,
@@ -141,6 +170,21 @@ function renderCreator({
   return props;
 }
 
+type CreatorStepLabel =
+  | "Media"
+  | "Speakers"
+  | "Language"
+  | "Models"
+  | "Output";
+
+function openCreatorStep(label: CreatorStepLabel) {
+  fireEvent.click(
+    screen.getByRole("tab", {
+      name: new RegExp(`^${label}\\b`, "u"),
+    }),
+  );
+}
+
 describe("TaskCreator locale fragment", () => {
   it.each(taskCreatorLocales)(
     "keeps the %s catalog complete and placeholder-compatible",
@@ -177,9 +221,100 @@ describe("TaskCreator locale fragment", () => {
       }
     },
   );
+
+  it.each(taskCreatorLocales)(
+    "describes extension-agnostic multi-file FFmpeg intake in %s",
+    (locale) => {
+      const catalog = MESSAGE_CATALOGS[locale];
+      const multiFileMessages = [
+        catalog["drop.readyTitle"],
+        catalog["creator.pathsTauriDetail"],
+        catalog["creator.batch.dropTitle"],
+      ] as const;
+
+      expect(catalog["drop.supportedTypes"]).toContain("FFmpeg");
+      expect(catalog["creator.batch.dropDetail"]).toContain("FFmpeg");
+      expect(catalog["drop.error.unsupportedExtension"]).toContain("FFmpeg");
+      expect(catalog["creator.mediaHint"]).toContain("FFmpeg");
+      expect(catalog["drop.supportedTypes"]).not.toMatch(
+        finiteFormatListPattern,
+      );
+      expect(catalog["drop.error.unsupportedExtension"]).not.toMatch(
+        finiteFormatListPattern,
+      );
+      multiFileMessages.forEach((message, index) => {
+        expect(message).toMatch(multiFileCopyPatterns[locale][index]);
+      });
+    },
+  );
 });
 
 describe("TaskCreator dynamic speaker policies", () => {
+  it("provides five focused setup levels with keyboard and footer navigation", async () => {
+    const user = userEvent.setup();
+    renderCreator({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs).toHaveLength(5);
+    expect(tabs[0]).toHaveAttribute("aria-selected", "true");
+    expect(
+      tabs.every(
+        (tab) => tab.getAttribute("aria-controls") === "task-step-panel",
+      ),
+    ).toBe(true);
+    expect(
+      screen.getByPlaceholderText("Enter the absolute path to a media file"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: /Manual/u }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    const panel = screen.getByRole("tabpanel", {
+      name: /^Speakers\b/u,
+    });
+    await waitFor(() => expect(panel).toHaveFocus());
+    expect(
+      screen.getByRole("radio", { name: /Manual/u }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("tabpanel", { name: /^Media\b/u }),
+      ).toHaveFocus(),
+    );
+
+    const mediaTab = screen.getByRole("tab", { name: /^Media\b/u });
+    mediaTab.focus();
+    fireEvent.keyDown(mediaTab, { key: "End" });
+    expect(screen.getByRole("tab", { name: /^Output\b/u })).toHaveFocus();
+    expect(
+      screen.getByRole("tab", { name: /^Output\b/u }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
+      screen.getByRole("button", { name: "Create job" }),
+    ).toBeInTheDocument();
+
+    fireEvent.keyDown(
+      screen.getByRole("tab", { name: /^Output\b/u }),
+      { key: "Home" },
+    );
+    expect(screen.getByRole("tab", { name: /^Media\b/u })).toHaveFocus();
+    expect(
+      screen.getByRole("tab", { name: /^Media\b/u }),
+    ).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(mediaTab, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: /^Speakers\b/u })).toHaveFocus();
+    expect(
+      screen.getByRole("tab", { name: /^Speakers\b/u }),
+    ).toHaveAttribute("aria-selected", "true");
+  });
+
   it("initializes native source and output paths while keeping output editable", async () => {
     const user = userEvent.setup();
     const props = taskCreatorProps({
@@ -236,6 +371,7 @@ describe("TaskCreator dynamic speaker policies", () => {
         "The output directory must not equal or overwrite the source media path.",
       ),
     ).toBeInTheDocument();
+    openCreatorStep("Output");
     expect(screen.getByRole("button", { name: "Create job" })).toBeDisabled();
   });
 
@@ -330,6 +466,224 @@ describe("TaskCreator dynamic speaker policies", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("keeps unknown and extensionless files from a native multi-selection in the editable queue", async () => {
+    const user = userEvent.setup();
+    const selectedPaths = [
+      "D:\\Media\\meeting.futuremedia",
+      "D:\\Media\\extensionless",
+    ] as const;
+    const selectMediaFiles = vi
+      .fn<() => Promise<readonly string[]>>()
+      .mockResolvedValue(selectedPaths);
+    const resolver = vi
+      .fn<(path: string) => Promise<MediaSelection>>()
+      .mockImplementation(async (path) => ({
+        sourcePath: path,
+        outputDirectory: `${path}-MediaTranscribeStudio`,
+      }));
+    const props = taskCreatorProps({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+
+    renderTaskCreator(
+      <TaskCreator
+        open
+        resolveMediaPath={resolver}
+        selectMediaFiles={selectMediaFiles}
+        {...props}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Choose files" }));
+
+    await waitFor(() => {
+      const sourceInputs = screen.getAllByPlaceholderText(
+        "Enter the absolute path to a media file",
+      );
+      expect(sourceInputs).toHaveLength(2);
+      expect(sourceInputs[0]).toHaveValue(selectedPaths[0]);
+      expect(sourceInputs[1]).toHaveValue(selectedPaths[1]);
+    });
+
+    expect(selectMediaFiles).toHaveBeenCalledTimes(1);
+    expect(resolver).toHaveBeenCalledTimes(2);
+    expect(resolver).toHaveBeenNthCalledWith(1, selectedPaths[0]);
+    expect(resolver).toHaveBeenNthCalledWith(2, selectedPaths[1]);
+    expect(
+      screen.getAllByText(
+        "Unknown or missing filename extensions are accepted. Local FFmpeg will probe the actual content before processing.",
+      ),
+    ).toHaveLength(2);
+    screen
+      .getAllByPlaceholderText("Enter the absolute path to a media file")
+      .forEach((input) => {
+        expect(input).not.toHaveAttribute("aria-invalid", "true");
+      });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("appends successive drag-drop batches in stable order and deduplicates paths case-insensitively", async () => {
+    const props = taskCreatorProps({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+    const { rerender } = renderTaskCreator(
+      <TaskCreator
+        open
+        initialMediaBatch={{
+          sequence: 1,
+          selections: [
+            {
+              sourcePath: "D:\\Media\\FIRST.MOV",
+              outputDirectory: "D:\\Output\\first",
+            },
+            {
+              sourcePath: "d:\\media\\first.mov",
+              outputDirectory: "D:\\Output\\duplicate",
+            },
+            {
+              sourcePath: "D:\\Media\\extensionless",
+              outputDirectory: "D:\\Output\\extensionless",
+            },
+          ],
+        }}
+        {...props}
+      />,
+    );
+
+    expect(
+      screen
+        .getAllByPlaceholderText("Enter the absolute path to a media file")
+        .map((input) => (input as HTMLInputElement).value),
+    ).toEqual([
+      "D:\\Media\\FIRST.MOV",
+      "D:\\Media\\extensionless",
+    ]);
+
+    rerender(
+      <TaskCreator
+        open
+        initialMediaBatch={{
+          sequence: 2,
+          selections: [
+            {
+              sourcePath: "D:\\MEDIA\\EXTENSIONLESS",
+              outputDirectory: "D:\\Output\\duplicate-extensionless",
+            },
+            {
+              sourcePath: "D:\\Media\\unknown.futuremedia",
+              outputDirectory: "D:\\Output\\unknown",
+            },
+            {
+              sourcePath: "D:\\Media\\CAMERA.M4A",
+              outputDirectory: "D:\\Output\\camera",
+            },
+          ],
+        }}
+        {...props}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen
+          .getAllByPlaceholderText("Enter the absolute path to a media file")
+          .map((input) => (input as HTMLInputElement).value),
+      ).toEqual([
+        "D:\\Media\\FIRST.MOV",
+        "D:\\Media\\extensionless",
+        "D:\\Media\\unknown.futuremedia",
+        "D:\\Media\\CAMERA.M4A",
+      ]);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/\b4\b/u);
+  });
+
+  it("keeps picker order, skips duplicates, and isolates an unsupported directory from valid job payloads", async () => {
+    const user = userEvent.setup();
+    const selectedPaths = [
+      "D:\\Media\\FIRST.MOV",
+      "d:\\media\\first.mov",
+      "D:\\Media\\not-a-media-folder",
+      "D:\\Media\\second.futuremedia",
+    ] as const;
+    const selectMediaFiles = vi
+      .fn<() => Promise<readonly string[]>>()
+      .mockResolvedValue(selectedPaths);
+    const resolver = vi
+      .fn<(path: string) => Promise<MediaSelection>>()
+      .mockImplementation(async (path) => {
+        if (path.endsWith("\\not-a-media-folder")) {
+          throw new MediaDropError(
+            "absolutePath",
+            "Directories are not supported as media inputs.",
+          );
+        }
+        return {
+          sourcePath: path,
+          outputDirectory: `${path}-MediaTranscribeStudio`,
+        };
+      });
+    const onCreate =
+      vi.fn<(request: CreateJobRequest) => Promise<void>>();
+    onCreate.mockResolvedValue(undefined);
+    const props = taskCreatorProps({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+      onCreate,
+    });
+
+    renderTaskCreator(
+      <TaskCreator
+        open
+        resolveMediaPath={resolver}
+        selectMediaFiles={selectMediaFiles}
+        {...props}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Choose files" }));
+
+    await waitFor(() => {
+      expect(
+        screen
+          .getAllByPlaceholderText("Enter the absolute path to a media file")
+          .map((input) => (input as HTMLInputElement).value),
+      ).toEqual([
+        "D:\\Media\\FIRST.MOV",
+        "D:\\Media\\not-a-media-folder",
+        "D:\\Media\\second.futuremedia",
+      ]);
+    });
+    expect(resolver).toHaveBeenCalledTimes(3);
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(
+      screen.getByText("Select an absolute local media path."),
+    ).toBeInTheDocument();
+
+    openCreatorStep("Output");
+    const createButton = screen.getByRole("button", { name: "Create job" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(createButton);
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(2));
+    expect(onCreate.mock.calls.map(([request]) => request.mediaPath)).toEqual([
+      "D:\\Media\\FIRST.MOV",
+      "D:\\Media\\second.futuremedia",
+    ]);
+    expect(onCreate.mock.calls.map(([request]) => request.title)).toEqual([
+      "Meeting transcription — 1",
+      "Meeting transcription — 2",
+    ]);
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    openCreatorStep("Media");
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    openCreatorStep("Output");
+    expect(screen.getByRole("button", { name: "Create job" })).toBeDisabled();
+  });
+
   it("never overwrites an output folder explicitly chosen by the user", async () => {
     const user = userEvent.setup();
     const resolver = vi
@@ -393,6 +747,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       count: 2,
       policy: { mode: "manual", count: 2 },
     });
+    openCreatorStep("Language");
     const businessSwitch = screen.getByRole("switch", {
       name: /Enable local business processing/u,
     });
@@ -404,8 +759,11 @@ describe("TaskCreator dynamic speaker policies", () => {
     expect(translation).not.toBeChecked();
     expect(translation).toBeDisabled();
     expect(
-      screen.getByText("Advanced language settings").closest("details"),
-    ).not.toHaveAttribute("open");
+      screen.queryByText("Advanced language settings"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: /^Languages not listed/u }),
+    ).not.toBeInTheDocument();
 
     await user.click(businessSwitch);
     await user.click(translation);
@@ -421,11 +779,8 @@ describe("TaskCreator dynamic speaker policies", () => {
       within(translateTo).queryByRole("option", { name: "ja-JP" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByText(
-        "Choose at least one language and remove duplicates. Check custom languages in Advanced settings.",
-      ),
+      screen.queryByRole("button", { name: "Create job" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create job" })).toBeDisabled();
     expect(onCreate).not.toHaveBeenCalled();
 
     await user.selectOptions(translateTo, "ja-JP");
@@ -434,6 +789,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       screen.getByRole("button", { name: "Remove Japanese" }),
     ).toBeInTheDocument();
 
+    openCreatorStep("Output");
     const createButton = screen.getByRole("button", { name: "Create job" });
     await waitFor(() => expect(createButton).toBeEnabled());
     await user.click(createButton);
@@ -446,12 +802,13 @@ describe("TaskCreator dynamic speaker policies", () => {
     });
   });
 
-  it("deduplicates visible translation chips while blocking ambiguous custom input", async () => {
+  it("deduplicates preset translation chips without exposing raw language-tag input", async () => {
     const user = userEvent.setup();
     renderCreator({
       count: 2,
       policy: { mode: "manual", count: 2 },
     });
+    openCreatorStep("Language");
 
     await user.click(
       screen.getByRole("switch", {
@@ -465,20 +822,20 @@ describe("TaskCreator dynamic speaker policies", () => {
       screen.getByRole("combobox", { name: /^Translate to/u }),
       "ja-JP",
     );
-    await user.click(screen.getByText("Advanced language settings"));
-    await user.type(
-      screen.getByRole("textbox", { name: /^Languages not listed/u }),
-      "JA-jp",
-    );
 
     const chips = screen.getByLabelText("Parsed translation targets");
     expect(within(chips).getAllByText("Japanese")).toHaveLength(1);
     expect(
-      screen.getByText(
-        "Choose at least one language and remove duplicates. Check custom languages in Advanced settings.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create job" })).toBeDisabled();
+      within(
+        screen.getByRole("combobox", { name: /^Translate to/u }),
+      ).getByRole("option", { name: "Japanese" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByText("Advanced language settings"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: /^Languages not listed/u }),
+    ).not.toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Remove Japanese" }),
@@ -487,8 +844,10 @@ describe("TaskCreator dynamic speaker policies", () => {
       screen.queryByLabelText("Parsed translation targets"),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: /^Languages not listed/u }),
-    ).toHaveValue("");
+      within(
+        screen.getByRole("combobox", { name: /^Translate to/u }),
+      ).getByRole("option", { name: "Japanese" }),
+    ).toBeEnabled();
   });
 
   it.each(dynamicCounts)(
@@ -499,6 +858,7 @@ describe("TaskCreator dynamic speaker policies", () => {
         count,
         policy: { mode: "manual", count },
       });
+      openCreatorStep("Speakers");
       const dialog = screen.getByRole("dialog", {
         name: "Create transcription job",
       });
@@ -521,6 +881,7 @@ describe("TaskCreator dynamic speaker policies", () => {
         ),
       ).not.toBeInTheDocument();
 
+      openCreatorStep("Output");
       const submitButton = within(dialog).getByRole("button", {
         name: "Create job",
       });
@@ -547,6 +908,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       count: 13,
       policy,
     });
+    openCreatorStep("Speakers");
 
     expect(
       screen.getByText("Waiting for local speaker-count detection"),
@@ -575,6 +937,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       screen.getByRole("textbox", { name: "Initial name for speaker-13" }),
     ).toHaveValue("Speaker 13");
 
+    openCreatorStep("Output");
     await user.click(screen.getByRole("button", { name: "Create job" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     const request = onCreate.mock.calls[0][0];
@@ -590,6 +953,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       count: 8,
       policy: { mode: "auto" },
     });
+    openCreatorStep("Speakers");
 
     expect(
       screen.queryByRole("textbox", {
@@ -603,6 +967,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       screen.queryByLabelText("Speaker-count detection result"),
     ).not.toBeInTheDocument();
 
+    openCreatorStep("Output");
     await user.click(screen.getByRole("button", { name: "Create job" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     expect(onCreate.mock.calls[0][0]).toMatchObject({
@@ -618,6 +983,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       count,
       policy: { mode: "manual", count },
     });
+    openCreatorStep("Speakers");
 
     await waitFor(() => {
       expect(
@@ -626,6 +992,7 @@ describe("TaskCreator dynamic speaker policies", () => {
         }),
       ).toHaveLength(count);
     });
+    openCreatorStep("Output");
     await user.click(screen.getByRole("button", { name: "Create job" }));
 
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
@@ -639,6 +1006,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       count: 0,
       policy: { mode: "manual", count },
     });
+    openCreatorStep("Speakers");
 
     expect(
       screen.queryByRole("textbox", {
@@ -652,6 +1020,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       ),
     ).toBeInTheDocument();
 
+    openCreatorStep("Output");
     await user.click(screen.getByRole("button", { name: "Create job" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     expect(onCreate.mock.calls[0][0]).toMatchObject({
@@ -667,6 +1036,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       count: 0,
       policy: { mode: "manual", count },
     });
+    openCreatorStep("Speakers");
 
     expect(screen.getByDisplayValue(String(count))).toBeInTheDocument();
     expect(
@@ -674,8 +1044,9 @@ describe("TaskCreator dynamic speaker policies", () => {
         name: /Initial name for speaker-\d+/u,
       }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Create job" })).toBeEnabled();
 
+    openCreatorStep("Output");
+    expect(screen.getByRole("button", { name: "Create job" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Create job" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     expect(onCreate.mock.calls[0][0]).toMatchObject({
@@ -697,8 +1068,10 @@ describe("TaskCreator dynamic speaker policies", () => {
       count: 0,
       policy,
     });
+    openCreatorStep("Speakers");
 
     expect(screen.getByText("Large-count safe mode enabled")).toBeInTheDocument();
+    openCreatorStep("Output");
     await user.click(screen.getByRole("button", { name: "Create job" }));
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
     expect(onCreate.mock.calls[0][0]).toMatchObject({
@@ -715,21 +1088,36 @@ describe("TaskCreator dynamic speaker policies", () => {
     });
     const { rerender } = renderTaskCreator(<TaskCreator open {...props} />);
 
-    await user.clear(screen.getByRole("textbox", { name: "Job name" }));
-    await user.type(
-      screen.getByRole("textbox", { name: "Job name" }),
-      "Sensitive customer session",
-    );
-    await user.type(
+    fireEvent.change(screen.getByRole("textbox", { name: "Job name" }), {
+      target: { value: "Sensitive customer session" },
+    });
+    fireEvent.change(
       screen.getByPlaceholderText("Enter the absolute path to a media file"),
-      "C:\\Sensitive\\customer.mov",
+      {
+        target: { value: "C:\\Sensitive\\customer.mov" },
+      },
     );
-    await user.type(
+    fireEvent.change(
       screen.getByPlaceholderText(
         "Enter the absolute path to an output directory",
       ),
-      "C:\\Sensitive\\output",
+      {
+        target: { value: "C:\\Sensitive\\output" },
+      },
     );
+
+    openCreatorStep("Speakers");
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "Initial name for speaker-1",
+      }),
+      {
+        target: { value: "Confidential participant" },
+      },
+    );
+    await user.click(screen.getByRole("radio", { name: /Automatic/u }));
+
+    openCreatorStep("Language");
     await user.selectOptions(
       screen.getByRole("combobox", { name: /Source language/u }),
       "fr-FR",
@@ -763,26 +1151,19 @@ describe("TaskCreator dynamic speaker policies", () => {
       "ja-JP",
     );
     await user.click(screen.getByText("Advanced local runtime"));
-    await user.clear(screen.getByRole("textbox", { name: "Local model" }));
-    await user.type(
+    fireEvent.change(
       screen.getByRole("textbox", { name: "Local model" }),
-      "private-model",
+      {
+        target: { value: "private-model" },
+      },
     );
-    await user.clear(
+    fireEvent.change(
       screen.getByRole("textbox", { name: /^Loopback endpoint/u }),
+      {
+        target: { value: "http://localhost:9999" },
+      },
     );
-    await user.type(
-      screen.getByRole("textbox", { name: /^Loopback endpoint/u }),
-      "http://localhost:9999",
-    );
-    await user.clear(
-      screen.getByRole("textbox", { name: "Initial name for speaker-1" }),
-    );
-    await user.type(
-      screen.getByRole("textbox", { name: "Initial name for speaker-1" }),
-      "Confidential participant",
-    );
-    await user.click(screen.getByRole("radio", { name: /Automatic/u }));
+    openCreatorStep("Output");
 
     rerender(<TaskCreator open={false} {...props} />);
     rerender(<TaskCreator open {...props} />);
@@ -793,6 +1174,9 @@ describe("TaskCreator dynamic speaker policies", () => {
       );
     });
     expect(
+      screen.getByRole("tab", { name: /^Media\b/u }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(
       screen.getByPlaceholderText("Enter the absolute path to a media file"),
     ).toHaveValue("");
     expect(
@@ -800,6 +1184,14 @@ describe("TaskCreator dynamic speaker policies", () => {
         "Enter the absolute path to an output directory",
       ),
     ).toHaveValue("");
+
+    openCreatorStep("Speakers");
+    expect(screen.getByRole("radio", { name: /Manual/u })).toBeChecked();
+    expect(
+      screen.getByRole("textbox", { name: "Initial name for speaker-1" }),
+    ).toHaveValue("Speaker 1");
+
+    openCreatorStep("Language");
     expect(
       screen.getByRole("combobox", { name: /Source language/u }),
     ).toHaveValue("auto");
@@ -808,10 +1200,6 @@ describe("TaskCreator dynamic speaker policies", () => {
         name: /Enable local business processing/u,
       }),
     ).not.toBeChecked();
-    expect(screen.getByRole("radio", { name: /Manual/u })).toBeChecked();
-    expect(
-      screen.getByRole("textbox", { name: "Initial name for speaker-1" }),
-    ).toHaveValue("Speaker 1");
 
     await user.click(
       screen.getByRole("switch", {

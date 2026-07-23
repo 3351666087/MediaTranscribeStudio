@@ -27,6 +27,7 @@ from .production_config import (
     run_production_preflight,
 )
 from .protocol import JsonlEmitter, WorkerProtocol, run_jsonl_loop
+from .runtime_preload import preload_production_runtime
 
 _CONFIG_ENVIRONMENT_VARIABLE = "MTS_PRODUCTION_CONFIG"
 
@@ -151,6 +152,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if preflight.passed else 2
 
         preflight.raise_if_failed()
+        preload_production_runtime(
+            include_pyannote=config.speaker.pyannote_mode != "disabled",
+        )
         composition = build_production_composition(
             config,
             event_sink=emitter.emit,

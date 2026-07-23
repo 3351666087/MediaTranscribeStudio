@@ -70,6 +70,11 @@ from .production_runners import (
     LocalPyannoteAuditAdapter,
     LocalQwen3AsrAdapter,
 )
+from .runtime_preload import (
+    RuntimePreloadReport,
+    preload_production_runtime,
+    production_runtime_modules,
+)
 from .service import WorkerService
 
 __all__ = [
@@ -108,6 +113,7 @@ __all__ = [
     "ProductionPreflightReport",
     "ProductionRuntime",
     "ProductionSpeakerPolicy",
+    "RuntimePreloadReport",
     "RenderArtifact",
     "RenderResult",
     "ReportRendererAdapter",
@@ -130,6 +136,8 @@ __all__ = [
     "canonical_speaker_ids",
     "offline_environment",
     "production_diagnostics",
+    "preload_production_runtime",
+    "production_runtime_modules",
     "run_jsonl_loop",
     "run_production_preflight",
     "validate_job_id",

@@ -30,6 +30,7 @@ class ProductionWorkerCliTests(unittest.TestCase):
                 strict_startup_preflight=True,
                 max_line_bytes=8192,
             ),
+            speaker=SimpleNamespace(pyannote_mode="disabled"),
         )
         self.config.with_runtime_overrides = lambda **_kwargs: self.config
         self.passed_report = ProductionPreflightReport(
@@ -147,6 +148,7 @@ class ProductionWorkerCliTests(unittest.TestCase):
                 "backend.worker.build_production_composition",
                 return_value=composition,
             ) as build,
+            patch("backend.worker.preload_production_runtime") as preload,
             patch("backend.worker.WorkerProtocol", FakeProtocol),
             patch("backend.worker.run_jsonl_loop") as loop,
             patch("backend.worker.apply_offline_environment"),
@@ -155,6 +157,7 @@ class ProductionWorkerCliTests(unittest.TestCase):
             exit_code = main(["--config", str(self.config_path)])
         self.assertEqual(exit_code, 0)
         self.assertEqual(captured["max_line_bytes"], 8192)
+        preload.assert_called_once_with(include_pyannote=False)
         build.assert_called_once()
         loop.assert_called_once()
         self.assertEqual(buffer.getvalue(), "")

@@ -19,9 +19,13 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
 
 
 MEDIA_PROBE_SCHEMA_VERSION = "1.0.0"
@@ -31,7 +35,10 @@ _HDR_SIDE_DATA_MARKERS = (
     "mastering display metadata",
     "content light level metadata",
     "dynamic hdr plus",
+    "hdr dynamic metadata",
+    "smpte2094",
     "dolby vision",
+    "dovi configuration record",
 )
 _ENCRYPTION_TAG_KEYS = frozenset(
     {
@@ -62,6 +69,7 @@ class MediaProbeErrorCode(str, Enum):
     UNSUPPORTED_CODEC = "unsupported-codec"
     ENCRYPTED_MEDIA = "encrypted-media"
     DECODE_FAILED = "decode-failed"
+    SOURCE_CHANGED = "source-changed"
 
 
 class MediaProbeError(RuntimeError):
@@ -77,6 +85,10 @@ class MediaProbeError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.detail = detail
+
+
+class MediaProbeEvidenceError(ValueError):
+    """Raised when injected or persisted probe evidence is not trustworthy."""
 
 
 @dataclass(frozen=True)
@@ -283,6 +295,7 @@ class MediaProbeResult:
     schema_version: str
     source_path: str
     source_size_bytes: int
+    source_sha256: str
     format_names: tuple[str, ...]
     format_long_name: str | None
     duration_ms: int | None
@@ -308,6 +321,7 @@ class MediaProbeResult:
             "schemaVersion": self.schema_version,
             "sourcePath": self.source_path,
             "sourceSizeBytes": self.source_size_bytes,
+            "sourceSha256": self.source_sha256,
             "formatNames": list(self.format_names),
             "formatLongName": self.format_long_name,
             "durationMs": self.duration_ms,
@@ -332,6 +346,161 @@ class MediaProbeResult:
         }
 
 
+@lru_cache(maxsize=1)
+def _media_probe_contract_validator() -> Draft202012Validator:
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "contracts"
+        / "media-probe.schema.json"
+    )
+    try:
+        payload = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(payload)
+    except (OSError, UnicodeError, json.JSONDecodeError, SchemaError) as exc:
+        raise MediaProbeEvidenceError(
+            "the media-probe contract is unavailable or invalid"
+        ) from exc
+    return Draft202012Validator(payload)
+
+
+def validated_media_probe_payload(value: MediaProbeResult) -> dict[str, Any]:
+    """Return schema-validated probe evidence with cross-field checks.
+
+    ``MediaProbeResult`` is intentionally injectable for deterministic tests
+    and alternate local probing engines.  The worker therefore validates the
+    injected value again at the orchestration boundary rather than trusting a
+    dataclass-shaped object.
+    """
+
+    if not isinstance(value, MediaProbeResult):
+        raise MediaProbeEvidenceError(
+            "media probe must return a MediaProbeResult"
+        )
+    payload = value.to_dict()
+    try:
+        _media_probe_contract_validator().validate(payload)
+    except ValidationError as exc:
+        location = ".".join(str(part) for part in exc.absolute_path) or "$"
+        raise MediaProbeEvidenceError(
+            f"media-probe evidence violates the public contract at {location}"
+        ) from exc
+
+    streams = {stream.index: stream for stream in value.streams}
+    if len(streams) != len(value.streams):
+        raise MediaProbeEvidenceError("media stream indexes must be unique")
+    stream_indexes = tuple(stream.index for stream in value.streams)
+    if stream_indexes != tuple(sorted(stream_indexes)):
+        raise MediaProbeEvidenceError(
+            "media streams must be ordered by ascending stream index"
+        )
+    if value.format_names != tuple(sorted(set(value.format_names))):
+        raise MediaProbeEvidenceError(
+            "formatNames must be sorted and unique"
+        )
+    expected_audio = tuple(
+        stream.index for stream in value.streams if stream.type == "audio"
+    )
+    expected_video = tuple(
+        stream.index
+        for stream in value.streams
+        if stream.type == "video" and not stream.attached_picture
+    )
+    expected_subtitle = tuple(
+        stream.index for stream in value.streams if stream.type == "subtitle"
+    )
+    if value.audio_stream_indexes != expected_audio:
+        raise MediaProbeEvidenceError(
+            "audioStreamIndexes do not match stream evidence"
+        )
+    if value.video_stream_indexes != expected_video:
+        raise MediaProbeEvidenceError(
+            "videoStreamIndexes do not match stream evidence"
+        )
+    if value.subtitle_stream_indexes != expected_subtitle:
+        raise MediaProbeEvidenceError(
+            "subtitleStreamIndexes do not match stream evidence"
+        )
+    expected_subtitle_codecs = tuple(
+        sorted(
+            {
+                stream.codec_name
+                for stream in value.streams
+                if stream.type == "subtitle" and stream.codec_name is not None
+            }
+        )
+    )
+    if value.existing_subtitle_codecs != expected_subtitle_codecs:
+        raise MediaProbeEvidenceError(
+            "existingSubtitleCodecs do not match subtitle stream evidence"
+        )
+    expected_hdr = any(
+        stream.hdr
+        for stream in value.streams
+        if stream.type == "video" and not stream.attached_picture
+    )
+    if value.has_hdr_video is not expected_hdr:
+        raise MediaProbeEvidenceError(
+            "hasHdrVideo does not match video stream evidence"
+        )
+    expected_rotation = any(
+        stream.rotation_degrees is not None
+        for stream in value.streams
+        if stream.type == "video" and not stream.attached_picture
+    )
+    if value.has_rotation_metadata is not expected_rotation:
+        raise MediaProbeEvidenceError(
+            "hasRotationMetadata does not match video stream evidence"
+        )
+    if value.decode_smoke_tested and not value.decode_smoke_test_passed:
+        raise MediaProbeEvidenceError(
+            "persisted probe evidence cannot claim a failed decode smoke test"
+        )
+    if value.decode_smoke_test_passed and not value.decode_smoke_tested:
+        raise MediaProbeEvidenceError(
+            "decodeSmokeTestPassed requires decodeSmokeTested"
+        )
+    if value.decode_smoke_tested != (value.ffmpeg is not None):
+        raise MediaProbeEvidenceError(
+            "FFmpeg tool evidence must exactly match decode smoke-test execution"
+        )
+    if not value.audio_stream_indexes and not value.video_stream_indexes:
+        raise MediaProbeEvidenceError(
+            "probe evidence must contain at least one audio or video stream"
+        )
+    admitted_streams = tuple(
+        stream
+        for stream in value.streams
+        if stream.type == "audio"
+        or (stream.type == "video" and not stream.attached_picture)
+    )
+    unsupported = tuple(
+        stream.index
+        for stream in admitted_streams
+        if not stream.codec_name or stream.codec_name.lower() == "unknown"
+    )
+    if unsupported:
+        raise MediaProbeEvidenceError(
+            "admitted media streams must identify a decodable codec"
+        )
+    expected_fingerprint = _probe_fingerprint_sha256(
+        source_path=value.source_path,
+        source_size_bytes=value.source_size_bytes,
+        source_sha256=value.source_sha256,
+        format_names=value.format_names,
+        duration_ms=value.duration_ms,
+        streams=value.streams,
+        ffprobe_fingerprint=value.ffprobe.fingerprint_sha256,
+        ffmpeg_fingerprint=(
+            value.ffmpeg.fingerprint_sha256 if value.ffmpeg else None
+        ),
+    )
+    if value.probe_fingerprint_sha256 != expected_fingerprint:
+        raise MediaProbeEvidenceError(
+            "probeFingerprintSha256 does not match probe evidence"
+        )
+    return payload
+
+
 class MediaProbe:
     """Probe local media by content and optionally prove first-frame decoding."""
 
@@ -351,6 +520,7 @@ class MediaProbe:
 
     def probe(self, source: str | Path) -> MediaProbeResult:
         canonical = canonical_local_media_file(source)
+        source_before = canonical.stat()
         ffprobe_evidence = self._inspect_tool(
             self.ffprobe_command,
             limits=self.policy.ffprobe_limits,
@@ -389,13 +559,28 @@ class MediaProbe:
                 MediaProbeErrorCode.MALFORMED_PROBE,
                 "FFprobe did not return a valid streams array.",
             )
-        streams = tuple(
+        if any(not isinstance(raw, Mapping) for raw in raw_streams):
+            raise MediaProbeError(
+                MediaProbeErrorCode.MALFORMED_PROBE,
+                "FFprobe returned a malformed media stream entry.",
+            )
+        parsed_streams = tuple(
             _parse_stream(raw, fallback_index=index)
             for index, raw in enumerate(raw_streams)
-            if isinstance(raw, Mapping)
         )
+        if len({stream.index for stream in parsed_streams}) != len(
+            parsed_streams
+        ):
+            raise MediaProbeError(
+                MediaProbeErrorCode.MALFORMED_PROBE,
+                "FFprobe returned duplicate media stream indexes.",
+            )
+        streams = tuple(sorted(parsed_streams, key=lambda stream: stream.index))
         media_streams = tuple(
-            stream for stream in streams if stream.type in {"audio", "video"}
+            stream
+            for stream in streams
+            if stream.type == "audio"
+            or (stream.type == "video" and not stream.attached_picture)
         )
         if not media_streams:
             raise MediaProbeError(
@@ -454,8 +639,8 @@ class MediaProbe:
             )
             self._decode_smoke_test(
                 canonical,
-                has_audio=bool(audio_indexes),
-                has_video=bool(video_indexes),
+                audio_stream_indexes=audio_indexes,
+                video_stream_indexes=video_indexes,
             )
             decode_passed = True
 
@@ -479,30 +664,31 @@ class MediaProbe:
                 }
             )
         )
-        fingerprint_payload = {
-            "sourcePath": str(canonical),
-            "sourceSizeBytes": canonical.stat().st_size,
-            "formatNames": list(format_names),
-            "durationMs": duration_ms,
-            "streams": [stream.to_dict() for stream in streams],
-            "ffprobe": ffprobe_evidence.fingerprint_sha256,
-            "ffmpeg": (
+        source_sha256 = _sha256_file(canonical)
+        source_after = canonical.stat()
+        if _stat_identity(source_before) != _stat_identity(source_after):
+            raise MediaProbeError(
+                MediaProbeErrorCode.SOURCE_CHANGED,
+                "The media source changed while admission evidence was collected.",
+            )
+        fingerprint = _probe_fingerprint_sha256(
+            source_path=str(canonical),
+            source_size_bytes=source_after.st_size,
+            source_sha256=source_sha256,
+            format_names=format_names,
+            duration_ms=duration_ms,
+            streams=streams,
+            ffprobe_fingerprint=ffprobe_evidence.fingerprint_sha256,
+            ffmpeg_fingerprint=(
                 ffmpeg_evidence.fingerprint_sha256 if ffmpeg_evidence else None
             ),
-        }
-        fingerprint = hashlib.sha256(
-            json.dumps(
-                fingerprint_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        )
 
         return MediaProbeResult(
             schema_version=MEDIA_PROBE_SCHEMA_VERSION,
             source_path=str(canonical),
-            source_size_bytes=canonical.stat().st_size,
+            source_size_bytes=source_after.st_size,
+            source_sha256=source_sha256,
             format_names=format_names,
             format_long_name=_optional_text(format_payload.get("format_long_name")),
             duration_ms=duration_ms,
@@ -516,9 +702,15 @@ class MediaProbe:
                 stream.index for stream in subtitle_streams
             ),
             existing_subtitle_codecs=existing_subtitle_codecs,
-            has_hdr_video=any(stream.hdr for stream in streams),
+            has_hdr_video=any(
+                stream.hdr
+                for stream in streams
+                if stream.type == "video" and not stream.attached_picture
+            ),
             has_rotation_metadata=any(
-                stream.rotation_degrees is not None for stream in streams
+                stream.rotation_degrees is not None
+                for stream in streams
+                if stream.type == "video" and not stream.attached_picture
             ),
             decode_smoke_tested=self.policy.require_decode_smoke_test,
             decode_smoke_test_passed=decode_passed,
@@ -572,8 +764,8 @@ class MediaProbe:
         self,
         source: Path,
         *,
-        has_audio: bool,
-        has_video: bool,
+        audio_stream_indexes: Sequence[int],
+        video_stream_indexes: Sequence[int],
     ) -> None:
         command = [
             *self.ffmpeg_command,
@@ -585,12 +777,16 @@ class MediaProbe:
             "-i",
             str(source),
         ]
-        if has_audio:
-            command.extend(("-map", "0:a:0", "-frames:a", "1"))
+        if audio_stream_indexes:
+            for stream_index in audio_stream_indexes:
+                command.extend(("-map", f"0:{stream_index}"))
+            command.extend(("-frames:a", "1"))
         else:
             command.append("-an")
-        if has_video:
-            command.extend(("-map", "0:v:0", "-frames:v", "1"))
+        if video_stream_indexes:
+            for stream_index in video_stream_indexes:
+                command.extend(("-map", f"0:{stream_index}"))
+            command.extend(("-frames:v", "1"))
         else:
             command.append("-vn")
         command.extend(("-sn", "-dn", "-f", "null", "-"))
@@ -638,6 +834,55 @@ def canonical_local_media_file(source: str | Path) -> Path:
             "The media source must be a regular local file.",
         )
     return canonical
+
+
+def _probe_fingerprint_sha256(
+    *,
+    source_path: str,
+    source_size_bytes: int,
+    source_sha256: str,
+    format_names: Sequence[str],
+    duration_ms: int | None,
+    streams: Sequence[MediaStream],
+    ffprobe_fingerprint: str,
+    ffmpeg_fingerprint: str | None,
+) -> str:
+    payload = {
+        "sourcePath": source_path,
+        "sourceSizeBytes": source_size_bytes,
+        "sourceSha256": source_sha256,
+        "formatNames": list(format_names),
+        "durationMs": duration_ms,
+        "streams": [stream.to_dict() for stream in streams],
+        "ffprobe": ffprobe_fingerprint,
+        "ffmpeg": ffmpeg_fingerprint,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(getattr(value, "st_dev", 0)),
+        int(getattr(value, "st_ino", 0)),
+    )
 
 
 def _validated_command(command: Sequence[str], label: str) -> tuple[str, ...]:

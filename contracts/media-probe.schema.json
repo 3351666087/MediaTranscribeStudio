@@ -8,6 +8,7 @@
     "schemaVersion",
     "sourcePath",
     "sourceSizeBytes",
+    "sourceSha256",
     "formatNames",
     "formatLongName",
     "durationMs",
@@ -38,6 +39,9 @@
     "sourceSizeBytes": {
       "type": "integer",
       "minimum": 0
+    },
+    "sourceSha256": {
+      "$ref": "#/$defs/sha256"
     },
     "formatNames": {
       "type": "array",

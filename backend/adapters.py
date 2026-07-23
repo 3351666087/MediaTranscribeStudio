@@ -57,6 +57,8 @@ class ReportRendererAdapter(Protocol):
         document: Mapping[str, Any],
         request: StartJobRequest,
         context: AdapterContext,
+        *,
+        output_plan: Any | None = None,
     ) -> RenderResult:
         """Render and verify a dynamic-cardinality transcript document."""
 
@@ -86,6 +88,8 @@ class UnavailableRendererAdapter:
         document: Mapping[str, Any],
         request: StartJobRequest,
         context: AdapterContext,
+        *,
+        output_plan: Any | None = None,
     ) -> RenderResult:
         context.raise_if_cancelled()
         raise WorkerError(
@@ -109,6 +113,8 @@ class JavaPdfRendererAdapter:
         document: Mapping[str, Any],
         request: StartJobRequest,
         context: AdapterContext,
+        *,
+        output_plan: Any | None = None,
     ) -> RenderResult:
         context.raise_if_cancelled()
         policy = document.get("speakerPolicy")
@@ -275,6 +281,23 @@ class JavaPdfRendererAdapter:
                 details={"language": document.get("language")},
             ) from exc
         try:
+            renderer_config: dict[str, Any] = {
+                "speakerPolicy": dict(policy),
+                "offline": True,
+                "renderer": self.adapter_id,
+            }
+            if output_plan is not None:
+                from .output_orchestration import OutputExecutionPlan
+
+                if not isinstance(output_plan, OutputExecutionPlan):
+                    raise WorkerError(
+                        "OUTPUT_EXECUTION_PLAN_INVALID",
+                        "Java PDF rendering requires an OutputExecutionPlan",
+                    )
+                renderer_config = output_plan.report_renderer_config(
+                    speaker_policy=policy,
+                    renderer_id=self.adapter_id,
+                )
             report_document = self.assembler.assemble(
                 report_segments,
                 source_path=request.source_path,
@@ -303,11 +326,7 @@ class JavaPdfRendererAdapter:
                 },
                 speaker_profiles=speaker_profiles,
                 models=report_models,
-                config={
-                    "speakerPolicy": dict(policy),
-                    "offline": True,
-                    "renderer": self.adapter_id,
-                },
+                config=renderer_config,
             )
             outcome = self.java_client.render(
                 report_document,

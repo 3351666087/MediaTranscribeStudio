@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +14,12 @@ from backend.media_probe import (
     MediaProbe,
     MediaProbeError,
     MediaProbeErrorCode,
+    MediaProbeEvidenceError,
     MediaProbePolicy,
     ProcessLimits,
     ProcessResult,
     canonical_local_media_file,
+    validated_media_probe_payload,
 )
 
 
@@ -175,6 +178,64 @@ def test_probe_result_validates_against_contract(tmp_path: Path) -> None:
     assert result.ffprobe.version_line == "ffprobe version 8.0-test"
     assert result.ffmpeg is not None
     assert result.ffmpeg.version_line == "ffmpeg version 8.0-test"
+
+
+def test_probe_fingerprint_tampering_is_rejected(tmp_path: Path) -> None:
+    source = tmp_path / "meeting.m4a"
+    source.write_bytes(b"fixture")
+    result = MediaProbe(runner=FixtureRunner(media_payload())).probe(source)
+
+    with pytest.raises(MediaProbeEvidenceError):
+        validated_media_probe_payload(
+            replace(result, probe_fingerprint_sha256="0" * 64)
+        )
+
+
+def test_decode_smoke_test_maps_every_admitted_stream_by_exact_index(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "cover-first.media"
+    source.write_bytes(b"fixture")
+    payload = media_payload()
+    payload["streams"] = [
+        {
+            "index": 0,
+            "codec_name": "mjpeg",
+            "codec_type": "video",
+            "disposition": {"attached_pic": 1},
+        },
+        {
+            "index": 2,
+            "codec_name": "aac",
+            "codec_type": "audio",
+            "sample_rate": "48000",
+            "channels": 2,
+            "disposition": {"default": 1},
+        },
+        {
+            "index": 4,
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 1920,
+            "height": 1080,
+            "color_transfer": "bt709",
+            "disposition": {"attached_pic": 0},
+        },
+    ]
+    runner = FixtureRunner(payload)
+
+    result = MediaProbe(runner=runner).probe(source)
+
+    assert result.audio_stream_indexes == (2,)
+    assert result.video_stream_indexes == (4,)
+    decode_command = runner.commands[-1]
+    mapped_streams = [
+        decode_command[index + 1]
+        for index, value in enumerate(decode_command[:-1])
+        if value == "-map"
+    ]
+    assert mapped_streams == ["0:2", "0:4"]
+    assert "0:0" not in mapped_streams
 
 
 @pytest.mark.parametrize(

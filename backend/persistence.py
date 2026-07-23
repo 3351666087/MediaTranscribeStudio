@@ -9,10 +9,27 @@ import os
 import shutil
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .errors import WorkerError
+
+
+@dataclass(frozen=True)
+class PublishedJsonEvidence:
+    """Exact integrity evidence for an immutably published JSON artifact."""
+
+    path: Path
+    size_bytes: int
+    sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "sizeBytes": self.size_bytes,
+            "sha256": self.sha256,
+        }
 
 
 def validate_strict_json(value: Any, *, path: str = "$") -> None:
@@ -104,6 +121,81 @@ def atomic_write_json(path: Path, value: Any) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def atomic_write_json_no_replace(path: Path, value: Any) -> None:
+    """Atomically publish a new JSON artifact without replacing any path.
+
+    Durable evidence and user-facing outputs must never inherit checkpoint
+    semantics.  Checkpoints intentionally replace their previous version;
+    immutable evidence artifacts instead use an exclusive hard-link publish
+    in the destination directory so a concurrently created file fails closed.
+    """
+
+    validate_strict_json(value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    payload = (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    published = False
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+        published = True
+        if os.name != "nt":
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        if not published and path.exists():
+            # The destination belongs to another publisher.  Never remove it.
+            pass
+
+
+def atomic_publish_json_evidence(
+    path: Path,
+    value: Any,
+) -> PublishedJsonEvidence:
+    """Publish JSON once and return a hash of the exact persisted bytes."""
+
+    atomic_write_json_no_replace(path, value)
+    canonical = path.resolve(strict=True)
+    if not canonical.is_file():
+        raise WorkerError(
+            "ARTIFACT_INTEGRITY_FAILED",
+            "published JSON evidence is not a regular file",
+            details={"path": str(path)},
+        )
+    size_bytes = canonical.stat().st_size
+    digest = sha256_file(canonical)
+    if size_bytes <= 0 or len(digest) != 64:
+        raise WorkerError(
+            "ARTIFACT_INTEGRITY_FAILED",
+            "published JSON evidence could not be verified",
+            details={"path": str(canonical)},
+        )
+    return PublishedJsonEvidence(
+        path=canonical,
+        size_bytes=size_bytes,
+        sha256=digest,
+    )
 
 
 def read_json_strict(path: Path) -> dict[str, Any]:

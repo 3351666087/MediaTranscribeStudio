@@ -126,6 +126,7 @@ def _probe_result(
         schema_version="1.0.0",
         source_path=str(path.resolve(strict=True)),
         source_size_bytes=path.stat().st_size,
+        source_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         format_names=("mov", "mp4"),
         format_long_name="fixture",
         duration_ms=duration_ms,

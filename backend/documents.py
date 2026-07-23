@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import WorkerError
+from .language import MULTIPLE_LANGUAGES, UNDETERMINED_LANGUAGE, normalize_language_tag
 from .models import (
     SpeakerCountEstimate,
     SpeakerCountMode,
@@ -477,6 +478,49 @@ def assemble_transcript_document(
     adapter_id: str,
     adapter_version: str,
 ) -> dict[str, Any]:
+    try:
+        resolved_language = normalize_language_tag(language, allow_auto=False)
+    except ValueError as exc:
+        raise WorkerError(
+            "ADAPTER_RESULT_INVALID",
+            "transcript language must be a persisted BCP-47 tag, und, or mul",
+        ) from exc
+
+    normalized_segment_languages: list[str | None] = []
+    detected_languages: set[str] = set()
+    for segment in result.segments:
+        if segment.language is None:
+            normalized_segment_languages.append(None)
+            continue
+        try:
+            segment_language = normalize_language_tag(
+                segment.language,
+                allow_auto=False,
+            )
+        except ValueError as exc:
+            raise WorkerError(
+                "ADAPTER_RESULT_INVALID",
+                f"{segment.segment_id}.language must be a valid persisted BCP-47 language tag",
+            ) from exc
+        normalized_segment_languages.append(segment_language)
+        if segment_language not in {
+            UNDETERMINED_LANGUAGE,
+            MULTIPLE_LANGUAGES,
+        }:
+            detected_languages.add(segment_language)
+
+    if len(detected_languages) > 1:
+        resolved_language = MULTIPLE_LANGUAGES
+
+    segments: list[dict[str, Any]] = []
+    for segment, segment_language in zip(
+        result.segments,
+        normalized_segment_languages,
+    ):
+        entry = segment.as_dict()
+        entry["language"] = segment_language or resolved_language
+        segments.append(entry)
+
     canonical = canonical_speaker_ids(speaker_count)
     source_hash = sha256_file(source_path)
     document_seed = f"{source_hash}:{job_id}:{speaker_count}".encode("utf-8")
@@ -501,7 +545,7 @@ def assemble_transcript_document(
         "documentId": document_id,
         "jobId": job_id,
         "generatedAt": utc_now(),
-        "language": language,
+        "language": resolved_language,
         "source": {
             "fileName": source_path.name,
             "sha256": source_hash,
@@ -509,7 +553,7 @@ def assemble_transcript_document(
         },
         "speakerPolicy": speaker_policy,
         "speakers": speaker_entries,
-        "segments": [segment.as_dict() for segment in result.segments],
+        "segments": segments,
         "provenance": {
             "offline": True,
             "workerVersion": "2.0.0",

@@ -8,7 +8,19 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .errors import JobCancelled, WorkerError
-from .models import RenderResult, StartJobRequest, TranscriptionResult
+from .language import UNDETERMINED_LANGUAGE, normalize_language_tag
+from .models import RenderArtifact, RenderResult, StartJobRequest, TranscriptionResult
+
+
+_JAVA_PDF_ARTIFACT_TYPES = {
+    "reportDocumentPath": "pdf-report-document-v1",
+    "htmlPath": "pdf-canonical-xhtml",
+    "pdfPath": "pdf",
+    "manifestPath": "pdf-render-manifest-v1",
+    "qualityReportPath": "pdf-quality-report-v1",
+    "repairQueuePath": "pdf-repair-queue-v1",
+    "contactSheetPath": "pdf-contact-sheet",
+}
 
 
 @dataclass(frozen=True)
@@ -252,6 +264,17 @@ class JavaPdfRendererAdapter:
             if isinstance(item, Mapping) and item.get("id") in speaker_ids
         }
         try:
+            report_language = normalize_language_tag(
+                document.get("language") or UNDETERMINED_LANGUAGE,
+                allow_auto=False,
+            )
+        except ValueError as exc:
+            raise WorkerError(
+                "REPORT_DOCUMENT_INVALID",
+                "transcript document language must be a persisted BCP-47 tag",
+                details={"language": document.get("language")},
+            ) from exc
+        try:
             report_document = self.assembler.assemble(
                 report_segments,
                 source_path=request.source_path,
@@ -259,7 +282,7 @@ class JavaPdfRendererAdapter:
                 document_id=document.get("documentId"),
                 generated_at=document.get("generatedAt"),
                 title=document.get("title"),
-                language=document.get("language", "zh-CN"),
+                language=report_language,
                 speaker_count_mode=mode,
                 speaker_count=count if mode in {"manual", "hybrid"} else None,
                 minimum_speaker_count=bounds.get("min"),
@@ -322,5 +345,13 @@ class JavaPdfRendererAdapter:
                 Path(path)
                 for key, path in artifacts.items()
                 if key != "screenshotsDirectory"
+            ),
+            artifacts=tuple(
+                RenderArtifact(
+                    artifact_type=_JAVA_PDF_ARTIFACT_TYPES[key],
+                    path=Path(path),
+                )
+                for key, path in artifacts.items()
+                if key in _JAVA_PDF_ARTIFACT_TYPES
             ),
         )

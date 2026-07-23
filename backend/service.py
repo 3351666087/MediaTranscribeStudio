@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import uuid
 from collections.abc import Mapping as MappingABC
@@ -17,6 +18,11 @@ from .adapters import (
     UnavailableRendererAdapter,
     UnavailableTranscriptionAdapter,
 )
+from .business_processing import (
+    BUSINESS_PROMPT_VERSION,
+    BusinessProcessingConfig,
+    BusinessProcessingRunner,
+)
 from .documents import (
     assemble_transcript_document,
     build_review_queue,
@@ -25,10 +31,13 @@ from .documents import (
     validate_segments,
 )
 from .errors import JobCancelled, WorkerError, invalid_request
+from .local_llm import LocalLLMConfig, LocalLLMProvider, OllamaLocalProvider
+from .language import normalize_language_tag
 from .models import (
     CHECKPOINT_SCHEMA_VERSION,
     JobStatus,
     PROTOCOL_VERSION,
+    RenderArtifact,
     RenderResult,
     SpeakerCountPolicy,
     StartJobRequest,
@@ -86,6 +95,11 @@ class JobRecord:
     review_open_count: int = 0
     pipeline_metrics_path: str | None = None
     artifact_paths: list[str] = field(default_factory=list)
+    business_status: str = "not-requested"
+    business_manifest_path: str | None = None
+    business_artifact_paths: list[str] = field(default_factory=list)
+    business_provenance: dict[str, Any] | None = None
+    business_error: dict[str, Any] | None = None
     capacity_released: bool = False
     followup_operation: str | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -108,6 +122,15 @@ class WorkerService:
         low_speaker_margin_threshold: float = 0.18,
         high_speaker_margin_threshold: float = 0.35,
         range_width_threshold: int = 0,
+        business_provider: LocalLLMProvider | None = None,
+        business_provider_factory: Callable[
+            [StartJobRequest], LocalLLMProvider
+        ]
+        | None = None,
+        business_runner_factory: Callable[
+            [StartJobRequest, AdapterContext], BusinessProcessingRunner
+        ]
+        | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be positive")
@@ -136,6 +159,9 @@ class WorkerService:
         self.low_speaker_margin_threshold = low_speaker_margin_threshold
         self.high_speaker_margin_threshold = high_speaker_margin_threshold
         self.range_width_threshold = range_width_threshold
+        self.business_provider = business_provider
+        self.business_provider_factory = business_provider_factory
+        self.business_runner_factory = business_runner_factory
         self._jobs: dict[str, JobRecord] = {}
         self._active_outputs: dict[Path, str] = {}
         self._lock = threading.RLock()
@@ -159,6 +185,13 @@ class WorkerService:
             "localLlmMode",
             "localLlmModel",
             "localLlmAutoApply",
+            "translationTargets",
+            "polish",
+            "summary",
+            "outputLocale",
+            "businessPromptVersion",
+            "localLlmEndpoint",
+            "localLlmEndpointPolicy",
         }
         unknown_fields = sorted(set(payload) - allowed_fields)
         if unknown_fields:
@@ -181,26 +214,97 @@ class WorkerService:
             title = title_raw.strip()
             if len(title) > 240:
                 raise invalid_request("title exceeds 240 characters")
-        language = str(payload.get("language") or "zh-CN").strip()
-        if language not in {"zh", "zh-CN", "zh-Hans"}:
-            raise invalid_request("language must be zh, zh-CN, or zh-Hans")
+        language_raw = payload.get("language", "auto")
+        try:
+            language = normalize_language_tag(language_raw, allow_auto=True)
+        except ValueError as exc:
+            raise invalid_request(
+                "language must be auto or a valid BCP-47 language tag"
+            ) from exc
         local_llm_mode = str(
             payload.get("localLlmMode") or "disabled"
         ).strip()
-        if local_llm_mode not in {"disabled", "suggestion-only"}:
+        if local_llm_mode not in {
+            "disabled",
+            "suggestion-only",
+            "business",
+            "enabled",
+        }:
             raise invalid_request(
-                "localLlmMode must be disabled or suggestion-only"
+                "localLlmMode must be disabled, suggestion-only, business, or enabled"
             )
-        local_llm_model = str(
-            payload.get("localLlmModel") or "qwen3.5:4b"
-        ).strip()
-        if local_llm_model != "qwen3.5:4b":
-            raise invalid_request("localLlmModel must be qwen3.5:4b")
+        local_llm_model_raw = payload.get("localLlmModel", "qwen3.5:4b")
+        if not isinstance(local_llm_model_raw, str):
+            raise invalid_request("localLlmModel must be a string")
+        local_llm_model = local_llm_model_raw.strip() or "qwen3.5:4b"
+        if not local_llm_model or len(local_llm_model) > 160:
+            raise invalid_request(
+                "localLlmModel must be a non-empty string of at most 160 characters"
+            )
+        endpoint_raw = payload.get(
+            "localLlmEndpoint", "http://127.0.0.1:11434"
+        )
+        if not isinstance(endpoint_raw, str):
+            raise invalid_request("localLlmEndpoint must be a string")
+        endpoint = endpoint_raw.strip() or "http://127.0.0.1:11434"
+        endpoint_policy_raw = payload.get(
+            "localLlmEndpointPolicy", "loopback-only"
+        )
+        if not isinstance(endpoint_policy_raw, str):
+            raise invalid_request("localLlmEndpointPolicy must be a string")
+        endpoint_policy = endpoint_policy_raw.strip() or "loopback-only"
+        if endpoint_policy != "loopback-only":
+            raise invalid_request(
+                "localLlmEndpointPolicy must be loopback-only"
+            )
+        try:
+            LocalLLMConfig(model=local_llm_model, endpoint=endpoint)
+        except ValueError as exc:
+            raise invalid_request(
+                "localLlmEndpoint must be a valid loopback-only endpoint"
+            ) from exc
         local_llm_auto_apply = payload.get("localLlmAutoApply", False)
         if not isinstance(local_llm_auto_apply, bool):
             raise invalid_request("localLlmAutoApply must be a boolean")
         if local_llm_auto_apply:
             raise invalid_request("localLlmAutoApply is permanently forbidden")
+        raw_targets = payload.get("translationTargets", [])
+        if not isinstance(raw_targets, list) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in raw_targets
+        ):
+            raise invalid_request(
+                "translationTargets must be an array of non-empty language tags"
+            )
+        if not isinstance(payload.get("polish", False), bool):
+            raise invalid_request("polish must be a boolean")
+        if not isinstance(payload.get("summary", False), bool):
+            raise invalid_request("summary must be a boolean")
+        output_locale_raw = payload.get("outputLocale", "en")
+        if not isinstance(output_locale_raw, str):
+            raise invalid_request("outputLocale must be a language-tag string")
+        prompt_version_raw = payload.get(
+            "businessPromptVersion", BUSINESS_PROMPT_VERSION
+        )
+        if not isinstance(prompt_version_raw, str):
+            raise invalid_request("businessPromptVersion must be a string")
+        try:
+            business_config = BusinessProcessingConfig(
+                translation_targets=tuple(raw_targets),
+                polish=payload.get("polish", False),
+                summary=payload.get("summary", False),
+                model=local_llm_model,
+                output_locale=output_locale_raw,
+                prompt_version=prompt_version_raw,
+            )
+        except (TypeError, ValueError) as exc:
+            raise invalid_request(
+                "business processing options are invalid"
+            ) from exc
+        if business_config.enabled and local_llm_mode == "disabled":
+            raise invalid_request(
+                "localLlmMode must enable business processing when variants are requested"
+            )
         return StartJobRequest(
             job_id=job_id,
             source_path=source,
@@ -211,6 +315,8 @@ class WorkerService:
             language=language,
             local_llm_mode=local_llm_mode,
             local_llm_model=local_llm_model,
+            local_llm_endpoint=endpoint,
+            business_config=business_config,
         )
 
     def register(self, request: StartJobRequest) -> JobRecord:
@@ -221,6 +327,8 @@ class WorkerService:
                 retryable=True,
             )
         record = JobRecord(request=request)
+        if request.business_config.enabled:
+            record.business_status = "pending"
         try:
             with self._lock:
                 if self._closed:
@@ -584,6 +692,22 @@ class WorkerService:
                 "pipelineMetricsPath": record.pipeline_metrics_path,
                 "artifactPaths": list(record.artifact_paths),
                 "followupOperation": record.followup_operation,
+                "business": {
+                    "status": record.business_status,
+                    "config": record.request.business_config.as_dict(),
+                    "manifestPath": record.business_manifest_path,
+                    "artifactPaths": list(record.business_artifact_paths),
+                    "provenance": (
+                        dict(record.business_provenance)
+                        if record.business_provenance
+                        else None
+                    ),
+                    "error": (
+                        dict(record.business_error)
+                        if record.business_error
+                        else None
+                    ),
+                },
             }
             if record.error:
                 value["error"] = dict(record.error)
@@ -947,6 +1071,7 @@ class WorkerService:
                     details={"openCount": open_count(queue)},
                 )
             self._sync_record_from_review_state(record, document, queue)
+            self._run_business_processing(record, document, context)
             if operation == "rerender" or record.request.render_pdf:
                 self._transition(record, JobStatus.RUNNING, "rendering")
                 self._emit(
@@ -973,6 +1098,7 @@ class WorkerService:
                     "status": "completed",
                     "operation": operation,
                     "artifactPaths": list(record.artifact_paths),
+                    "business": self._business_event_payload(record),
                 },
             )
         except JobCancelled:
@@ -1030,6 +1156,159 @@ class WorkerService:
         render_result.validate()
         self._accept_render_result(record, render_result)
 
+    def _business_runner(
+        self,
+        record: JobRecord,
+        context: AdapterContext,
+    ) -> BusinessProcessingRunner:
+        if self.business_runner_factory is not None:
+            return self.business_runner_factory(record.request, context)
+        provider = self.business_provider
+        if self.business_provider_factory is not None:
+            provider = self.business_provider_factory(record.request)
+        if provider is None:
+            provider = OllamaLocalProvider(
+                LocalLLMConfig(
+                    model=record.request.business_config.model,
+                    endpoint=record.request.local_llm_endpoint,
+                )
+            )
+        return BusinessProcessingRunner(
+            provider=provider,
+            cancellation_check=context.raise_if_cancelled,
+        )
+
+    def _run_business_processing(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+        context: AdapterContext,
+    ) -> None:
+        config = record.request.business_config
+        if not config.enabled:
+            record.business_status = "not-requested"
+            return
+        transcript_path = (
+            record.request.output_directory / "transcript-document.v2.json"
+        )
+        before_hash = canonical_json_sha256(document)
+        record.business_status = "running"
+        record.business_error = None
+        self._transition(record, JobStatus.RUNNING, "business_processing")
+        self._emit(
+            record,
+            "stage.started",
+            {
+                "stage": "business_processing",
+                "variants": config.as_dict(),
+            },
+        )
+        try:
+            runner = self._business_runner(record, context)
+            paths = runner.run(
+                document,
+                output_directory=record.request.output_directory,
+                config=config,
+            )
+            context.raise_if_cancelled()
+            if canonical_json_sha256(document) != before_hash:
+                raise WorkerError(
+                    "BUSINESS_TRANSCRIPT_MUTATED",
+                    "business processing mutated the in-memory transcript",
+                )
+            after_document = read_json_strict(transcript_path)
+            after_hash = canonical_json_sha256(after_document)
+            if after_hash != before_hash:
+                raise WorkerError(
+                    "BUSINESS_TRANSCRIPT_MUTATED",
+                    "business processing changed transcript-document.v2.json",
+                )
+            verified_paths = [
+                self.path_policy.verify_artifact(
+                    Path(path),
+                    record.request.output_directory,
+                )
+                for path in paths
+            ]
+            record.business_artifact_paths = [str(path) for path in verified_paths]
+            manifest = next(
+                (
+                    path
+                    for path in verified_paths
+                    if path.name == "business-manifest.v1.json"
+                ),
+                None,
+            )
+            record.business_manifest_path = (
+                str(manifest) if manifest is not None else None
+            )
+            if manifest is not None:
+                manifest_value = read_json_strict(manifest)
+                if isinstance(manifest_value.get("config"), MappingABC):
+                    record.business_provenance = dict(manifest_value["config"])
+            for path in verified_paths:
+                if path == manifest:
+                    continue
+                try:
+                    artifact_value = read_json_strict(path)
+                except WorkerError:
+                    continue
+                if not isinstance(artifact_value, MappingABC):
+                    continue
+                provenance_keys = {
+                    "schemaVersion",
+                    "variant",
+                    "inputHash",
+                    "model",
+                    "promptVersion",
+                    "provider",
+                }
+                provenance = {
+                    key: artifact_value[key]
+                    for key in provenance_keys
+                    if key in artifact_value
+                }
+                if provenance:
+                    record.business_provenance = {
+                        **(record.business_provenance or {}),
+                        **provenance,
+                    }
+                    break
+            record.business_status = "completed"
+            for path in verified_paths:
+                artifact_type = (
+                    "business-manifest-v1"
+                    if path.name == "business-manifest.v1.json"
+                    else "business-variant-v1"
+                )
+                self._emit(
+                    record,
+                    "artifact.created",
+                    {
+                        "artifactType": artifact_type,
+                        "path": str(path),
+                        "sha256": self._artifact_sha256(path),
+                    },
+                )
+                if str(path) not in record.artifact_paths:
+                    record.artifact_paths.append(str(path))
+        except JobCancelled:
+            record.business_status = "cancelled"
+            raise
+        except WorkerError as exc:
+            record.business_status = "failed"
+            record.business_error = exc.as_payload()
+            raise
+        except Exception as exc:
+            record.business_status = "failed"
+            error = WorkerError(
+                "BUSINESS_PROCESSING_FAILED",
+                "business processing failed closed",
+                details={"exceptionType": type(exc).__name__},
+            )
+            record.business_error = error.as_payload()
+            raise error from exc
+
     def _run_job(self, record: JobRecord) -> None:
         context = AdapterContext(
             job_id=record.request.job_id,
@@ -1074,7 +1353,7 @@ class WorkerService:
                 speaker_count=count,
                 result=result,
                 title=record.request.title,
-                language=record.request.language,
+                language=result.language,
                 adapter_id=self.transcription_adapter.adapter_id,
                 adapter_version=self.transcription_adapter.version,
             )
@@ -1225,6 +1504,7 @@ class WorkerService:
                 )
                 return
 
+            self._run_business_processing(record, document, context)
             if record.request.render_pdf:
                 self._transition(record, JobStatus.RUNNING, "rendering")
                 self._emit(
@@ -1247,6 +1527,7 @@ class WorkerService:
                 {
                     "status": "completed",
                     "artifactPaths": list(record.artifact_paths),
+                    "business": self._business_event_payload(record),
                 },
             )
         except JobCancelled:
@@ -1280,26 +1561,103 @@ class WorkerService:
     def _accept_render_result(
         self, record: JobRecord, result: RenderResult
     ) -> None:
-        paths = (
-            result.quality_report_path,
-            result.render_manifest_path,
-            *result.artifact_paths,
+        typed_artifacts = (
+            list(result.artifacts)
+            if result.artifacts
+            else [
+                RenderArtifact(
+                    artifact_type=self._infer_render_artifact_type(path),
+                    path=path,
+                )
+                for path in result.artifact_paths
+            ]
         )
-        verified = [
-            self.path_policy.verify_artifact(
-                Path(path), record.request.output_directory
+        declared_paths = {artifact.path for artifact in typed_artifacts}
+        required_artifacts = (
+            RenderArtifact(
+                artifact_type="pdf-quality-report-v1",
+                path=result.quality_report_path,
+            ),
+            RenderArtifact(
+                artifact_type="pdf-render-manifest-v1",
+                path=result.render_manifest_path,
+            ),
+        )
+        for artifact in required_artifacts:
+            if artifact.path not in declared_paths:
+                typed_artifacts.append(artifact)
+                declared_paths.add(artifact.path)
+
+        verified_artifacts: list[tuple[str, Path]] = []
+        verified_paths: set[Path] = set()
+        for artifact in typed_artifacts:
+            verified_path = self.path_policy.verify_artifact(
+                artifact.path,
+                record.request.output_directory,
             )
-            for path in paths
-        ]
+            if verified_path in verified_paths:
+                continue
+            verified_paths.add(verified_path)
+            verified_artifacts.append((artifact.artifact_type, verified_path))
+
+        quality_report_path = self.path_policy.verify_artifact(
+            result.quality_report_path,
+            record.request.output_directory,
+        )
+        render_manifest_path = self.path_policy.verify_artifact(
+            result.render_manifest_path,
+            record.request.output_directory,
+        )
         record.template_hash = result.template_hash
         record.renderer_version = result.renderer_version
         record.quality_status = result.quality_status
-        record.quality_report_path = str(verified[0])
-        record.render_manifest_path = str(verified[1])
-        for path in verified[2:]:
+        record.quality_report_path = str(quality_report_path)
+        record.render_manifest_path = str(render_manifest_path)
+        for artifact_type, path in verified_artifacts:
             text = str(path)
             if text not in record.artifact_paths:
                 record.artifact_paths.append(text)
+            self._emit(
+                record,
+                "artifact.created",
+                {
+                    "artifactType": artifact_type,
+                    "path": text,
+                    "sha256": self._artifact_sha256(path),
+                },
+            )
+
+    @staticmethod
+    def _infer_render_artifact_type(path: Path) -> str:
+        name = path.name.casefold()
+        suffix = path.suffix.casefold()
+        if suffix == ".pdf":
+            return "pdf"
+        if "quality-report" in name:
+            return "pdf-quality-report-v1"
+        if "render-manifest" in name or name == "manifest.json":
+            return "pdf-render-manifest-v1"
+        if "repair-queue" in name:
+            return "pdf-repair-queue-v1"
+        if "contact-sheet" in name:
+            return "pdf-contact-sheet"
+        if "report-document" in name:
+            return "pdf-report-document-v1"
+        if suffix in {".html", ".xhtml"}:
+            return "pdf-canonical-xhtml"
+        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            return "pdf-page-evidence"
+        return "pdf-render-artifact"
+
+    @staticmethod
+    def _artifact_sha256(path: Path) -> str:
+        if path.suffix.casefold() == ".json":
+            return canonical_json_sha256(read_json_strict(path))
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _transition(
         self, record: JobRecord, status: JobStatus, stage: str
@@ -1315,9 +1673,19 @@ class WorkerService:
             if record.status is JobStatus.CANCELLED:
                 return
             record.error = error.as_payload()
+            if record.business_status == "running":
+                record.business_status = "failed"
+                record.business_error = error.as_payload()
             record.quality_status = "failed"
         self._transition(record, JobStatus.FAILED, "failed")
-        self._emit(record, "job.failed", error.as_payload())
+        self._emit(
+            record,
+            "job.failed",
+            {
+                **error.as_payload(),
+                "business": self._business_event_payload(record),
+            },
+        )
 
     def _finish_cancelled(self, record: JobRecord) -> None:
         with record.lock:
@@ -1328,12 +1696,40 @@ class WorkerService:
                 JobStatus.FAILED,
             }:
                 return
+            if record.business_status == "running":
+                record.business_status = "cancelled"
             record.quality_status = "cancelled"
         self._transition(record, JobStatus.CANCELLED, "cancelled")
-        self._emit(record, "job.cancelled", {"status": "cancelled"})
+        self._emit(
+            record,
+            "job.cancelled",
+            {
+                "status": "cancelled",
+                "business": self._business_event_payload(record),
+            },
+        )
         with self._lock:
             self._active_outputs.pop(record.request.output_directory, None)
         self._release_capacity(record)
+
+    @staticmethod
+    def _business_event_payload(record: JobRecord) -> dict[str, Any]:
+        return {
+            "status": record.business_status,
+            "config": record.request.business_config.as_dict(),
+            "manifestPath": record.business_manifest_path,
+            "artifactPaths": list(record.business_artifact_paths),
+            "provenance": (
+                dict(record.business_provenance)
+                if record.business_provenance
+                else None
+            ),
+            "error": (
+                dict(record.business_error)
+                if record.business_error
+                else None
+            ),
+        }
 
     def _emit(
         self, record: JobRecord, event_type: str, payload: Mapping[str, Any]
@@ -1368,6 +1764,23 @@ class WorkerService:
                 "sourcePath": str(record.request.source_path),
                 "outputDirectory": str(record.request.output_directory),
                 "speakerCountPolicy": record.request.speaker_policy.as_dict(),
+                "language": record.request.language,
+                "business": {
+                    "status": record.business_status,
+                    "config": record.request.business_config.as_dict(),
+                    "manifestPath": record.business_manifest_path,
+                    "artifactPaths": list(record.business_artifact_paths),
+                    "provenance": (
+                        dict(record.business_provenance)
+                        if record.business_provenance
+                        else None
+                    ),
+                    "error": (
+                        dict(record.business_error)
+                        if record.business_error
+                        else None
+                    ),
+                },
                 "documentHash": record.document_hash,
                 "templateHash": record.template_hash,
                 "rendererVersion": record.renderer_version,

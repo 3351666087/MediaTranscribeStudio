@@ -256,6 +256,60 @@ class ReportDocumentAssemblerTests(unittest.TestCase):
         self.assertEqual(len(document["source"]["sha256"]), 64)
         self.assertEqual(len(document["provenance"]["configSha256"]), 64)
 
+    def test_preserves_multilingual_document_and_segment_languages(self) -> None:
+        segments = synthetic_segments()
+        segments[0]["language"] = "pt_br"
+        segments[1]["language"] = "ZH_hans_cn"
+        document = self.assemble(segments, language="SR_latn_rs")
+
+        self.assertEqual(document["language"], "sr-Latn-RS")
+        self.assertEqual(document["segments"][0]["language"], "pt-BR")
+        self.assertEqual(document["segments"][1]["language"], "zh-Hans-CN")
+        self.assertEqual(document["segments"][2]["language"], "sr-Latn-RS")
+
+    def test_report_locale_is_optional_canonical_and_independent(self) -> None:
+        omitted = self.assemble(language="fa_IR")
+        self.assertEqual(omitted["language"], "fa-IR")
+        self.assertNotIn("reportLocale", omitted)
+        self.assertEqual(omitted["speakers"][0]["displayName"], "Speaker 1")
+
+        explicit = self.assemble(language="ar-SA", report_locale="EN_us")
+        self.assertEqual(explicit["language"], "ar-SA")
+        self.assertEqual(explicit["reportLocale"], "en-US")
+        self.assertEqual(explicit["segments"][0]["language"], "ar-SA")
+        self.assertEqual(explicit["speakers"][0]["displayName"], "Speaker 1")
+
+        japanese = self.assemble(language="en-US", report_locale="ja-JP")
+        self.assertEqual(japanese["speakers"][0]["displayName"], "話者 1")
+
+        chinese = self.assemble(language="zh-CN")
+        self.assertEqual(chinese["speakers"][0]["displayName"], "角色 1")
+
+    def test_rejects_request_only_or_malformed_report_locale(self) -> None:
+        for value in ("auto", "AUTO", "en-a", "en__US"):
+            with self.subTest(report_locale=value):
+                with self.assertRaisesRegex(ReportAssemblyError, "BCP-47"):
+                    self.assemble(language="en-US", report_locale=value)
+
+    def test_rejects_request_only_auto_as_persisted_language(self) -> None:
+        with self.assertRaisesRegex(ReportAssemblyError, "BCP-47"):
+            self.assemble(language="auto")
+
+        segments = synthetic_segments()
+        segments[0]["language"] = "auto"
+        with self.assertRaisesRegex(ReportAssemblyError, "BCP-47"):
+            self.assemble(segments, language="en")
+
+    def test_rejects_malformed_segment_language(self) -> None:
+        segments = synthetic_segments()
+        segments[0]["language"] = "en-a"
+        with self.assertRaisesRegex(ReportAssemblyError, "BCP-47"):
+            self.assemble(segments, language="en")
+
+    def test_rejects_malformed_document_language(self) -> None:
+        with self.assertRaisesRegex(ReportAssemblyError, "BCP-47"):
+            self.assemble(language="en-a")
+
 
 if __name__ == "__main__":
     unittest.main()

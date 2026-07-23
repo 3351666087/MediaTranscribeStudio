@@ -372,6 +372,86 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
         self.assertFalse(manual["renderPdf"])
         self.assertFalse(auto["renderPdf"])
         self.assertFalse(hybrid["renderPdf"])
+        self.assertEqual(auto["language"], "auto")
+        self.assertEqual(auto["localLlmMode"], "disabled")
+        self.assertEqual(auto["translationTargets"], [])
+        self.assertFalse(auto["polish"])
+        self.assertFalse(auto["summary"])
+        self.assertFalse(auto["localLlmAutoApply"])
+        self.assertEqual(
+            auto["localLlmEndpoint"],
+            "http://127.0.0.1:11434",
+        )
+        self.assertEqual(auto["localLlmEndpointPolicy"], "loopback-only")
+        self.assertEqual(auto["outputLocale"], "en")
+        self.assertEqual(auto["businessPromptVersion"], "business-v2")
+
+    def test_builds_business_local_llm_acceptance_payload(self) -> None:
+        payload = build_start_payload(
+            job_id="smoke-business",
+            source_path=self.source,
+            output_directory=self.root / "business-output",
+            speaker_count_mode="auto",
+            render_pdf=True,
+            language="auto",
+            local_llm_mode="business",
+            local_llm_model="qwen3.5:4b",
+            local_llm_endpoint="http://127.0.0.1:11434",
+            local_llm_endpoint_policy="loopback-only",
+            translation_targets=("en-US", "ja-JP"),
+            polish=True,
+            summary=True,
+            output_locale="zh-Hans",
+            business_prompt_version="business-v2",
+        )
+
+        self.assertTrue(payload["renderPdf"])
+        self.assertEqual(payload["language"], "auto")
+        self.assertEqual(payload["localLlmMode"], "business")
+        self.assertEqual(payload["localLlmModel"], "qwen3.5:4b")
+        self.assertEqual(
+            payload["translationTargets"],
+            ["en-US", "ja-JP"],
+        )
+        self.assertTrue(payload["polish"])
+        self.assertTrue(payload["summary"])
+        self.assertEqual(payload["outputLocale"], "zh-Hans")
+        self.assertEqual(payload["businessPromptVersion"], "business-v2")
+        self.assertFalse(payload["localLlmAutoApply"])
+
+    def test_business_payload_validation_fails_closed(self) -> None:
+        base = {
+            "job_id": "smoke-invalid-business",
+            "source_path": self.source,
+            "output_directory": self.root / "invalid-business-output",
+            "speaker_count_mode": "auto",
+        }
+        cases = (
+            {"translation_targets": ("en-US",), "local_llm_mode": "disabled"},
+            {
+                "translation_targets": ("en-US", "en-US"),
+                "local_llm_mode": "business",
+            },
+            {
+                "translation_targets": ("",),
+                "local_llm_mode": "business",
+            },
+            {
+                "local_llm_endpoint_policy": "allow-remote",
+                "local_llm_mode": "business",
+                "polish": True,
+            },
+            {
+                "local_llm_model": " ",
+                "local_llm_mode": "business",
+                "summary": True,
+            },
+        )
+
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(ValueError):
+                    build_start_payload(**base, **overrides)
 
     def test_timeout_captures_diagnostics_and_cleans_only_worker_process_tree(
         self,

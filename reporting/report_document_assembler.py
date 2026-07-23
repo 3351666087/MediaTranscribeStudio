@@ -45,12 +45,34 @@ _REVISION_TYPES = frozenset({"text", "speaker", "boundary", "split", "merge"})
 _REVIEW_STATUSES = frozenset(
     {"accepted", "review-required", "manually-reviewed", "locked"}
 )
-_LANGUAGES = frozenset({"zh", "zh-CN", "zh-Hans"})
 _SPEAKER_COUNT_MODES = frozenset({"auto", "manual", "hybrid"})
+_SPEAKER_DISPLAY_LABELS = {
+    "de": "Sprecher",
+    "en": "Speaker",
+    "es": "Hablante",
+    "fr": "Intervenant",
+    "ja": "話者",
+    "ko": "화자",
+    "pt": "Falante",
+    "zh": "角色",
+}
 
 
 class ReportAssemblyError(ValueError):
     """Raised when legacy data cannot be represented without inventing facts."""
+
+
+def _normalize_report_language(value: Any, field: str) -> str:
+    # Keep this import lazy: importing backend at module load time creates a
+    # cycle through backend.composition -> reporting.
+    from backend.language import normalize_language_tag
+
+    try:
+        return normalize_language_tag(value, allow_auto=False)
+    except ValueError as exc:
+        raise ReportAssemblyError(
+            f"{field} must be a valid persisted BCP-47 language tag"
+        ) from exc
 
 
 def canonical_speaker_ids(count: int) -> tuple[str, ...]:
@@ -80,6 +102,12 @@ def _read_value(value: Any, *names: str, default: Any = None) -> Any:
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _default_speaker_display_name(index: int, locale: str) -> str:
+    language = locale.casefold().split("-", 1)[0]
+    label = _SPEAKER_DISPLAY_LABELS.get(language, _SPEAKER_DISPLAY_LABELS["en"])
+    return f"{label} {index}"
 
 
 def _finite_number(value: Any, *, field: str) -> float:
@@ -184,7 +212,8 @@ class ReportDocumentAssembler:
         document_id: Optional[str] = None,
         generated_at: Optional[str] = None,
         title: Optional[str] = None,
-        language: str = "zh-CN",
+        language: str = "und",
+        report_locale: Optional[str] = None,
         speaker_count_mode: str = "auto",
         speaker_count: Optional[int] = None,
         minimum_speaker_count: Optional[int] = None,
@@ -201,11 +230,12 @@ class ReportDocumentAssembler:
         if not materialized:
             raise ReportAssemblyError("at least one transcription segment is required")
 
-        normalized_language = _clean_text(language) or "zh-CN"
-        if normalized_language not in _LANGUAGES:
-            raise ReportAssemblyError(
-                "ReportDocument supports only zh, zh-CN, or zh-Hans"
-            )
+        normalized_language = _normalize_report_language(language, "language")
+        normalized_report_locale = (
+            None
+            if report_locale is None
+            else _normalize_report_language(report_locale, "report_locale")
+        )
 
         source = self._build_source(
             source_path=source_path,
@@ -253,6 +283,7 @@ class ReportDocumentAssembler:
                 mapping,
                 speaker_ids,
                 speaker_profiles,
+                display_locale=normalized_report_locale or normalized_language,
             ),
             "segments": report_segments,
             "provenance": {
@@ -261,6 +292,8 @@ class ReportDocumentAssembler:
                 "offline": True,
             },
         }
+        if normalized_report_locale is not None:
+            document["reportLocale"] = normalized_report_locale
         clean_title = _clean_text(title)
         if clean_title:
             if len(clean_title) > 240:
@@ -515,6 +548,8 @@ class ReportDocumentAssembler:
         mapping: Mapping[str, str],
         speaker_ids: Sequence[str],
         profiles: Optional[Mapping[str, Mapping[str, Any]] | Sequence[Any]],
+        *,
+        display_locale: str,
     ) -> list[dict[str, Any]]:
         speaker_set = frozenset(speaker_ids)
         aliases: dict[str, list[str]] = {speaker_id: [] for speaker_id in speaker_ids}
@@ -541,7 +576,7 @@ class ReportDocumentAssembler:
             profile = profile_by_id.get(speaker_id, {})
             display_name = _clean_text(
                 profile.get("displayName", profile.get("display_name"))
-            ) or f"角色 {index}"
+            ) or _default_speaker_display_name(index, display_locale)
             short_label = _clean_text(
                 profile.get("shortLabel", profile.get("short_label"))
             ) or f"S{index}"
@@ -755,11 +790,19 @@ class ReportDocumentAssembler:
                 incomplete_speaker_evidence=incomplete_speaker_evidence,
             )
 
-            segment_language = _clean_text(
-                _read_value(source_segment, "language", default=language)
-            ) or language
-            if segment_language not in _LANGUAGES:
-                segment_language = language
+            segment_language_raw = _read_value(
+                source_segment,
+                "language",
+                default=None,
+            )
+            segment_language = (
+                language
+                if segment_language_raw is None
+                else _normalize_report_language(
+                    segment_language_raw,
+                    f"{segment_id}.language",
+                )
+            )
             entry: dict[str, Any] = {
                 "id": segment_id,
                 "startMs": start_ms,

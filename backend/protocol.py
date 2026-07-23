@@ -90,6 +90,10 @@ class WorkerProtocol:
                     {
                         "jobId": request.job_id,
                         "status": record.status.value,
+                        "business": {
+                            "status": record.business_status,
+                            "config": request.business_config.as_dict(),
+                        },
                     },
                 )
                 self.service.launch(request.job_id)

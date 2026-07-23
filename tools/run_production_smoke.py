@@ -134,15 +134,52 @@ def build_start_payload(
     speaker_count_prior: int | None = None,
     render_pdf: bool = False,
     title: str = "中文说话人分离生产烟雾测试",
-    language: str = "zh-CN",
+    language: str = "auto",
     local_llm_mode: str = "disabled",
     local_llm_model: str = "qwen3.5:4b",
+    local_llm_endpoint: str = "http://127.0.0.1:11434",
+    local_llm_endpoint_policy: str = "loopback-only",
+    translation_targets: Sequence[str] = (),
+    polish: bool = False,
+    summary: bool = False,
+    output_locale: str = "en",
+    business_prompt_version: str = "business-v2",
 ) -> dict[str, Any]:
     """Build a worker payload while enforcing mode-specific cardinality fields."""
 
     mode = speaker_count_mode.strip().lower()
     if mode not in {"manual", "auto", "hybrid"}:
         raise ValueError("speaker_count_mode must be manual, auto, or hybrid")
+    llm_mode = local_llm_mode.strip()
+    if llm_mode not in {"disabled", "suggestion-only", "business", "enabled"}:
+        raise ValueError(
+            "local_llm_mode must be disabled, suggestion-only, business, or enabled"
+        )
+    model = local_llm_model.strip()
+    if not model:
+        raise ValueError("local_llm_model must not be blank")
+    endpoint = local_llm_endpoint.strip()
+    if not endpoint:
+        raise ValueError("local_llm_endpoint must not be blank")
+    endpoint_policy = local_llm_endpoint_policy.strip()
+    if endpoint_policy != "loopback-only":
+        raise ValueError("local_llm_endpoint_policy must be loopback-only")
+    requested_targets = tuple(target.strip() for target in translation_targets)
+    if any(not target for target in requested_targets):
+        raise ValueError("translation_targets must not contain blank values")
+    if len(set(requested_targets)) != len(requested_targets):
+        raise ValueError("translation_targets must not contain duplicates")
+    locale = output_locale.strip()
+    if not locale:
+        raise ValueError("output_locale must not be blank")
+    prompt_version = business_prompt_version.strip()
+    if not prompt_version:
+        raise ValueError("business_prompt_version must not be blank")
+    business_requested = bool(requested_targets) or polish or summary
+    if business_requested and llm_mode == "disabled":
+        raise ValueError(
+            "local_llm_mode must enable business processing when variants are requested"
+        )
 
     payload: dict[str, Any] = {
         "jobId": job_id,
@@ -152,9 +189,16 @@ def build_start_payload(
         "renderPdf": bool(render_pdf),
         "title": title,
         "language": language,
-        "localLlmMode": local_llm_mode,
-        "localLlmModel": local_llm_model,
+        "localLlmMode": llm_mode,
+        "localLlmModel": model,
         "localLlmAutoApply": False,
+        "localLlmEndpoint": endpoint,
+        "localLlmEndpointPolicy": endpoint_policy,
+        "translationTargets": list(requested_targets),
+        "polish": bool(polish),
+        "summary": bool(summary),
+        "outputLocale": locale,
+        "businessPromptVersion": prompt_version,
     }
 
     if mode == "manual":
@@ -726,15 +770,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", default="中文说话人分离生产烟雾测试")
     parser.add_argument(
         "--language",
-        choices=("zh", "zh-CN", "zh-Hans"),
-        default="zh-CN",
+        default="auto",
+        help="auto or a BCP-47 source-language tag",
     )
     parser.add_argument(
         "--local-llm-mode",
-        choices=("disabled", "suggestion-only"),
+        choices=("disabled", "suggestion-only", "business", "enabled"),
         default="disabled",
     )
     parser.add_argument("--local-llm-model", default="qwen3.5:4b")
+    parser.add_argument(
+        "--local-llm-endpoint",
+        default="http://127.0.0.1:11434",
+    )
+    parser.add_argument(
+        "--local-llm-endpoint-policy",
+        choices=("loopback-only",),
+        default="loopback-only",
+    )
+    parser.add_argument(
+        "--translation-target",
+        action="append",
+        default=[],
+        help="BCP-47 translation target; repeat for multiple derived translations",
+    )
+    parser.add_argument(
+        "--polish",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        "--summary",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--output-locale", default="en")
+    parser.add_argument(
+        "--business-prompt-version",
+        default="business-v1",
+    )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--timeout-seconds", type=float, default=7200.0)
     parser.add_argument("--shutdown-timeout-seconds", type=float, default=30.0)
@@ -772,6 +846,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             language=args.language,
             local_llm_mode=args.local_llm_mode,
             local_llm_model=args.local_llm_model,
+            local_llm_endpoint=args.local_llm_endpoint,
+            local_llm_endpoint_policy=args.local_llm_endpoint_policy,
+            translation_targets=args.translation_target,
+            polish=args.polish,
+            summary=args.summary,
+            output_locale=args.output_locale,
+            business_prompt_version=args.business_prompt_version,
         )
         harness = ProductionSmokeHarness(
             worker_command=(

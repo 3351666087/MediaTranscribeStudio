@@ -10,7 +10,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .business_processing import BusinessProcessingConfig
 from .errors import WorkerError, invalid_request
+from .language import normalize_language_tag
 
 
 PROTOCOL_VERSION = "1.0.0"
@@ -411,6 +413,33 @@ class TranscriptSegment:
     revisions: tuple[Revision, ...] = ()
     evidence: Mapping[str, Any] = field(default_factory=dict)
     turn_id: str | None = None
+    language: str | None = None
+
+    def __post_init__(self) -> None:
+        candidate = self.language
+        if candidate is not None:
+            try:
+                normalized = normalize_language_tag(candidate, allow_auto=False)
+            except ValueError as exc:
+                raise WorkerError(
+                    "ADAPTER_RESULT_INVALID",
+                    "segment.language must be a valid persisted BCP-47 language tag",
+                ) from exc
+            object.__setattr__(self, "language", normalized)
+            return
+
+        asr_evidence = self.evidence.get("asr")
+        if not isinstance(asr_evidence, Mapping):
+            return
+        evidence_language = asr_evidence.get("language")
+        try:
+            normalized = normalize_language_tag(
+                evidence_language,
+                allow_auto=False,
+            )
+        except ValueError:
+            return
+        object.__setattr__(self, "language", normalized)
 
     @classmethod
     def from_mapping(cls, value: Any, index: int) -> "TranscriptSegment":
@@ -450,7 +479,7 @@ class TranscriptSegment:
             if not isinstance(text, str) or not text.strip():
                 raise WorkerError(
                     "ADAPTER_RESULT_INVALID",
-                    f"{field_name}.{key} must be non-empty Chinese source text",
+                    f"{field_name}.{key} must be non-empty source text",
                 )
             texts.append(text.strip())
         scores_raw = value.get("speakerScores")
@@ -499,6 +528,18 @@ class TranscriptSegment:
                     f"{field_name}.turnId must be non-empty text",
                 )
             turn_id = turn_id_raw.strip()
+        language = None
+        if "language" in value and value.get("language") is not None:
+            try:
+                language = normalize_language_tag(
+                    value.get("language"),
+                    allow_auto=False,
+                )
+            except ValueError as exc:
+                raise WorkerError(
+                    "ADAPTER_RESULT_INVALID",
+                    f"{field_name}.language must be a valid persisted BCP-47 language tag",
+                ) from exc
         return cls(
             segment_id=segment_id,
             start_ms=start_ms,
@@ -517,6 +558,7 @@ class TranscriptSegment:
             revisions=revisions,
             evidence=dict(evidence),
             turn_id=turn_id,
+            language=language,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -538,6 +580,8 @@ class TranscriptSegment:
         }
         if self.turn_id is not None:
             value["turnId"] = self.turn_id
+        if self.language is not None:
+            value["language"] = self.language
         return value
 
 
@@ -545,9 +589,23 @@ class TranscriptSegment:
 class TranscriptionResult:
     segments: tuple[TranscriptSegment, ...]
     duration_ms: int
+    language: str = "und"
     speaker_count_estimate: SpeakerCountEstimate | None = None
     models: tuple[Mapping[str, Any], ...] = ()
     pipeline_metrics: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        try:
+            normalized = normalize_language_tag(
+                self.language,
+                allow_auto=False,
+            )
+        except ValueError as exc:
+            raise WorkerError(
+                "ADAPTER_RESULT_INVALID",
+                "transcription result language must be a valid persisted BCP-47 language tag",
+            ) from exc
+        object.__setattr__(self, "language", normalized)
 
     @classmethod
     def from_mapping(cls, value: Any) -> "TranscriptionResult":
@@ -591,12 +649,37 @@ class TranscriptionResult:
                 "ADAPTER_RESULT_INVALID",
                 "pipelineMetrics must be an object when provided",
             )
+        segments = tuple(
+            TranscriptSegment.from_mapping(item, index)
+            for index, item in enumerate(raw_segments)
+        )
+        if "language" in value:
+            try:
+                language = normalize_language_tag(
+                    value.get("language"),
+                    allow_auto=False,
+                )
+            except ValueError as exc:
+                raise WorkerError(
+                    "ADAPTER_RESULT_INVALID",
+                    "language must be a valid persisted BCP-47 language tag",
+                ) from exc
+        else:
+            detected_languages = {
+                segment.language
+                for segment in segments
+                if segment.language not in {None, "und"}
+            }
+            if not detected_languages:
+                language = "und"
+            elif len(detected_languages) == 1:
+                language = next(iter(detected_languages))
+            else:
+                language = "mul"
         return cls(
-            segments=tuple(
-                TranscriptSegment.from_mapping(item, index)
-                for index, item in enumerate(raw_segments)
-            ),
+            segments=segments,
             duration_ms=duration_ms,
+            language=language,
             speaker_count_estimate=estimate,
             models=tuple(dict(item) for item in models),
             pipeline_metrics=(
@@ -613,9 +696,35 @@ class StartJobRequest:
     speaker_policy: SpeakerCountPolicy
     render_pdf: bool = False
     title: str | None = None
-    language: str = "zh-CN"
+    language: str = "auto"
     local_llm_mode: str = "disabled"
     local_llm_model: str = "qwen3.5:4b"
+    local_llm_endpoint: str = "http://127.0.0.1:11434"
+    business_config: BusinessProcessingConfig = field(
+        default_factory=BusinessProcessingConfig
+    )
+
+
+@dataclass(frozen=True)
+class RenderArtifact:
+    artifact_type: str
+    path: Path
+
+    def validate(self) -> None:
+        if (
+            not isinstance(self.artifact_type, str)
+            or not self.artifact_type.strip()
+            or len(self.artifact_type) > 160
+        ):
+            raise WorkerError(
+                "RENDER_RESULT_INVALID",
+                "renderer artifactType must be a non-empty bounded string",
+            )
+        if not isinstance(self.path, Path):
+            raise WorkerError(
+                "RENDER_RESULT_INVALID",
+                "renderer artifact paths must be pathlib.Path values",
+            )
 
 
 @dataclass(frozen=True)
@@ -626,6 +735,7 @@ class RenderResult:
     quality_report_path: Path
     render_manifest_path: Path
     artifact_paths: tuple[Path, ...]
+    artifacts: tuple[RenderArtifact, ...] = ()
 
     def validate(self) -> None:
         if (
@@ -665,3 +775,31 @@ class RenderResult:
                 "RENDER_RESULT_INVALID",
                 "renderer report and manifest paths must be pathlib.Path values",
             )
+        if not isinstance(self.artifacts, tuple):
+            raise WorkerError(
+                "RENDER_RESULT_INVALID",
+                "renderer artifacts must be a tuple",
+            )
+        typed_paths: set[Path] = set()
+        typed_names: set[str] = set()
+        for artifact in self.artifacts:
+            if not isinstance(artifact, RenderArtifact):
+                raise WorkerError(
+                    "RENDER_RESULT_INVALID",
+                    "renderer artifacts must contain RenderArtifact values",
+                )
+            artifact.validate()
+            if artifact.path in typed_paths:
+                raise WorkerError(
+                    "RENDER_RESULT_INVALID",
+                    "renderer artifact paths must be unique",
+                    details={"path": str(artifact.path)},
+                )
+            if artifact.artifact_type in typed_names:
+                raise WorkerError(
+                    "RENDER_RESULT_INVALID",
+                    "renderer artifact types must be unique",
+                    details={"artifactType": artifact.artifact_type},
+                )
+            typed_paths.add(artifact.path)
+            typed_names.add(artifact.artifact_type)

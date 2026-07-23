@@ -9,6 +9,7 @@ from typing import Any
 from reporting import JavaPdfClient, ReportDocumentAssembler
 
 from .adapters import JavaPdfRendererAdapter
+from .local_llm import LocalLLMConfig, OllamaLocalProvider
 from .paths import PathPolicy
 from .production_config import (
     ProductionConfig,
@@ -176,6 +177,12 @@ def build_production_composition(
         ),
         low_speaker_margin_threshold=config.speaker.low_margin_threshold,
         high_speaker_margin_threshold=config.speaker.high_margin_threshold,
+        business_provider_factory=lambda request: OllamaLocalProvider(
+            LocalLLMConfig(
+                model=request.business_config.model,
+                endpoint=request.local_llm_endpoint,
+            )
+        ),
     )
     return ProductionComposition(service=service, preflight=preflight)
 

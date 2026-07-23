@@ -43,6 +43,7 @@
         "stage.progress",
         "artifact.created",
         "review.required",
+        "review.decision.persisted",
         "warning",
         "job.failed",
         "job.completed",

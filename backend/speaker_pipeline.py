@@ -74,6 +74,7 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
 )
 _CLUSTER_SELECTION_METHOD = "dynamic-n-multimetric-stability-v5"
 _SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v4"
+_ASR_NON_LEXICAL_DISPOSITION = "rejected-non-lexical"
 
 
 def _normalized_overlap_evidence(
@@ -136,6 +137,47 @@ def _adapter_identity(adapter: Any) -> dict[str, str]:
         "id": str(getattr(adapter, "adapter_id", type(adapter).__name__)),
         "version": str(getattr(adapter, "version", "0")),
     }
+
+
+def _release_adapter_resources(
+    adapter: Any,
+    *,
+    suppress_errors: bool = False,
+) -> None:
+    """Release optional heavyweight adapter state at a stage boundary.
+
+    Production adapters use this seam to keep only one large accelerator
+    model resident at a time.  Lightweight and injected test adapters remain
+    compatible because the capability is optional.
+    """
+
+    release = getattr(adapter, "release_resources", None)
+    if release is None:
+        return
+    if not callable(release):
+        error = WorkerError(
+            "PIPELINE_ADAPTER_RESOURCE_RELEASE_INVALID",
+            "adapter resource release capability must be callable",
+            details={"adapter": _adapter_identity(adapter)},
+        )
+        if suppress_errors:
+            return
+        raise error
+    try:
+        release()
+    except Exception as exc:
+        if suppress_errors:
+            return
+        if isinstance(exc, WorkerError):
+            raise
+        raise WorkerError(
+            "PIPELINE_ADAPTER_RESOURCE_RELEASE_FAILED",
+            "adapter resources could not be released at the stage boundary",
+            details={
+                "adapter": _adapter_identity(adapter),
+                "exceptionType": type(exc).__name__,
+            },
+        ) from exc
 
 
 def _cache_identity_value(value: Any) -> Any:
@@ -421,9 +463,26 @@ class AsrHypothesis:
         evidence = value.get("evidence", {})
         if not isinstance(evidence, Mapping):
             raise ValueError("ASR evidence must be an object")
+        raw_text = value.get("text")
+        if not isinstance(raw_text, str):
+            raise ValueError("asr.text must be text")
+        text = raw_text.strip()
+        non_lexical_rejection = (
+            evidence.get("disposition") == _ASR_NON_LEXICAL_DISPOSITION
+        )
+        if not text and not non_lexical_rejection:
+            raise ValueError("asr.text must be non-empty")
+        if non_lexical_rejection and (
+            text
+            or value.get("normalizedText") is not None
+            or value.get("displayText") is not None
+        ):
+            raise ValueError(
+                "non-lexical ASR rejection must not invent transcript text"
+            )
         return cls(
             window_id=_non_empty_text(value.get("windowId"), "asr.windowId"),
-            text=_non_empty_text(value.get("text"), "asr.text"),
+            text=text,
             confidence=_probability(value.get("confidence"), "asr.confidence"),
             normalized_text=(
                 _non_empty_text(value.get("normalizedText"), "asr.normalizedText")
@@ -5081,26 +5140,97 @@ class SpeakerPipeline:
                     float(prepared.stage_durations_ms.get(stage, 0.0)),
                 )
 
-        prepared = self._refinement_stage(prepared, context, metrics)
-        asr = self._window_stage(
-            stage="asr",
-            prepared=prepared,
-            windows=prepared.windows,
-            adapter=self.asr_adapter,
-            invoke=lambda windows: self.asr_adapter.transcribe_batch(
-                prepared,
-                windows,
-                context,
-                requested_language=request.language,
-            ),
-            converter=AsrHypothesis.from_mapping,
-            accepted_type=AsrHypothesis,
-            context=context,
-            metrics=metrics,
-            cache_identity_material={
-                "requestedLanguage": request.language,
-            },
+        try:
+            prepared = self._refinement_stage(prepared, context, metrics)
+        except Exception:
+            _release_adapter_resources(
+                self.embedding_adapter,
+                suppress_errors=True,
+            )
+            raise
+        _release_adapter_resources(self.embedding_adapter)
+
+        try:
+            asr = self._window_stage(
+                stage="asr",
+                prepared=prepared,
+                windows=prepared.windows,
+                adapter=self.asr_adapter,
+                invoke=lambda windows: self.asr_adapter.transcribe_batch(
+                    prepared,
+                    windows,
+                    context,
+                    requested_language=request.language,
+                ),
+                converter=AsrHypothesis.from_mapping,
+                accepted_type=AsrHypothesis,
+                context=context,
+                metrics=metrics,
+                cache_identity_material={
+                    "requestedLanguage": request.language,
+                },
+            )
+        except Exception:
+            _release_adapter_resources(
+                self.asr_adapter,
+                suppress_errors=True,
+            )
+            raise
+        _release_adapter_resources(self.asr_adapter)
+        rejected_asr = tuple(
+            (window, hypothesis)
+            for window, hypothesis in zip(prepared.windows, asr)
+            if hypothesis.evidence.get("disposition")
+            == _ASR_NON_LEXICAL_DISPOSITION
         )
+        if rejected_asr:
+            rejected_ids = [window.window_id for window, _ in rejected_asr]
+            metrics.record_cascade_stage(
+                stage="asr-non-lexical-rejection",
+                provider=_adapter_identity(self.asr_adapter)["id"],
+                trigger_reason="EMPTY_AFTER_INDIVIDUAL_RETRY",
+                candidate_ids=rejected_ids,
+                candidate_scope="vad-windows-without-lexical-asr",
+                source_count=len(prepared.windows),
+                max_candidates=len(prepared.windows),
+                candidate_start_ms=min(
+                    window.start_ms for window, _ in rejected_asr
+                ),
+                candidate_end_ms=max(
+                    window.end_ms for window, _ in rejected_asr
+                ),
+                invoked=True,
+                cache_stage="asr",
+                latency_ms=0.0,
+                resource=None,
+                confidence=1.0,
+                exit_reason="REJECTED_WITHOUT_FABRICATED_TEXT",
+            )
+        lexical_pairs = tuple(
+            (window, hypothesis)
+            for window, hypothesis in zip(prepared.windows, asr)
+            if hypothesis.evidence.get("disposition")
+            != _ASR_NON_LEXICAL_DISPOSITION
+        )
+        metrics.set_policy(
+            asrLexicalWindowCount=len(lexical_pairs),
+            asrRejectedNonLexicalWindowCount=len(rejected_asr),
+        )
+        if not lexical_pairs:
+            raise WorkerError(
+                "ASR_NO_LEXICAL_SPEECH",
+                "No lexical speech remained after auditable ASR retries",
+                details={
+                    "sourceWindowCount": len(prepared.windows),
+                    "rejectedWindowCount": len(rejected_asr),
+                },
+            )
+        if rejected_asr:
+            prepared = replace(
+                prepared,
+                windows=tuple(window for window, _ in lexical_pairs),
+            )
+            asr = [hypothesis for _, hypothesis in lexical_pairs]
         campp_started = time.perf_counter()
         embeddings = self._window_stage(
             stage="campp-embedding",

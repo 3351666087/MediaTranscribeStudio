@@ -245,6 +245,114 @@ class ProductionRunnerTests(unittest.TestCase):
             all(item.evidence["confidenceAvailable"] is False for item in results)
         )
 
+    def test_qwen3_retries_an_empty_batch_result_individually(self) -> None:
+        class EmptyThenRecoveredModel:
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                self.calls.append(len(audio))
+                if len(audio) == 2:
+                    return [
+                        SimpleNamespace(
+                            text="第一段",
+                            language="Chinese",
+                            time_stamps=None,
+                        ),
+                        SimpleNamespace(
+                            text="",
+                            language="Chinese",
+                            time_stamps=None,
+                        ),
+                    ]
+                return [
+                    SimpleNamespace(
+                        text="第二段恢复",
+                        language="Chinese",
+                        time_stamps=None,
+                    )
+                ]
+
+        model = EmptyThenRecoveredModel()
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: model,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        results = adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        self.assertEqual(model.calls, [2, 1])
+        self.assertEqual([item.text for item in results], ["第一段", "第二段恢复"])
+        self.assertNotIn("disposition", results[1].evidence)
+
+    def test_qwen3_rejects_persistent_non_lexical_window_without_fabrication(
+        self,
+    ) -> None:
+        class PermanentlyEmptyModel:
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                self.calls.append(len(audio))
+                return [
+                    SimpleNamespace(
+                        text=("第一段" if len(audio) == 2 and index == 0 else ""),
+                        language="Chinese",
+                        time_stamps=None,
+                    )
+                    for index in range(len(audio))
+                ]
+
+        model = PermanentlyEmptyModel()
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: model,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        results = adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        self.assertEqual(model.calls, [2, 1])
+        self.assertEqual(results[1].text, "")
+        self.assertEqual(results[1].confidence, 0.0)
+        self.assertEqual(
+            results[1].evidence["disposition"],
+            "rejected-non-lexical",
+        )
+        self.assertEqual(
+            results[1].evidence["rejectionReason"],
+            "EMPTY_AFTER_INDIVIDUAL_RETRY",
+        )
+        restored = production_runners.AsrHypothesis.from_mapping(
+            results[1].as_dict()
+        )
+        self.assertEqual(restored, results[1])
+
     def test_qwen3_runner_rejects_unsupported_language_before_model_load(self) -> None:
         model_loads = 0
 
@@ -469,6 +577,50 @@ class ProductionRunnerTests(unittest.TestCase):
 
         self.assertEqual(len(results), 3)
         self.assertEqual(maximum_active, 1)
+
+    def test_qwen3_release_resources_is_idempotent_and_reloads_lazily(
+        self,
+    ) -> None:
+        models: list[FakeQwenModel] = []
+
+        def factory(**_kwargs):
+            model = FakeQwenModel()
+            models.append(model)
+            return model
+
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=factory,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+        adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+        self.assertEqual(len(models), 1)
+        self.assertIs(adapter._model_instance, models[0])
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+        ) as release_memory:
+            adapter.release_resources()
+            adapter.release_resources()
+
+        self.assertIsNone(adapter._model_instance)
+        self.assertEqual(release_memory.call_count, 2)
+
+        adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+        self.assertEqual(len(models), 2)
+        self.assertIs(adapter._model_instance, models[1])
 
     def test_qwen3_runner_normalizes_or_defaults_result_languages(self) -> None:
         result_languages = ("pt_br", None, "not a valid tag")
@@ -833,6 +985,78 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual([item.window_id for item in results], ["window-1", "window-2"])
         self.assertEqual(results[0].vector, (1.0, 1.0))
         self.assertEqual(results[1].vector, (2.0, 1.0))
+
+    def test_cam_plus_model_load_oom_is_structured_and_path_free(self) -> None:
+        class OutOfMemoryError(RuntimeError):
+            pass
+
+        private_path = str(self.cam_model)
+
+        def factory(**_kwargs):
+            raise OutOfMemoryError(f"{private_path}: CUDA out of memory")
+
+        adapter = LocalFunAsrCamPlusAdapter(
+            model_path=self.cam_model,
+            model_factory=factory,
+            device="cuda:0",
+        )
+
+        with self.assertRaises(WorkerError) as captured:
+            adapter.embed_batch(
+                self.prepared(),
+                self.prepared().windows,
+                self.context,
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "CAMPP_ACCELERATOR_MEMORY_EXHAUSTED",
+        )
+        self.assertEqual(captured.exception.details["phase"], "model-load")
+        self.assertFalse(captured.exception.details["modelQualityChanged"])
+        self.assertNotIn(
+            private_path,
+            json.dumps(captured.exception.as_payload()),
+        )
+
+    def test_cam_plus_inference_oom_unloads_model_and_is_structured(
+        self,
+    ) -> None:
+        class OutOfMemoryError(RuntimeError):
+            pass
+
+        class OomCamModel:
+            def generate(self, **_kwargs):
+                raise OutOfMemoryError("CUDA out of memory")
+
+        model = OomCamModel()
+        adapter = LocalFunAsrCamPlusAdapter(
+            model_path=self.cam_model,
+            model_factory=lambda **_kwargs: model,
+            device="cuda:0",
+            embedding_batch_size=2,
+        )
+
+        with self.assertRaises(WorkerError) as captured:
+            adapter.embed_batch(
+                self.prepared(),
+                self.prepared().windows,
+                self.context,
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "CAMPP_ACCELERATOR_MEMORY_EXHAUSTED",
+        )
+        self.assertEqual(
+            captured.exception.details["phase"],
+            "embedding-inference",
+        )
+        self.assertEqual(
+            captured.exception.details["embeddingBatchSize"],
+            2,
+        )
+        self.assertIsNone(adapter._model_instance)
 
     def test_cam_plus_bounded_batches_lazy_model_and_stable_output_order(
         self,

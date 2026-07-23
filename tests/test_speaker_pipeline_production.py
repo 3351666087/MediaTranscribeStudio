@@ -145,6 +145,22 @@ class FakeAsrAdapter:
             language = self.language_by_window_id.get(window.window_id)
             if language is not None:
                 evidence["language"] = language
+            if self.mode == "reject-last" and window is windows[-1]:
+                values.append(
+                    AsrHypothesis(
+                        window_id=window.window_id,
+                        text="",
+                        confidence=0.0,
+                        evidence={
+                            **evidence,
+                            "disposition": "rejected-non-lexical",
+                            "rejectionReason": (
+                                "EMPTY_AFTER_INDIVIDUAL_RETRY"
+                            ),
+                        },
+                    )
+                )
+                continue
             values.append(
                 AsrHypothesis(
                     window_id=window.window_id,
@@ -1340,6 +1356,190 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 self.assertEqual(serialized["evidence"], expected_evidence)
                 restored = OverlapDecision.from_mapping(serialized)
                 self.assertEqual(restored, decision)
+
+    def test_non_lexical_asr_window_is_audited_and_excluded_from_diarization(
+        self,
+    ) -> None:
+        asr = FakeAsrAdapter(mode="reject-last")
+        pipeline, _, _, cam, overlap = self.pipeline(
+            1,
+            windows=3,
+            asr=asr,
+        )
+
+        result = pipeline.transcribe(
+            self.request(1, "manual", job_id="non-lexical-window"),
+            self.context("non-lexical-window"),
+        )
+
+        self.assertEqual(len(result.segments), 2)
+        self.assertEqual(cam.calls, [("window-1", "window-2")])
+        self.assertEqual(overlap.calls, [("window-1", "window-2")])
+        self.assertEqual(
+            result.pipeline_metrics["policy"][
+                "asrRejectedNonLexicalWindowCount"
+            ],
+            1,
+        )
+        rejection = next(
+            item
+            for item in result.pipeline_metrics["cascade"]
+            if item["stage"] == "asr-non-lexical-rejection"
+        )
+        self.assertEqual(
+            rejection["candidateRange"]["segmentIds"],
+            ["window-3"],
+        )
+        self.assertEqual(
+            rejection["exitReason"],
+            "REJECTED_WITHOUT_FABRICATED_TEXT",
+        )
+
+    def test_gpu_stage_resources_release_once_in_strict_execution_order(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class LifecycleAsr(FakeAsrAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release_calls = 0
+
+            def transcribe_batch(self, *args, **kwargs):
+                events.append("asr-inference")
+                return super().transcribe_batch(*args, **kwargs)
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+                events.append("asr-release")
+
+        class LifecycleCam(FakeCamPlusAdapter):
+            def __init__(self) -> None:
+                super().__init__(2)
+                self.release_calls = 0
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+                events.append("cam-release")
+
+            def embed_batch(self, *args, **kwargs):
+                events.append("cam-inference")
+                return super().embed_batch(*args, **kwargs)
+
+        cache = InMemoryStageCache()
+        asr = LifecycleAsr()
+        cam = LifecycleCam()
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            cache=cache,
+            asr=asr,
+            cam=cam,
+        )
+        request = self.request(2, "manual", job_id="resource-order")
+
+        pipeline.transcribe(request, self.context("resource-order"))
+
+        self.assertEqual(
+            events[:4],
+            [
+                "cam-release",
+                "asr-inference",
+                "asr-release",
+                "cam-inference",
+            ],
+        )
+        self.assertEqual(asr.release_calls, 1)
+        self.assertEqual(cam.release_calls, 1)
+
+        pipeline.transcribe(request, self.context("resource-order"))
+
+        self.assertEqual(asr.release_calls, 2)
+        self.assertEqual(cam.release_calls, 2)
+        self.assertEqual(events.count("asr-inference"), 1)
+        self.assertEqual(events.count("cam-inference"), 1)
+
+    def test_asr_resources_release_before_all_non_lexical_failure(
+        self,
+    ) -> None:
+        class AllNonLexicalAsr(FakeAsrAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release_calls = 0
+
+            def transcribe_batch(
+                self,
+                prepared,
+                windows,
+                context,
+                *,
+                requested_language: str,
+            ):
+                context.raise_if_cancelled()
+                self.calls.append(
+                    tuple(window.window_id for window in windows)
+                )
+                self.requested_languages.append(requested_language)
+                return [
+                    AsrHypothesis(
+                        window_id=window.window_id,
+                        text="",
+                        confidence=0.0,
+                        evidence={
+                            "disposition": "rejected-non-lexical",
+                            "rejectionReason": (
+                                "EMPTY_AFTER_INDIVIDUAL_RETRY"
+                            ),
+                        },
+                    )
+                    for window in windows
+                ]
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        asr = AllNonLexicalAsr()
+        pipeline, _, _, cam, _ = self.pipeline(2, asr=asr)
+
+        with self.assertRaises(WorkerError) as captured:
+            pipeline.transcribe(
+                self.request(2, "manual", job_id="all-non-lexical"),
+                self.context("all-non-lexical"),
+            )
+
+        self.assertEqual(captured.exception.code, "ASR_NO_LEXICAL_SPEECH")
+        self.assertEqual(asr.release_calls, 1)
+        self.assertEqual(cam.calls, [])
+
+    def test_asr_resources_release_once_when_asr_stage_raises(self) -> None:
+        class FailingAsr(FakeAsrAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release_calls = 0
+
+            def transcribe_batch(self, *args, **kwargs):
+                raise WorkerError(
+                    "QWEN3_ASR_INFERENCE_FAILED",
+                    "synthetic ASR failure",
+                )
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        asr = FailingAsr()
+        pipeline, _, _, cam, _ = self.pipeline(2, asr=asr)
+
+        with self.assertRaises(WorkerError) as captured:
+            pipeline.transcribe(
+                self.request(2, "manual", job_id="asr-release-error"),
+                self.context("asr-release-error"),
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "QWEN3_ASR_INFERENCE_FAILED",
+        )
+        self.assertEqual(asr.release_calls, 1)
+        self.assertEqual(cam.calls, [])
 
     def test_default_overlap_unavailable_routes_human_review_without_eres(
         self,

@@ -14,6 +14,7 @@ from tools.run_production_smoke import (
     HarnessSettings,
     ProductionSmokeHarness,
     SmokePaths,
+    build_parser,
     build_start_payload,
 )
 
@@ -189,6 +190,20 @@ emit(
 
 
 class ProductionSmokeHarnessTests(unittest.TestCase):
+    def test_cli_default_uses_supported_business_prompt_version(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--config",
+                "production.json",
+                "--source",
+                "sample.wav",
+                "--output-dir",
+                "output",
+            ]
+        )
+
+        self.assertEqual(args.business_prompt_version, "business-v2")
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

@@ -807,7 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-locale", default="en")
     parser.add_argument(
         "--business-prompt-version",
-        default="business-v1",
+        default="business-v2",
     )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--timeout-seconds", type=float, default=7200.0)

@@ -291,6 +291,33 @@ def _qwen_resource_error(
     return None
 
 
+def _campp_resource_error(
+    error: BaseException,
+    *,
+    phase: str,
+    requested_device: str,
+    embedding_batch_size: int,
+) -> WorkerError | None:
+    if not (
+        isinstance(error, MemoryError)
+        or _is_accelerator_out_of_memory(error)
+    ):
+        return None
+    return WorkerError(
+        "CAMPP_ACCELERATOR_MEMORY_EXHAUSTED",
+        "CAM++ exceeded the bounded accelerator memory budget",
+        details={
+            "phase": phase,
+            "requestedDevice": requested_device,
+            "embeddingBatchSize": embedding_batch_size,
+            "modelQualityChanged": False,
+            "remediation": (
+                "RELEASE_PREVIOUS_GPU_STAGE_OR_REDUCE_CONCURRENT_GPU_WORK"
+            ),
+        },
+    )
+
+
 def _release_accelerator_memory() -> None:
     gc.collect()
     try:
@@ -941,6 +968,23 @@ class LocalQwen3AsrAdapter:
                     raise resource_error from exc
             return self._model_instance
 
+    def release_resources(self) -> None:
+        """Idempotently unload ASR and forced-aligner weights between stages.
+
+        The complete Qwen object owns both model graphs.  Dropping the final
+        reference under the inference/load locks, followed by a full Python
+        collection and CUDA allocator flush, prevents CAM++ from competing
+        with resident ASR weights on memory-constrained accelerators.
+        """
+
+        with self._inference_lock:
+            with self._load_lock:
+                model = self._model_instance
+                self._model_instance = None
+            if model is not None:
+                del model
+        _release_accelerator_memory()
+
     def validate_requested_language(self, requested_language: str) -> str:
         """Fail before media preparation when an explicit prompt is unsupported."""
 
@@ -982,8 +1026,8 @@ class LocalQwen3AsrAdapter:
                 "PREPARED_AUDIO_MISSING",
                 "Qwen3-ASR requires a persisted normalized audio path",
             )
-        model = self._model()
         with self._inference_lock:
+            model = self._model()
             context.raise_if_cancelled()
             samples, sample_rate, pcm_buffer_id = _shared_pcm_for_prepared(
                 prepared
@@ -1023,6 +1067,43 @@ class LocalQwen3AsrAdapter:
                     raise
                 _release_accelerator_memory()
                 raise resource_error from exc
+            if (
+                isinstance(results, Sequence)
+                and not isinstance(results, (str, bytes))
+                and len(results) == len(windows)
+            ):
+                results = list(results)
+                for index, result in enumerate(results):
+                    if str(getattr(result, "text", "") or "").strip():
+                        continue
+                    context.raise_if_cancelled()
+                    retry_kwargs: dict[str, Any] = {
+                        "audio": [audio_batch[index]],
+                        "return_time_stamps": (
+                            self.forced_aligner_path is not None
+                        ),
+                    }
+                    if qwen_language is not None:
+                        retry_kwargs["language"] = [qwen_language]
+                    try:
+                        retry_results = model.transcribe(**retry_kwargs)
+                    except Exception as exc:
+                        resource_error = _qwen_resource_error(
+                            exc,
+                            phase="inference-retry",
+                            requested_device_map=self.device_map,
+                            max_inference_batch_size=1,
+                        )
+                        if resource_error is None:
+                            raise
+                        _release_accelerator_memory()
+                        raise resource_error from exc
+                    if (
+                        isinstance(retry_results, Sequence)
+                        and not isinstance(retry_results, (str, bytes))
+                        and len(retry_results) == 1
+                    ):
+                        results[index] = retry_results[0]
         context.raise_if_cancelled()
         if (
             not isinstance(results, Sequence)
@@ -1037,11 +1118,30 @@ class LocalQwen3AsrAdapter:
         for window, result in zip(windows, results):
             text = str(getattr(result, "text", "") or "").strip()
             if not text:
-                raise WorkerError(
-                    "QWEN3_ASR_RESULT_INVALID",
-                    "Qwen3-ASR returned empty text for a speech window",
-                    details={"windowId": window.window_id},
+                output.append(
+                    AsrHypothesis(
+                        window_id=window.window_id,
+                        text="",
+                        confidence=0.0,
+                        evidence={
+                            "model": "Qwen3-ASR-1.7B",
+                            "pcmBufferId": pcm_buffer_id,
+                            "confidenceAvailable": False,
+                            "requestedLanguage": normalized_request_language,
+                            "qwenPromptLanguage": qwen_language,
+                            "disposition": "rejected-non-lexical",
+                            "rejectionReason": (
+                                "EMPTY_AFTER_INDIVIDUAL_RETRY"
+                            ),
+                            "individualRetryCount": 1,
+                            "windowDurationMs": (
+                                window.end_ms - window.start_ms
+                            ),
+                            "timestamps": [],
+                        },
+                    )
                 )
+                continue
             timestamp_result = getattr(result, "time_stamps", None)
             timestamps: list[dict[str, Any]] = []
             if timestamp_result is not None:
@@ -1224,6 +1324,7 @@ class LocalFunAsrCamPlusAdapter:
         self._model_factory = model_factory
         self._model_instance: Any = None
         self._load_lock = threading.Lock()
+        self._inference_lock = threading.RLock()
 
     def refinement_identity(self) -> Mapping[str, Any]:
         """Stable cache identity for the VAD-internal refinement stage."""
@@ -1254,12 +1355,35 @@ class LocalFunAsrCamPlusAdapter:
                             "FunASR is required for CAM++",
                         ) from exc
                     factory = AutoModel
-                self._model_instance = factory(
-                    model=str(self.model_path),
-                    device=self.device,
-                    disable_update=True,
-                )
+                try:
+                    self._model_instance = factory(
+                        model=str(self.model_path),
+                        device=self.device,
+                        disable_update=True,
+                    )
+                except Exception as exc:
+                    resource_error = _campp_resource_error(
+                        exc,
+                        phase="model-load",
+                        requested_device=self.device,
+                        embedding_batch_size=self.embedding_batch_size,
+                    )
+                    if resource_error is None:
+                        raise
+                    _release_accelerator_memory()
+                    raise resource_error from exc
             return self._model_instance
+
+    def release_resources(self) -> None:
+        """Idempotently unload CAM++ before another heavyweight GPU stage."""
+
+        with self._inference_lock:
+            with self._load_lock:
+                model = self._model_instance
+                self._model_instance = None
+        if model is not None:
+            del model
+        _release_accelerator_memory()
 
     @staticmethod
     def _extract_rows(raw: Any, expected: int) -> list[tuple[float, ...]]:
@@ -1300,16 +1424,31 @@ class LocalFunAsrCamPlusAdapter:
         context: AdapterContext,
     ) -> list[tuple[float, ...]]:
         rows: list[tuple[float, ...]] = []
-        model = self._model()
-        for offset in range(0, len(slices), self.embedding_batch_size):
-            context.raise_if_cancelled()
-            batch = list(slices[offset : offset + self.embedding_batch_size])
-            raw = model.generate(
-                input=batch,
-                batch_size=len(batch),
-                disable_pbar=True,
-            )
-            rows.extend(self._extract_rows(raw, len(batch)))
+        with self._inference_lock:
+            model = self._model()
+            for offset in range(0, len(slices), self.embedding_batch_size):
+                context.raise_if_cancelled()
+                batch = list(
+                    slices[offset : offset + self.embedding_batch_size]
+                )
+                try:
+                    raw = model.generate(
+                        input=batch,
+                        batch_size=len(batch),
+                        disable_pbar=True,
+                    )
+                except Exception as exc:
+                    resource_error = _campp_resource_error(
+                        exc,
+                        phase="embedding-inference",
+                        requested_device=self.device,
+                        embedding_batch_size=len(batch),
+                    )
+                    if resource_error is None:
+                        raise
+                    self.release_resources()
+                    raise resource_error from exc
+                rows.extend(self._extract_rows(raw, len(batch)))
         return rows
 
     @staticmethod

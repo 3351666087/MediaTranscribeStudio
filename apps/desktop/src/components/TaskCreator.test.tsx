@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import type { MediaSelection } from "../bridge/media-drop";
 import type {
   CreateJobRequest,
   SpeakerCountPolicy,
@@ -160,10 +161,12 @@ describe("TaskCreator locale fragment", () => {
         ].map((match) => match[1]);
 
         expect(value.trim()).not.toHaveLength(0);
+        expect(value).not.toContain("\uFFFD");
         expect(localizedPlaceholders.sort()).toEqual(
           englishPlaceholders.sort(),
         );
       }
+      expect(Object.values(localized).join(" ")).not.toMatch(/BCP[-‑]47/iu);
 
       if (locale !== "en") {
         const copiedValues = englishEntries.filter(
@@ -246,6 +249,10 @@ describe("TaskCreator dynamic speaker policies", () => {
       .mockResolvedValueOnce({
         sourcePath: "D:\\Media\\first.mov",
         outputDirectory: "D:\\Media\\first-MediaTranscribeStudio",
+      })
+      .mockResolvedValueOnce({
+        sourcePath: "D:\\Media\\second.wav",
+        outputDirectory: "D:\\Media\\second-MediaTranscribeStudio",
       });
     const props = taskCreatorProps({
       count: 2,
@@ -278,7 +285,210 @@ describe("TaskCreator dynamic speaker policies", () => {
     await waitFor(() => expect(outputInput).toHaveValue(
       "D:\\Media\\my-custom-output",
     ));
-    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(resolver).toHaveBeenCalledTimes(2);
+    expect(resolver).toHaveBeenLastCalledWith("D:\\Media\\second.wav");
+  });
+
+  it("keeps picker cancellation silent and preserves the current paths", async () => {
+    const user = userEvent.setup();
+    const selectMediaFile = vi.fn<() => Promise<string | null>>();
+    const selectOutputDirectory = vi.fn<() => Promise<string | null>>();
+    selectMediaFile.mockResolvedValue(null);
+    selectOutputDirectory.mockResolvedValue(null);
+    const props = taskCreatorProps({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+
+    renderTaskCreator(
+      <TaskCreator
+        open
+        initialMediaSelection={{
+          sequence: 1,
+          sourcePath: "D:\\Media\\meeting.mov",
+          outputDirectory: "D:\\Media\\meeting-MediaTranscribeStudio",
+        }}
+        selectMediaFile={selectMediaFile}
+        selectOutputDirectory={selectOutputDirectory}
+        {...props}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Choose files" }));
+    await user.click(screen.getByRole("button", { name: "Choose folder" }));
+
+    expect(selectMediaFile).toHaveBeenCalledTimes(1);
+    expect(selectOutputDirectory).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByPlaceholderText("Enter the absolute path to a media file"),
+    ).toHaveValue("D:\\Media\\meeting.mov");
+    expect(
+      screen.getByPlaceholderText(
+        "Enter the absolute path to an output directory",
+      ),
+    ).toHaveValue("D:\\Media\\meeting-MediaTranscribeStudio");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("never overwrites an output folder explicitly chosen by the user", async () => {
+    const user = userEvent.setup();
+    const resolver = vi
+      .fn<(path: string) => Promise<MediaSelection>>()
+      .mockResolvedValue({
+        sourcePath: "D:\\Media\\second.mov",
+        outputDirectory: "D:\\Media\\second-MediaTranscribeStudio",
+      });
+    const selectMediaFile = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValue("D:\\Media\\second.mov");
+    const selectOutputDirectory = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValue("D:\\Projects\\Final");
+    const props = taskCreatorProps({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+
+    renderTaskCreator(
+      <TaskCreator
+        open
+        resolveMediaPath={resolver}
+        selectMediaFile={selectMediaFile}
+        selectOutputDirectory={selectOutputDirectory}
+        {...props}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Choose folder" }));
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText(
+          "Enter the absolute path to an output directory",
+        ),
+      ).toHaveValue("D:\\Projects\\Final");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Choose files" }));
+    await waitFor(() => {
+      const sourceInputs = screen.getAllByPlaceholderText(
+        "Enter the absolute path to a media file",
+      );
+      const outputInputs = screen.getAllByPlaceholderText(
+        "Enter the absolute path to an output directory",
+      );
+      expect(sourceInputs).toHaveLength(2);
+      expect(outputInputs).toHaveLength(2);
+      expect(sourceInputs[0]).toHaveValue("");
+      expect(outputInputs[0]).toHaveValue("D:\\Projects\\Final");
+      expect(sourceInputs[1]).toHaveValue("D:\\Media\\second.mov");
+      expect(outputInputs[1]).toHaveValue(
+        "D:\\Media\\second-MediaTranscribeStudio",
+      );
+    });
+  });
+
+  it("keeps translation opt-in, human-readable, removable, and suggestion-only", async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderCreator({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+    const businessSwitch = screen.getByRole("switch", {
+      name: /Enable local business processing/u,
+    });
+    const translation = screen.getByRole("checkbox", {
+      name: /Translation artifacts/u,
+    });
+
+    expect(businessSwitch).not.toBeChecked();
+    expect(translation).not.toBeChecked();
+    expect(translation).toBeDisabled();
+    expect(
+      screen.getByText("Advanced language settings").closest("details"),
+    ).not.toHaveAttribute("open");
+
+    await user.click(businessSwitch);
+    await user.click(translation);
+
+    const translateTo = screen.getByRole("combobox", {
+      name: /^Translate to/u,
+    });
+    expect(translateTo).toHaveValue("");
+    expect(
+      within(translateTo).getByRole("option", { name: "Japanese" }),
+    ).toHaveValue("ja-JP");
+    expect(
+      within(translateTo).queryByRole("option", { name: "ja-JP" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Choose at least one language and remove duplicates. Check custom languages in Advanced settings.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create job" })).toBeDisabled();
+    expect(onCreate).not.toHaveBeenCalled();
+
+    await user.selectOptions(translateTo, "ja-JP");
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Remove Japanese" }),
+    ).toBeInTheDocument();
+
+    const createButton = screen.getByRole("button", { name: "Create job" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    await user.click(createButton);
+
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    expect(onCreate.mock.calls[0][0]).toMatchObject({
+      translationTargets: ["ja-JP"],
+      localLlmMode: "business",
+      localLlmAutoApply: false,
+    });
+  });
+
+  it("deduplicates visible translation chips while blocking ambiguous custom input", async () => {
+    const user = userEvent.setup();
+    renderCreator({
+      count: 2,
+      policy: { mode: "manual", count: 2 },
+    });
+
+    await user.click(
+      screen.getByRole("switch", {
+        name: /Enable local business processing/u,
+      }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: /Translation artifacts/u }),
+    );
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /^Translate to/u }),
+      "ja-JP",
+    );
+    await user.click(screen.getByText("Advanced language settings"));
+    await user.type(
+      screen.getByRole("textbox", { name: /^Languages not listed/u }),
+      "JA-jp",
+    );
+
+    const chips = screen.getByLabelText("Parsed translation targets");
+    expect(within(chips).getAllByText("Japanese")).toHaveLength(1);
+    expect(
+      screen.getByText(
+        "Choose at least one language and remove duplicates. Check custom languages in Advanced settings.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create job" })).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Remove Japanese" }),
+    );
+    expect(
+      screen.queryByLabelText("Parsed translation targets"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", { name: /^Languages not listed/u }),
+    ).toHaveValue("");
   });
 
   it.each(dynamicCounts)(
@@ -542,14 +752,14 @@ describe("TaskCreator dynamic speaker policies", () => {
         name: /Structured meeting intelligence/u,
       }),
     );
-    await user.type(
-      screen.getByRole("textbox", {
-        name: /Translation target languages/u,
+    await user.selectOptions(
+      screen.getByRole("combobox", {
+        name: /^Translate to/u,
       }),
       "de-DE",
     );
     await user.selectOptions(
-      screen.getByRole("combobox", { name: /Business output locale/u }),
+      screen.getByRole("combobox", { name: /Writing language/u }),
       "ja-JP",
     );
     await user.click(screen.getByText("Advanced local runtime"));
@@ -622,7 +832,7 @@ describe("TaskCreator dynamic speaker policies", () => {
       }),
     ).not.toBeChecked();
     expect(
-      screen.getByRole("combobox", { name: /Business output locale/u }),
+      screen.getByRole("combobox", { name: /Writing language/u }),
     ).toHaveValue("en-US");
     await user.click(screen.getByText("Advanced local runtime"));
     expect(screen.getByRole("textbox", { name: "Local model" })).toHaveValue(

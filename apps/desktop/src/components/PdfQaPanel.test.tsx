@@ -1,4 +1,10 @@
-import { render, screen, type RenderResult } from "@testing-library/react";
+import {
+  render,
+  screen,
+  within,
+  type RenderResult,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import {
   LOCALE_OPTIONS,
@@ -51,7 +57,12 @@ describe("PdfQaPanel", () => {
 
     renderPanel(<PdfQaPanel report={fixture.pdfQuality} />);
 
-    expect(screen.getByText("Awaiting current render")).toBeInTheDocument();
+    expect(screen.getAllByText("Awaiting current render")).toHaveLength(2);
+    expect(
+      screen.getByRole("img", { name: "PDF visual score —" }),
+    ).toHaveTextContent("—");
+    expect(screen.getByRole("heading", { name: "PDF visual score" })).toBeInTheDocument();
+    expect(screen.queryByText("Visual score 0")).not.toBeInTheDocument();
     expect(
       screen.getByText(
         /No visual score is available until the current job produces verifiable page evidence\./u,
@@ -75,6 +86,61 @@ describe("PdfQaPanel", () => {
       screen.getByText(
         /The visual score meets the threshold, but every PDF hard gate must also pass\./u,
       ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps hard-gate and visual detail closed until the user asks for it", async () => {
+    const user = userEvent.setup();
+    const fixture = createStudioFixture(5);
+    const report = {
+      ...fixture.pdfQuality,
+      status: "passed" as const,
+      score: 96,
+    };
+
+    renderPanel(<PdfQaPanel report={report} />);
+
+    expect(
+      screen.getByRole("img", { name: "PDF visual score 96%" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "PDF visual score" })).toBeInTheDocument();
+    expect(screen.queryByText("Visual score 96")).not.toBeInTheDocument();
+
+    const hardGates = screen
+      .getByText("13 PDF hard gates")
+      .closest("details");
+    const facets = screen.getByText("14 visual facets").closest("details");
+    expect(hardGates).not.toBeNull();
+    expect(facets).not.toBeNull();
+    expect(hardGates).not.toHaveAttribute("open");
+    expect(facets).not.toHaveAttribute("open");
+    expect(
+      within(hardGates as HTMLElement).getByText("PDF opens successfully"),
+    ).not.toBeVisible();
+    expect(
+      within(facets as HTMLElement).getByText("Coherence"),
+    ).not.toBeVisible();
+
+    await user.click(
+      within(hardGates as HTMLElement).getByText("13 PDF hard gates"),
+    );
+    expect(hardGates).toHaveAttribute("open");
+    expect(
+      within(hardGates as HTMLElement).getAllByRole("listitem"),
+    ).toHaveLength(13);
+    expect(
+      within(hardGates as HTMLElement).getByText("PDF opens successfully"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(facets as HTMLElement).getByText("14 visual facets"),
+    );
+    expect(facets).toHaveAttribute("open");
+    expect(
+      within(facets as HTMLElement).getAllByRole("progressbar"),
+    ).toHaveLength(14);
+    expect(
+      within(facets as HTMLElement).getByText("Coherence"),
     ).toBeInTheDocument();
   });
 });

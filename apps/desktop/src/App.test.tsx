@@ -266,15 +266,25 @@ describe("MediaTranscribe Studio desktop scaffold", () => {
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
 
     const hardGateSection = screen
-      .getByRole("heading", { name: "13 PDF hard gates" })
-      .closest("section");
+      .getByText("13 PDF hard gates")
+      .closest("details");
     expect(hardGateSection).not.toBeNull();
+    expect(hardGateSection).not.toHaveAttribute("open");
+    await user.click(
+      within(hardGateSection as HTMLElement).getByText(
+        "13 PDF hard gates",
+      ),
+    );
     expect(within(hardGateSection as HTMLElement).getAllByRole("listitem")).toHaveLength(13);
 
     const facetSection = screen
-        .getByRole("heading", { name: "14 visual facets" })
-      .closest("section");
+      .getByText("14 visual facets")
+      .closest("details");
     expect(facetSection).not.toBeNull();
+    expect(facetSection).not.toHaveAttribute("open");
+    await user.click(
+      within(facetSection as HTMLElement).getByText("14 visual facets"),
+    );
     expect(
       within(facetSection as HTMLElement).getAllByRole("progressbar"),
     ).toHaveLength(14);
@@ -285,7 +295,7 @@ describe("MediaTranscribe Studio desktop scaffold", () => {
     screen.getAllByRole("button").forEach((button) => {
       expect(button).toHaveAccessibleName();
     });
-  });
+  }, 15_000);
 
   it("switches among the nine interface locales and persists explicit choice", async () => {
     const user = userEvent.setup();

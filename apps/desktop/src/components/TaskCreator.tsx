@@ -1,10 +1,22 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SyntheticEvent,
+} from "react";
 import {
   pathsAreDistinct,
   type MediaSelection,
 } from "../bridge/media-drop";
+import {
+  selectNativeMediaFiles,
+  selectNativeOutputDirectory,
+} from "../bridge/native-path-picker";
 import type {
   CreateJobRequest,
+  CreateJobResult,
   ModelStrategy,
   ModelStrategyId,
   SpeakerCountPolicy,
@@ -25,10 +37,52 @@ export interface InitialMediaSelection extends MediaSelection {
   sequence: number;
 }
 
+export interface InitialMediaBatch {
+  sequence: number;
+  selections: readonly MediaSelection[];
+}
+
+export type MediaQueueItemStatus =
+  | "pending"
+  | "creating"
+  | "accepted"
+  | "failed";
+
+export interface MediaQueueItem {
+  id: string;
+  sourcePath: string;
+  outputDirectory: string;
+  outputEdited: boolean;
+  mediaError: string | null;
+  resolving: boolean;
+  status: MediaQueueItemStatus;
+  submitError: string | null;
+}
+
+export interface CreateJobBatchItemResult {
+  index: number;
+  request: CreateJobRequest;
+  status: "accepted" | "failed";
+  result?: CreateJobResult;
+  error?: string;
+}
+
+export interface CreateJobBatchResult {
+  items: CreateJobBatchItemResult[];
+  acceptedCount: number;
+  failedCount: number;
+}
+
 interface TaskCreatorProps {
   open: boolean;
+  initialMediaBatch?: InitialMediaBatch | null;
+  /** Compatibility input for callers that have not migrated to batches yet. */
   initialMediaSelection?: InitialMediaSelection | null;
   resolveMediaPath?: (path: string) => Promise<MediaSelection>;
+  selectMediaFiles?: () => Promise<readonly string[]>;
+  /** Compatibility input for single-file picker integrations. */
+  selectMediaFile?: () => Promise<string | null>;
+  selectOutputDirectory?: () => Promise<string | null>;
   speakers: SpeakerProfile[];
   initialSpeakerPolicy: SpeakerCountPolicy;
   strategies: ModelStrategy[];
@@ -37,14 +91,17 @@ interface TaskCreatorProps {
   busy: boolean;
   onClose: () => void;
   onCreate: (request: CreateJobRequest) => Promise<unknown>;
+  onCreateBatch?: (
+    requests: readonly CreateJobRequest[],
+  ) => Promise<CreateJobBatchResult>;
 }
 
 export const MAX_INLINE_SPEAKER_EDITORS = 32;
-const CUSTOM_LANGUAGE_VALUE = "__custom__";
 const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
 const DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434";
 const DEFAULT_SOURCE_LANGUAGE = "auto";
 const DEFAULT_OUTPUT_LOCALE = "en-US";
+const MAX_MEDIA_QUEUE_ITEMS = 32;
 type TaskCreatorMessageKey = Extract<MessageKey, `creator.${string}`>;
 const LANGUAGE_PRESETS = [
   ["auto", "creator.language.auto"],
@@ -66,6 +123,7 @@ const LANGUAGE_PRESETS = [
 const OUTPUT_LOCALE_PRESETS = LANGUAGE_PRESETS.filter(
   ([tag]) => tag !== "auto",
 );
+const TRANSLATION_TARGET_PRESETS = OUTPUT_LOCALE_PRESETS;
 function isConcreteLanguageTag(value: string): boolean {
   return isPracticalLanguageTag(value);
 }
@@ -75,6 +133,18 @@ function parseLanguageTags(value: string): string[] {
     .split(/[,;\n]/u)
     .map((tag) => tag.trim())
     .filter((tag) => tag.length > 0);
+}
+
+function uniqueLanguageTags(tags: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return tags.filter((tag) => {
+    const normalized = tag.toLocaleLowerCase("en-US");
+    if (seen.has(normalized)) {
+      return false;
+    }
+    seen.add(normalized);
+    return true;
+  });
 }
 
 function materializeLabels(
@@ -109,10 +179,39 @@ function hybridLabelCount(
   return prior;
 }
 
+function queueItemFromSelection(
+  id: string,
+  selection?: Partial<MediaSelection>,
+  mediaError: string | null = null,
+): MediaQueueItem {
+  return {
+    id,
+    sourcePath: selection?.sourcePath ?? "",
+    outputDirectory: selection?.outputDirectory ?? "",
+    outputEdited: false,
+    mediaError,
+    resolving: false,
+    status: "pending",
+    submitError: null,
+  };
+}
+
+function comparableLocalPath(path: string): string {
+  return path
+    .trim()
+    .replace(/\//gu, "\\")
+    .replace(/\\+$/gu, "")
+    .toLocaleLowerCase("en-US");
+}
+
 export function TaskCreator({
   open,
+  initialMediaBatch,
   initialMediaSelection,
   resolveMediaPath,
+  selectMediaFiles,
+  selectMediaFile,
+  selectOutputDirectory = selectNativeOutputDirectory,
   speakers,
   initialSpeakerPolicy,
   strategies,
@@ -121,6 +220,7 @@ export function TaskCreator({
   busy,
   onClose,
   onCreate,
+  onCreateBatch,
 }: TaskCreatorProps) {
   const { t } = useI18n();
   const taskT = (
@@ -129,22 +229,26 @@ export function TaskCreator({
   ): string => t(key, params);
   const defaultSpeakerLabel = (number: number): string =>
     taskT("creator.speaker.defaultName", { number });
+  const languageLabel = (tag: string): string => {
+    const preset = LANGUAGE_PRESETS.find(([presetTag]) => presetTag === tag);
+    return preset ? taskT(preset[1]) : tag;
+  };
   const titleInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const busyRef = useRef(busy);
   const previousOpenRef = useRef(false);
-  const appliedSelectionRef = useRef<number | null>(null);
-  const outputEditedRef = useRef(false);
-  const mediaPathValueRef = useRef("");
-  const pathResolutionRef = useRef(0);
+  const appliedMediaBatchRef = useRef<number | null>(null);
+  const queueSequenceRef = useRef(0);
+  const pathResolutionRef = useRef(new Map<string, number>());
+  const submissionLockRef = useRef(false);
   const [title, setTitle] = useState(() =>
     taskT("creator.defaultJobTitle"),
   );
-  const [mediaPath, setMediaPath] = useState("");
-  const [outputDirectory, setOutputDirectory] = useState("");
-  const [mediaPathError, setMediaPathError] = useState<string | null>(null);
-  const [resolvingMediaPath, setResolvingMediaPath] = useState(false);
+  const [mediaQueue, setMediaQueue] = useState<MediaQueueItem[]>([]);
+  const [pathPickerError, setPathPickerError] = useState<string | null>(null);
+  const [activePathPicker, setActivePathPicker] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [strategyId, setStrategyId] = useState<ModelStrategyId>(selectedStrategyId);
   const [speakerMode, setSpeakerMode] =
     useState<SpeakerCountPolicy["mode"]>(initialSpeakerPolicy.mode);
@@ -172,24 +276,74 @@ export function TaskCreator({
   const [sourceLanguageChoice, setSourceLanguageChoice] = useState(
     DEFAULT_SOURCE_LANGUAGE,
   );
+  const [customSourceLanguageEnabled, setCustomSourceLanguageEnabled] =
+    useState(false);
   const [customSourceLanguage, setCustomSourceLanguage] = useState("");
   const [businessEnabled, setBusinessEnabled] = useState(false);
   const [translationEnabled, setTranslationEnabled] = useState(false);
-  const [translationTargetsText, setTranslationTargetsText] = useState("");
+  const [selectedTranslationTargets, setSelectedTranslationTargets] = useState<
+    string[]
+  >([]);
+  const [customTranslationTargetsText, setCustomTranslationTargetsText] =
+    useState("");
   const [polishEnabled, setPolishEnabled] = useState(false);
   const [summaryEnabled, setSummaryEnabled] = useState(false);
   const [outputLocaleChoice, setOutputLocaleChoice] = useState(
     DEFAULT_OUTPUT_LOCALE,
   );
+  const [customOutputLocaleEnabled, setCustomOutputLocaleEnabled] =
+    useState(false);
   const [customOutputLocale, setCustomOutputLocale] = useState("");
   const [localLlmModel, setLocalLlmModel] = useState(DEFAULT_LOCAL_MODEL);
   const [localLlmEndpoint, setLocalLlmEndpoint] = useState(
     DEFAULT_LOCAL_ENDPOINT,
   );
+  const incomingMediaBatch = useMemo<InitialMediaBatch | null>(() => {
+    if (initialMediaBatch) {
+      return initialMediaBatch;
+    }
+    if (initialMediaSelection) {
+      return {
+        sequence: initialMediaSelection.sequence,
+        selections: [initialMediaSelection],
+      };
+    }
+    return null;
+  }, [initialMediaBatch, initialMediaSelection]);
+  const openNativeMediaPicker = useMemo(
+    () =>
+      selectMediaFiles ??
+      (selectMediaFile
+        ? async (): Promise<readonly string[]> => {
+            const selected = await selectMediaFile();
+            return selected === null ? [] : [selected];
+          }
+        : selectNativeMediaFiles),
+    [selectMediaFile, selectMediaFiles],
+  );
+
+  const nextQueueId = useCallback((): string => {
+    queueSequenceRef.current += 1;
+    return `media-queue-${queueSequenceRef.current}`;
+  }, []);
+
+  const materializeInitialQueue = useCallback(
+    (selections: readonly MediaSelection[]): MediaQueueItem[] => {
+      if (selections.length === 0) {
+        return [queueItemFromSelection(nextQueueId())];
+      }
+      return selections
+        .slice(0, MAX_MEDIA_QUEUE_ITEMS)
+        .map((selection) =>
+          queueItemFromSelection(nextQueueId(), selection),
+        );
+    },
+    [nextQueueId],
+  );
 
   useEffect(() => {
-    busyRef.current = busy;
-  }, [busy]);
+    busyRef.current = busy || submitting;
+  }, [busy, submitting]);
 
   useEffect(() => {
     const opening = open && !previousOpenRef.current;
@@ -198,18 +352,16 @@ export function TaskCreator({
       return;
     }
 
-    const selectedMediaPath = initialMediaSelection?.sourcePath ?? "";
-    const selectedOutputDirectory =
-      initialMediaSelection?.outputDirectory ?? "";
     setTitle(t("creator.defaultJobTitle"));
-    setMediaPath(selectedMediaPath);
-    mediaPathValueRef.current = selectedMediaPath;
-    setOutputDirectory(selectedOutputDirectory);
-    outputEditedRef.current = false;
-    appliedSelectionRef.current = initialMediaSelection?.sequence ?? null;
-    pathResolutionRef.current += 1;
-    setMediaPathError(null);
-    setResolvingMediaPath(false);
+    setMediaQueue(
+      materializeInitialQueue(incomingMediaBatch?.selections ?? []),
+    );
+    appliedMediaBatchRef.current = incomingMediaBatch?.sequence ?? null;
+    pathResolutionRef.current.clear();
+    setPathPickerError(null);
+    setActivePathPicker(null);
+    setSubmitting(false);
+    submissionLockRef.current = false;
     setStrategyId(selectedStrategyId);
     setSpeakerMode(initialSpeakerPolicy.mode);
     setManualCount(
@@ -244,19 +396,23 @@ export function TaskCreator({
       ),
     );
     setSourceLanguageChoice(DEFAULT_SOURCE_LANGUAGE);
+    setCustomSourceLanguageEnabled(false);
     setCustomSourceLanguage("");
     setBusinessEnabled(false);
     setTranslationEnabled(false);
-    setTranslationTargetsText("");
+    setSelectedTranslationTargets([]);
+    setCustomTranslationTargetsText("");
     setPolishEnabled(false);
     setSummaryEnabled(false);
     setOutputLocaleChoice(DEFAULT_OUTPUT_LOCALE);
+    setCustomOutputLocaleEnabled(false);
     setCustomOutputLocale("");
     setLocalLlmModel(DEFAULT_LOCAL_MODEL);
     setLocalLlmEndpoint(DEFAULT_LOCAL_ENDPOINT);
   }, [
-    initialMediaSelection,
+    incomingMediaBatch,
     initialSpeakerPolicy,
+    materializeInitialQueue,
     open,
     selectedStrategyId,
     speakers,
@@ -266,21 +422,47 @@ export function TaskCreator({
   useEffect(() => {
     if (
       !open ||
-      !initialMediaSelection ||
-      appliedSelectionRef.current === initialMediaSelection.sequence
+      !incomingMediaBatch ||
+      appliedMediaBatchRef.current === incomingMediaBatch.sequence
     ) {
       return;
     }
 
-    appliedSelectionRef.current = initialMediaSelection.sequence;
-    pathResolutionRef.current += 1;
-    mediaPathValueRef.current = initialMediaSelection.sourcePath;
-    outputEditedRef.current = false;
-    setMediaPath(initialMediaSelection.sourcePath);
-    setOutputDirectory(initialMediaSelection.outputDirectory);
-    setMediaPathError(null);
-    setResolvingMediaPath(false);
-  }, [initialMediaSelection, open]);
+    appliedMediaBatchRef.current = incomingMediaBatch.sequence;
+    setMediaQueue((current) => {
+      const existingPaths = new Set(
+        current
+          .map((item) => comparableLocalPath(item.sourcePath))
+          .filter((path) => path.length > 0),
+      );
+      const additions = incomingMediaBatch.selections
+        .filter((selection) => {
+          const comparable = comparableLocalPath(selection.sourcePath);
+          if (existingPaths.has(comparable)) {
+            return false;
+          }
+          existingPaths.add(comparable);
+          return true;
+        })
+        .map((selection) =>
+          queueItemFromSelection(nextQueueId(), selection),
+        );
+
+      if (additions.length === 0) {
+        return current;
+      }
+
+      const untouchedBlank =
+        current.length === 1 &&
+        current[0].sourcePath.trim().length === 0 &&
+        current[0].outputDirectory.trim().length === 0 &&
+        !current[0].outputEdited &&
+        current[0].status === "pending";
+      const base = untouchedBlank ? [] : current;
+      return [...base, ...additions].slice(0, MAX_MEDIA_QUEUE_ITEMS);
+    });
+    setPathPickerError(null);
+  }, [incomingMediaBatch, nextQueueId, open]);
 
   useEffect(() => {
     if (!open) {
@@ -352,28 +534,34 @@ export function TaskCreator({
       : speakerMode === "hybrid" && hybridValid
         ? hybridPriorCount
         : null;
-  const language =
-    sourceLanguageChoice === CUSTOM_LANGUAGE_VALUE
-      ? customSourceLanguage.trim()
-      : sourceLanguageChoice;
+  const language = customSourceLanguageEnabled
+    ? customSourceLanguage.trim()
+    : sourceLanguageChoice;
   const sourceLanguageValid =
     language === "auto" || isConcreteLanguageTag(language);
+  const customTranslationTargets = parseLanguageTags(
+    customTranslationTargetsText,
+  );
   const translationTargets =
     businessEnabled && translationEnabled
-      ? parseLanguageTags(translationTargetsText)
+      ? [...selectedTranslationTargets, ...customTranslationTargets]
       : [];
+  const normalizedTranslationTargets = translationTargets.map((target) =>
+    target.toLocaleLowerCase("en-US"),
+  );
+  const visibleTranslationTargets = uniqueLanguageTags(translationTargets);
   const translationTargetsValid =
     !businessEnabled ||
     !translationEnabled ||
     (translationTargets.length > 0 &&
       translationTargets.every(isConcreteLanguageTag) &&
-      new Set(
-        translationTargets.map((target) => target.toLocaleLowerCase("en-US")),
-      ).size === translationTargets.length);
-  const outputLocale =
-    outputLocaleChoice === CUSTOM_LANGUAGE_VALUE
-      ? customOutputLocale.trim()
-      : outputLocaleChoice;
+      new Set(normalizedTranslationTargets).size === translationTargets.length);
+  const translationTargetsHaveInputIssue =
+    customTranslationTargetsText.trim().length > 0 &&
+    !translationTargetsValid;
+  const outputLocale = customOutputLocaleEnabled
+    ? customOutputLocale.trim()
+    : outputLocaleChoice;
   const outputLocaleValid =
     !businessEnabled || isConcreteLanguageTag(outputLocale);
   const localRuntimeValid =
@@ -382,43 +570,231 @@ export function TaskCreator({
       /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/.*)?$/u.test(
         localLlmEndpoint.trim(),
       ));
-  const outputPathDistinct = pathsAreDistinct(mediaPath, outputDirectory);
+  const actionableMediaItems = mediaQueue.filter(
+    (item) => item.status !== "accepted",
+  );
+  const outputDirectoryCounts = new Map<string, number>();
+  actionableMediaItems.forEach((item) => {
+    const comparable = comparableLocalPath(item.outputDirectory);
+    if (comparable.length > 0) {
+      outputDirectoryCounts.set(
+        comparable,
+        (outputDirectoryCounts.get(comparable) ?? 0) + 1,
+      );
+    }
+  });
+  const mediaQueueValid =
+    actionableMediaItems.length > 0 &&
+    actionableMediaItems.every((item) => {
+      const comparableOutput = comparableLocalPath(item.outputDirectory);
+      return (
+        item.sourcePath.trim().length > 0 &&
+        item.outputDirectory.trim().length > 0 &&
+        item.mediaError === null &&
+        !item.resolving &&
+        pathsAreDistinct(item.sourcePath, item.outputDirectory) &&
+        (outputDirectoryCounts.get(comparableOutput) ?? 0) === 1
+      );
+    });
 
-  const deriveOutputDirectory = async () => {
-    const candidate = mediaPath.trim();
-    if (
-      !resolveMediaPath ||
-      candidate.length === 0 ||
-      outputEditedRef.current
-    ) {
+  const updateQueueItem = (
+    itemId: string,
+    update:
+      | Partial<MediaQueueItem>
+      | ((item: MediaQueueItem) => MediaQueueItem),
+  ) => {
+    setMediaQueue((current) =>
+      current.map((item) => {
+        if (item.id !== itemId || item.status === "accepted") {
+          return item;
+        }
+        return typeof update === "function"
+          ? update(item)
+          : { ...item, ...update };
+      }),
+    );
+  };
+
+  const resolveAndApplyMediaPath = async (
+    itemId: string,
+    rawPath: string,
+  ) => {
+    const candidate = rawPath.trim();
+    if (!resolveMediaPath || candidate.length === 0) {
       return;
     }
 
-    const operation = pathResolutionRef.current + 1;
-    pathResolutionRef.current = operation;
-    setResolvingMediaPath(true);
-    setMediaPathError(null);
+    const operation =
+      (pathResolutionRef.current.get(itemId) ?? 0) + 1;
+    pathResolutionRef.current.set(itemId, operation);
+    updateQueueItem(itemId, {
+      resolving: true,
+      mediaError: null,
+      submitError: null,
+      status: "pending",
+    });
+    setPathPickerError(null);
 
     try {
       const selection = await resolveMediaPath(candidate);
       if (
-        pathResolutionRef.current !== operation ||
-        mediaPathValueRef.current.trim() !== candidate
+        pathResolutionRef.current.get(itemId) !== operation
       ) {
         return;
       }
-      mediaPathValueRef.current = selection.sourcePath;
-      setMediaPath(selection.sourcePath);
-      setOutputDirectory(selection.outputDirectory);
+      updateQueueItem(itemId, (item) => {
+        if (item.sourcePath.trim() !== candidate) {
+          return item;
+        }
+        return {
+          ...item,
+          sourcePath: selection.sourcePath,
+          outputDirectory: item.outputEdited
+            ? item.outputDirectory
+            : selection.outputDirectory,
+          mediaError: null,
+          resolving: false,
+        };
+      });
     } catch (error: unknown) {
-      if (pathResolutionRef.current === operation) {
-        setMediaPathError(t(mediaDropErrorMessageKey(error)));
+      if (pathResolutionRef.current.get(itemId) === operation) {
+        updateQueueItem(itemId, {
+          resolving: false,
+          mediaError: t(mediaDropErrorMessageKey(error)),
+        });
       }
     } finally {
-      if (pathResolutionRef.current === operation) {
-        setResolvingMediaPath(false);
+      if (pathResolutionRef.current.get(itemId) === operation) {
+        updateQueueItem(itemId, { resolving: false });
       }
     }
+  };
+
+  const deriveOutputDirectory = async (item: MediaQueueItem) => {
+    await resolveAndApplyMediaPath(item.id, item.sourcePath);
+  };
+
+  const chooseMedia = async () => {
+    if (activePathPicker !== null) {
+      return;
+    }
+    setActivePathPicker("media");
+    setPathPickerError(null);
+    try {
+      const selectedPaths = [...(await openNativeMediaPicker())].slice(
+        0,
+        MAX_MEDIA_QUEUE_ITEMS,
+      );
+      if (selectedPaths.length === 0) {
+        return;
+      }
+
+      const resolved = await Promise.all(
+        selectedPaths.map(async (selectedPath) => {
+          if (!resolveMediaPath) {
+            return {
+              selection: {
+                sourcePath: selectedPath,
+                outputDirectory: "",
+              },
+              error: null,
+            };
+          }
+          try {
+            return {
+              selection: await resolveMediaPath(selectedPath),
+              error: null,
+            };
+          } catch (error: unknown) {
+            return {
+              selection: {
+                sourcePath: selectedPath,
+                outputDirectory: "",
+              },
+              error: t(mediaDropErrorMessageKey(error)),
+            };
+          }
+        }),
+      );
+
+      setMediaQueue((current) => {
+        const existingPaths = new Set(
+          current
+            .map((item) => comparableLocalPath(item.sourcePath))
+            .filter((path) => path.length > 0),
+        );
+        const additions = resolved
+          .filter(({ selection }) => {
+            const comparable = comparableLocalPath(selection.sourcePath);
+            if (existingPaths.has(comparable)) {
+              return false;
+            }
+            existingPaths.add(comparable);
+            return true;
+          })
+          .map(({ selection, error }) =>
+            queueItemFromSelection(
+              nextQueueId(),
+              selection,
+              error,
+            ),
+          );
+        const untouchedBlank =
+          current.length === 1 &&
+          current[0].sourcePath.trim().length === 0 &&
+          current[0].outputDirectory.trim().length === 0 &&
+          !current[0].outputEdited &&
+          current[0].status === "pending";
+        const base = untouchedBlank ? [] : current;
+        return [...base, ...additions].slice(0, MAX_MEDIA_QUEUE_ITEMS);
+      });
+    } catch {
+      setPathPickerError(taskT("creator.pathPickerError"));
+    } finally {
+      setActivePathPicker(null);
+    }
+  };
+
+  const chooseOutputDirectory = async (itemId: string) => {
+    if (activePathPicker !== null) {
+      return;
+    }
+    setActivePathPicker(`output:${itemId}`);
+    setPathPickerError(null);
+    try {
+      const selectedPath = await selectOutputDirectory();
+      if (selectedPath === null) {
+        return;
+      }
+      pathResolutionRef.current.set(
+        itemId,
+        (pathResolutionRef.current.get(itemId) ?? 0) + 1,
+      );
+      updateQueueItem(itemId, {
+        outputDirectory: selectedPath,
+        outputEdited: true,
+        submitError: null,
+      });
+    } catch {
+      setPathPickerError(taskT("creator.pathPickerError"));
+    } finally {
+      setActivePathPicker(null);
+    }
+  };
+
+  const removeMediaItem = (itemId: string) => {
+    pathResolutionRef.current.set(
+      itemId,
+      (pathResolutionRef.current.get(itemId) ?? 0) + 1,
+    );
+    setMediaQueue((current) => {
+      const remaining = current.filter(
+        (item) => item.id !== itemId || item.status === "accepted",
+      );
+      return remaining.length > 0
+        ? remaining
+        : [queueItemFromSelection(nextQueueId())];
+    });
   };
 
   if (!open) {
@@ -440,10 +816,7 @@ export function TaskCreator({
           speakerLabels.every((label) => label.trim().length > 0))));
   const canSubmit =
     title.trim().length > 0 &&
-    mediaPath.trim().length > 0 &&
-    outputDirectory.trim().length > 0 &&
-    mediaPathError === null &&
-    outputPathDistinct &&
+    mediaQueueValid &&
     countPolicyValid &&
     speakerLabelsValid &&
     sourceLanguageValid &&
@@ -480,7 +853,12 @@ export function TaskCreator({
 
   const submit = async (event: SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!canSubmit || busy) {
+    if (
+      !canSubmit ||
+      busy ||
+      submitting ||
+      submissionLockRef.current
+    ) {
       return;
     }
     let speakerPolicy: SpeakerCountPolicy;
@@ -507,33 +885,149 @@ export function TaskCreator({
         priorCount: hybridPriorCount,
       };
     }
-    await onCreate({
-      title: title.trim(),
-      mediaPath: mediaPath.trim(),
-      outputDirectory: outputDirectory.trim(),
-      strategyId,
-      speakerPolicy,
-      speakerLabels:
-        speakerMode === "auto" || !shouldMaterializeLabels
-          ? []
-          : speakerLabels.map((label) => label.trim()),
-      language,
-      localLlmMode:
-        businessEnabled &&
-        (translationTargets.length > 0 || polishEnabled || summaryEnabled)
-          ? "business"
-          : "disabled",
-      localLlmModel: localLlmModel.trim(),
-      localLlmEndpoint: localLlmEndpoint.trim(),
-      localLlmEndpointPolicy: "loopback-only",
-      localLlmAutoApply: false,
-      translationTargets,
-      polish: businessEnabled && polishEnabled,
-      summary: businessEnabled && summaryEnabled,
-      outputLocale,
-      businessPromptVersion: "business-v1",
-    });
-    onClose();
+    submissionLockRef.current = true;
+    setSubmitting(true);
+    const submittedItems = mediaQueue.filter(
+      (item) => item.status !== "accepted",
+    );
+    const requests = submittedItems.map(
+      (item, index): CreateJobRequest => ({
+        title:
+          submittedItems.length === 1
+            ? title.trim()
+            : `${title.trim()} — ${index + 1}`,
+        mediaPath: item.sourcePath.trim(),
+        outputDirectory: item.outputDirectory.trim(),
+        strategyId,
+        speakerPolicy,
+        speakerLabels:
+          speakerMode === "auto" || !shouldMaterializeLabels
+            ? []
+            : speakerLabels.map((label) => label.trim()),
+        language,
+        localLlmMode:
+          businessEnabled &&
+          (translationTargets.length > 0 || polishEnabled || summaryEnabled)
+            ? "business"
+            : "disabled",
+        localLlmModel: localLlmModel.trim(),
+        localLlmEndpoint: localLlmEndpoint.trim(),
+        localLlmEndpointPolicy: "loopback-only",
+        localLlmAutoApply: false,
+        translationTargets,
+        polish: businessEnabled && polishEnabled,
+        summary: businessEnabled && summaryEnabled,
+        outputLocale,
+        businessPromptVersion: "business-v1",
+      }),
+    );
+
+    setMediaQueue((current) =>
+      current.map((item) =>
+        submittedItems.some((submitted) => submitted.id === item.id)
+          ? {
+              ...item,
+              status: "creating",
+              submitError: null,
+            }
+          : item,
+      ),
+    );
+
+    try {
+      let batchResult: CreateJobBatchResult;
+      if (onCreateBatch) {
+        batchResult = await onCreateBatch(requests);
+      } else {
+        const items: CreateJobBatchItemResult[] = [];
+        for (const [index, request] of requests.entries()) {
+          try {
+            const rawResult = await onCreate(request);
+            const result =
+              rawResult &&
+              typeof rawResult === "object" &&
+              "accepted" in rawResult
+                ? (rawResult as CreateJobResult)
+                : undefined;
+            const accepted = result?.accepted !== false;
+            items.push(
+              accepted
+                ? {
+                    index,
+                    request,
+                    status: "accepted",
+                    result,
+                  }
+                : {
+                    index,
+                    request,
+                    status: "failed",
+                    result,
+                    error:
+                      result.message.trim().length > 0
+                        ? result.message
+                        : taskT("creator.batch.partialFailure"),
+                  },
+            );
+          } catch (error: unknown) {
+            items.push({
+              index,
+              request,
+              status: "failed",
+              error:
+                error instanceof Error && error.message.trim().length > 0
+                  ? error.message
+                  : taskT("creator.batch.partialFailure"),
+            });
+          }
+        }
+        const acceptedCount = items.filter(
+          (item) => item.status === "accepted",
+        ).length;
+        batchResult = {
+          items,
+          acceptedCount,
+          failedCount: items.length - acceptedCount,
+        };
+      }
+
+      setMediaQueue((current) =>
+        current.map((item) => {
+          const submittedIndex = submittedItems.findIndex(
+            (submitted) => submitted.id === item.id,
+          );
+          if (submittedIndex < 0) {
+            return item;
+          }
+          const result = batchResult.items.find(
+            (candidate) => candidate.index === submittedIndex,
+          );
+          if (result?.status === "accepted") {
+            return {
+              ...item,
+              status: "accepted",
+              submitError: null,
+            };
+          }
+          return {
+            ...item,
+            status: "failed",
+            submitError:
+              result?.error ?? taskT("creator.batch.partialFailure"),
+          };
+        }),
+      );
+
+      if (
+        batchResult.failedCount === 0 &&
+        batchResult.acceptedCount === submittedItems.length
+      ) {
+        onClose();
+      }
+    } finally {
+      submissionLockRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -543,7 +1037,7 @@ export function TaskCreator({
         type="button"
         aria-label={t("common.close")}
         onClick={() => {
-          if (!busy) {
+          if (!busy && !submitting) {
             onClose();
           }
         }}
@@ -568,7 +1062,7 @@ export function TaskCreator({
             className="icon-button"
             type="button"
             aria-label={t("common.close")}
-            disabled={busy}
+            disabled={busy || submitting}
             onClick={onClose}
           >
             <Icon name="x" size={20} />
@@ -583,6 +1077,10 @@ export function TaskCreator({
             });
           }}
         >
+          <fieldset
+            className="task-form__controls"
+            disabled={busy || submitting}
+          >
           <div className="form-section">
             <div className="form-section__heading">
               <span>01</span>
@@ -606,72 +1104,289 @@ export function TaskCreator({
                   onChange={(event) => setTitle(event.target.value)}
                 />
               </label>
-              <label className="field field--full">
-                <span>{t("creator.mediaPath")}</span>
-                <span className="field__with-icon">
-                  <Icon name="file" size={17} />
-                  <input
-                    value={mediaPath}
-                    placeholder={t("creator.mediaPlaceholder")}
-                    required
-                    spellCheck={false}
-                    autoComplete="off"
-                    aria-invalid={mediaPathError !== null}
-                    aria-describedby="media-path-help"
-                    onChange={(event) => {
-                      mediaPathValueRef.current = event.target.value;
-                      pathResolutionRef.current += 1;
-                      setMediaPath(event.target.value);
-                      setMediaPathError(null);
-                    }}
-                    onBlur={() => {
-                      deriveOutputDirectory().catch((error: unknown) => {
+              <section
+                className="media-batch-picker field--full"
+                aria-labelledby="creator-media-batch-title"
+              >
+                <div className="media-batch-picker__invitation">
+                  <span
+                    className="media-batch-picker__orb"
+                    aria-hidden="true"
+                  >
+                    <Icon name="upload" size={24} />
+                  </span>
+                  <div className="media-batch-picker__copy">
+                    <strong id="creator-media-batch-title">
+                      {taskT("creator.batch.dropTitle")}
+                    </strong>
+                    <small>{taskT("creator.batch.dropDetail")}</small>
+                    <small className="media-batch-picker__native-hint">
+                      {taskT("creator.batch.nativePickerHint")}
+                    </small>
+                  </div>
+                  <button
+                    className="button button--primary media-batch-picker__button"
+                    type="button"
+                    disabled={
+                      busy ||
+                      submitting ||
+                      activePathPicker !== null ||
+                      mediaQueue.length >= MAX_MEDIA_QUEUE_ITEMS
+                    }
+                    onClick={() => {
+                      chooseMedia().catch((error: unknown) => {
                         console.error(
-                          "Failed to derive the local output directory",
+                          "Failed to open the native media picker",
                           error,
                         );
                       });
                     }}
-                  />
-                </span>
-                <small
-                  id="media-path-help"
-                  className={mediaPathError ? "field__error" : undefined}
-                >
-                  {mediaPathError ??
-                    (resolvingMediaPath
+                  >
+                    <Icon name="folder" size={17} />
+                    {activePathPicker === "media"
                       ? t("common.checking")
-                      : t("creator.mediaHint"))}
-                </small>
-              </label>
-              <label className="field field--full">
-                <span>{t("creator.outputDirectory")}</span>
-                <span className="field__with-icon">
-                  <Icon name="folder" size={17} />
-                  <input
-                    value={outputDirectory}
-                    placeholder={t("creator.outputPlaceholder")}
-                    required
-                    spellCheck={false}
-                    autoComplete="off"
-                    aria-invalid={!outputPathDistinct}
-                    aria-describedby="output-directory-help"
-                    onChange={(event) => {
-                      outputEditedRef.current = true;
-                      pathResolutionRef.current += 1;
-                      setOutputDirectory(event.target.value);
-                    }}
-                  />
-                </span>
-                <small
-                  id="output-directory-help"
-                  className={!outputPathDistinct ? "field__error" : undefined}
+                      : taskT("creator.batch.addMedia")}
+                  </button>
+                </div>
+
+                <div className="media-batch-picker__summary" role="status">
+                  <span>
+                    {taskT("creator.batch.selectedCount", {
+                      count: mediaQueue.filter(
+                        (item) => item.sourcePath.trim().length > 0,
+                      ).length,
+                    })}
+                  </span>
+                  <small>{taskT("creator.batch.appendPromise")}</small>
+                </div>
+
+                <div
+                  className="media-queue"
+                  role="list"
+                  aria-label={taskT("creator.batch.queueLabel")}
                 >
-                  {outputPathDistinct
-                    ? t("creator.outputHint")
-                    : t("creator.outputMatchesSource")}
-                </small>
-              </label>
+                  {mediaQueue.map((item, index) => {
+                    const mediaInputId =
+                      index === 0
+                        ? "creator-media-path"
+                        : `creator-media-path-${item.id}`;
+                    const outputInputId =
+                      index === 0
+                        ? "creator-output-directory"
+                        : `creator-output-directory-${item.id}`;
+                    const mediaHelpId = `${mediaInputId}-help`;
+                    const outputHelpId = `${outputInputId}-help`;
+                    const outputPathDistinct = pathsAreDistinct(
+                      item.sourcePath,
+                      item.outputDirectory,
+                    );
+                    const comparableOutput = comparableLocalPath(
+                      item.outputDirectory,
+                    );
+                    const outputCollision =
+                      comparableOutput.length > 0 &&
+                      (outputDirectoryCounts.get(comparableOutput) ?? 0) > 1;
+                    const statusLabel =
+                      item.status === "accepted"
+                        ? taskT("creator.batch.accepted")
+                        : item.status === "creating"
+                          ? taskT("creator.batch.creating")
+                          : item.status === "failed"
+                            ? taskT("creator.batch.failed")
+                            : taskT("creator.batch.pending");
+                    const itemLocked =
+                      busy || submitting || item.status === "accepted";
+
+                    return (
+                      <article
+                        className={`media-queue__item media-queue__item--${item.status}`}
+                        data-output-origin={
+                          item.outputEdited ? "user" : "suggested"
+                        }
+                        key={item.id}
+                        role="listitem"
+                      >
+                        <header className="media-queue__header">
+                          <span className="media-queue__number">
+                            {String(index + 1).padStart(2, "0")}
+                          </span>
+                          <span
+                            className={`media-queue__status media-queue__status--${item.status}`}
+                          >
+                            {statusLabel}
+                          </span>
+                          <button
+                            className="icon-button media-queue__remove"
+                            type="button"
+                            aria-label={taskT("creator.batch.remove", {
+                              number: index + 1,
+                            })}
+                            disabled={itemLocked}
+                            onClick={() => removeMediaItem(item.id)}
+                          >
+                            <Icon name="x" size={16} />
+                          </button>
+                        </header>
+
+                        <div className="media-queue__fields">
+                          <div className="field field--full">
+                            <label htmlFor={mediaInputId}>
+                              {t("creator.mediaPath")}
+                            </label>
+                            <span className="field__with-icon">
+                              <Icon name="file" size={17} />
+                              <input
+                                id={mediaInputId}
+                                value={item.sourcePath}
+                                placeholder={t("creator.mediaPlaceholder")}
+                                required
+                                disabled={itemLocked}
+                                spellCheck={false}
+                                autoComplete="off"
+                                aria-invalid={item.mediaError !== null}
+                                aria-describedby={mediaHelpId}
+                                onChange={(event) => {
+                                  pathResolutionRef.current.set(
+                                    item.id,
+                                    (pathResolutionRef.current.get(item.id) ??
+                                      0) + 1,
+                                  );
+                                  updateQueueItem(item.id, (currentItem) => ({
+                                    ...currentItem,
+                                    sourcePath: event.target.value,
+                                    outputDirectory:
+                                      currentItem.outputEdited
+                                        ? currentItem.outputDirectory
+                                        : "",
+                                    mediaError: null,
+                                    submitError: null,
+                                    status: "pending",
+                                    resolving: false,
+                                  }));
+                                  setPathPickerError(null);
+                                }}
+                                onBlur={() => {
+                                  deriveOutputDirectory(item).catch(
+                                    (error: unknown) => {
+                                      console.error(
+                                        "Failed to derive the local output directory",
+                                        error,
+                                      );
+                                    },
+                                  );
+                                }}
+                              />
+                            </span>
+                            <small
+                              id={mediaHelpId}
+                              className={
+                                item.mediaError
+                                  ? "field__error"
+                                  : undefined
+                              }
+                            >
+                              {item.mediaError ??
+                                (item.resolving
+                                  ? t("common.checking")
+                                  : t("creator.mediaHint"))}
+                            </small>
+                          </div>
+
+                          <div className="field field--full">
+                            <label htmlFor={outputInputId}>
+                              {t("creator.outputDirectory")}
+                            </label>
+                            <span className="field__with-icon">
+                              <Icon name="folder" size={17} />
+                              <input
+                                id={outputInputId}
+                                value={item.outputDirectory}
+                                placeholder={t("creator.outputPlaceholder")}
+                                required
+                                disabled={itemLocked}
+                                spellCheck={false}
+                                autoComplete="off"
+                                aria-invalid={
+                                  !outputPathDistinct || outputCollision
+                                }
+                                aria-describedby={outputHelpId}
+                                onChange={(event) => {
+                                  pathResolutionRef.current.set(
+                                    item.id,
+                                    (pathResolutionRef.current.get(item.id) ??
+                                      0) + 1,
+                                  );
+                                  updateQueueItem(item.id, {
+                                    outputDirectory: event.target.value,
+                                    outputEdited: true,
+                                    submitError: null,
+                                    status: "pending",
+                                  });
+                                  setPathPickerError(null);
+                                }}
+                              />
+                              <button
+                                className="button button--soft field__path-picker"
+                                type="button"
+                                disabled={
+                                  itemLocked || activePathPicker !== null
+                                }
+                                onClick={() => {
+                                  chooseOutputDirectory(item.id).catch(
+                                    (error: unknown) => {
+                                      console.error(
+                                        "Failed to open the native output folder picker",
+                                        error,
+                                      );
+                                    },
+                                  );
+                                }}
+                              >
+                                <Icon name="folder" size={16} />
+                                {activePathPicker === `output:${item.id}`
+                                  ? t("common.checking")
+                                  : taskT("creator.outputBrowse")}
+                              </button>
+                            </span>
+                            <small
+                              id={outputHelpId}
+                              className={
+                                !outputPathDistinct || outputCollision
+                                  ? "field__error"
+                                  : undefined
+                              }
+                            >
+                              {!outputPathDistinct
+                                ? t("creator.outputMatchesSource")
+                                : outputCollision
+                                  ? taskT(
+                                      "creator.batch.outputCollision",
+                                    )
+                                  : t("creator.outputHint")}
+                            </small>
+                          </div>
+                        </div>
+
+                        {item.submitError ? (
+                          <div
+                            className="media-queue__error"
+                            role="alert"
+                          >
+                            <Icon name="alert" size={16} />
+                            <span>{item.submitError}</span>
+                          </div>
+                        ) : null}
+                      </article>
+                    );
+                  })}
+                </div>
+
+                {pathPickerError ? (
+                  <small className="field__error" role="alert">
+                    {pathPickerError}
+                  </small>
+                ) : null}
+              </section>
             </div>
           </div>
 
@@ -943,45 +1658,22 @@ export function TaskCreator({
                   value={sourceLanguageChoice}
                   aria-describedby="source-language-help"
                   aria-invalid={!sourceLanguageValid}
-                  onChange={(event) =>
-                    setSourceLanguageChoice(event.target.value)
-                  }
+                  onChange={(event) => {
+                    setSourceLanguageChoice(event.target.value);
+                    setCustomSourceLanguageEnabled(false);
+                    setCustomSourceLanguage("");
+                  }}
                 >
                   {LANGUAGE_PRESETS.map(([tag, labelKey]) => (
                     <option value={tag} key={tag}>
-                      {taskT(labelKey)} ({tag})
+                      {taskT(labelKey)}
                     </option>
                   ))}
-                  <option value={CUSTOM_LANGUAGE_VALUE}>
-                    {taskT("creator.language.customOption")}
-                  </option>
                 </select>
                 <small id="source-language-help">
                   {taskT("creator.sourceLanguage.help")}
                 </small>
               </label>
-              {sourceLanguageChoice === CUSTOM_LANGUAGE_VALUE ? (
-                <label className="field">
-                  <span>{taskT("creator.sourceLanguage.customLabel")}</span>
-                  <input
-                    value={customSourceLanguage}
-                    placeholder={taskT(
-                      "creator.sourceLanguage.customPlaceholder",
-                    )}
-                    spellCheck={false}
-                    autoComplete="off"
-                    aria-invalid={!sourceLanguageValid}
-                    onChange={(event) =>
-                      setCustomSourceLanguage(event.target.value)
-                    }
-                  />
-                  {!sourceLanguageValid ? (
-                    <small className="field__error">
-                      {taskT("creator.validation.sourceLanguageTag")}
-                    </small>
-                  ) : null}
-                </label>
-              ) : null}
             </div>
 
             <section
@@ -1076,34 +1768,88 @@ export function TaskCreator({
               {businessEnabled && translationEnabled ? (
                 <label className="field field--full translation-target-field">
                   <span>{taskT("creator.business.translationTargets")}</span>
-                  <input
-                    value={translationTargetsText}
-                    placeholder={taskT(
-                      "creator.business.translationTargetsPlaceholder",
-                    )}
-                    spellCheck={false}
-                    autoComplete="off"
-                    aria-invalid={!translationTargetsValid}
-                    onChange={(event) =>
-                      setTranslationTargetsText(event.target.value)
+                  <select
+                    value=""
+                    aria-invalid={
+                      translationTargetsHaveInputIssue ? "true" : undefined
                     }
-                  />
+                    onChange={(event) => {
+                      const target = event.target.value;
+                      if (
+                        target.length > 0 &&
+                        !normalizedTranslationTargets.includes(
+                          target.toLocaleLowerCase("en-US"),
+                        )
+                      ) {
+                        setSelectedTranslationTargets((current) => [
+                          ...current,
+                          target,
+                        ]);
+                      }
+                    }}
+                  >
+                    <option value="">
+                      {taskT("creator.business.chooseTranslationTarget")}
+                    </option>
+                    {TRANSLATION_TARGET_PRESETS.map(([tag, labelKey]) => (
+                      <option
+                        value={tag}
+                        key={tag}
+                        disabled={normalizedTranslationTargets.includes(
+                          tag.toLocaleLowerCase("en-US"),
+                        )}
+                      >
+                        {taskT(labelKey)}
+                      </option>
+                    ))}
+                  </select>
                   <small>
                     {taskT("creator.business.translationTargetsHelp")}
                   </small>
-                  {translationTargets.length > 0 ? (
+                  {visibleTranslationTargets.length > 0 ? (
                     <span
                       className="language-chips"
                       aria-label={taskT(
                         "creator.business.parsedTargetsAria",
                       )}
                     >
-                      {translationTargets.map((target, index) => (
-                        <span key={`${target}-${index}`}>{target}</span>
+                      {visibleTranslationTargets.map((target) => (
+                        <span key={target.toLocaleLowerCase("en-US")}>
+                          {languageLabel(target)}
+                          <button
+                            type="button"
+                            aria-label={taskT(
+                              "creator.business.removeTranslationTarget",
+                              { language: languageLabel(target) },
+                            )}
+                            onClick={() => {
+                              const normalizedTarget =
+                                target.toLocaleLowerCase("en-US");
+                              setSelectedTranslationTargets((current) =>
+                                current.filter(
+                                  (item) =>
+                                    item.toLocaleLowerCase("en-US") !==
+                                    normalizedTarget,
+                                ),
+                              );
+                              setCustomTranslationTargetsText((current) =>
+                                parseLanguageTags(current)
+                                  .filter(
+                                    (item) =>
+                                      item.toLocaleLowerCase("en-US") !==
+                                      normalizedTarget,
+                                  )
+                                  .join(", "),
+                              );
+                            }}
+                          >
+                            <Icon name="x" size={13} />
+                          </button>
+                        </span>
                       ))}
                     </span>
                   ) : null}
-                  {!translationTargetsValid ? (
+                  {translationTargetsHaveInputIssue ? (
                     <small className="field__error">
                       {taskT("creator.validation.translationTargets")}
                     </small>
@@ -1119,39 +1865,19 @@ export function TaskCreator({
                       <select
                         value={outputLocaleChoice}
                         aria-invalid={!outputLocaleValid}
-                        onChange={(event) =>
-                          setOutputLocaleChoice(event.target.value)
-                        }
-                      >
-                        {OUTPUT_LOCALE_PRESETS.map(([tag, labelKey]) => (
-                          <option value={tag} key={tag}>
-                            {taskT(labelKey)} ({tag})
-                          </option>
-                        ))}
-                        <option value={CUSTOM_LANGUAGE_VALUE}>
-                          {taskT("creator.language.customOption")}
-                        </option>
-                      </select>
-                    </label>
-                    {outputLocaleChoice === CUSTOM_LANGUAGE_VALUE ? (
-                      <label className="field">
-                        <span>
-                          {taskT("creator.business.customOutputLocale")}
-                        </span>
-                        <input
-                          value={customOutputLocale}
-                          placeholder={taskT(
-                            "creator.business.customOutputPlaceholder",
-                          )}
-                          spellCheck={false}
-                          autoComplete="off"
-                          aria-invalid={!outputLocaleValid}
-                          onChange={(event) =>
-                            setCustomOutputLocale(event.target.value)
-                          }
-                        />
+                        onChange={(event) => {
+                          setOutputLocaleChoice(event.target.value);
+                          setCustomOutputLocaleEnabled(false);
+                          setCustomOutputLocale("");
+                        }}
+                        >
+                          {OUTPUT_LOCALE_PRESETS.map(([tag, labelKey]) => (
+                            <option value={tag} key={tag}>
+                              {taskT(labelKey)}
+                            </option>
+                          ))}
+                        </select>
                       </label>
-                    ) : null}
                   </div>
 
                   <details className="runtime-details">
@@ -1187,6 +1913,125 @@ export function TaskCreator({
                   </details>
                 </>
               ) : null}
+
+              <details className="runtime-details">
+                <summary>{taskT("creator.language.advanced")}</summary>
+                <div className="runtime-details__grid">
+                  <label className="business-option">
+                    <input
+                      type="checkbox"
+                      checked={customSourceLanguageEnabled}
+                      onChange={(event) =>
+                        setCustomSourceLanguageEnabled(event.target.checked)
+                      }
+                    />
+                    <span>
+                      <strong>
+                        {taskT("creator.sourceLanguage.customEnabled")}
+                      </strong>
+                      <small>
+                        {taskT("creator.sourceLanguage.customEnabledHelp")}
+                      </small>
+                    </span>
+                    <Icon name="check" size={16} />
+                  </label>
+                  <label className="field">
+                    <span>{taskT("creator.sourceLanguage.customLabel")}</span>
+                    <input
+                      value={customSourceLanguage}
+                      placeholder={taskT(
+                        "creator.sourceLanguage.customPlaceholder",
+                      )}
+                      disabled={!customSourceLanguageEnabled}
+                      spellCheck={false}
+                      autoComplete="off"
+                      aria-invalid={
+                        customSourceLanguageEnabled && !sourceLanguageValid
+                      }
+                      onChange={(event) =>
+                        setCustomSourceLanguage(event.target.value)
+                      }
+                    />
+                    {customSourceLanguageEnabled && !sourceLanguageValid ? (
+                      <small className="field__error">
+                        {taskT("creator.validation.sourceLanguageTag")}
+                      </small>
+                    ) : null}
+                  </label>
+
+                  {businessEnabled && translationEnabled ? (
+                    <label className="field">
+                      <span>
+                        {taskT("creator.business.customTranslationTargets")}
+                      </span>
+                      <input
+                        value={customTranslationTargetsText}
+                        placeholder={taskT(
+                          "creator.business.customTranslationTargetsPlaceholder",
+                        )}
+                        spellCheck={false}
+                        autoComplete="off"
+                        aria-invalid={
+                          translationTargetsHaveInputIssue
+                            ? "true"
+                            : undefined
+                        }
+                        onChange={(event) =>
+                          setCustomTranslationTargetsText(event.target.value)
+                        }
+                      />
+                      <small>
+                        {taskT(
+                          "creator.business.customTranslationTargetsHelp",
+                        )}
+                      </small>
+                    </label>
+                  ) : null}
+
+                  {businessEnabled ? (
+                    <>
+                      <label className="business-option">
+                        <input
+                          type="checkbox"
+                          checked={customOutputLocaleEnabled}
+                          onChange={(event) =>
+                            setCustomOutputLocaleEnabled(event.target.checked)
+                          }
+                        />
+                        <span>
+                          <strong>
+                            {taskT("creator.business.customOutputEnabled")}
+                          </strong>
+                          <small>
+                            {taskT("creator.business.customOutputEnabledHelp")}
+                          </small>
+                        </span>
+                        <Icon name="check" size={16} />
+                      </label>
+                      <label className="field">
+                        <span>
+                          {taskT("creator.business.customOutputLocale")}
+                        </span>
+                        <input
+                          value={customOutputLocale}
+                          placeholder={taskT(
+                            "creator.business.customOutputPlaceholder",
+                          )}
+                          disabled={!customOutputLocaleEnabled}
+                          spellCheck={false}
+                          autoComplete="off"
+                          aria-invalid={
+                            customOutputLocaleEnabled && !outputLocaleValid
+                          }
+                          onChange={(event) =>
+                            setCustomOutputLocale(event.target.value)
+                          }
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                </div>
+              </details>
 
               <div className="immutable-transcript-callout" role="note">
                 <Icon name="shield" size={19} />
@@ -1244,16 +2089,17 @@ export function TaskCreator({
           </div>
 
           <div className="task-dialog__actions">
-            <button className="button button--soft" type="button" disabled={busy} onClick={onClose}>
+            <button className="button button--soft" type="button" disabled={busy || submitting} onClick={onClose}>
               {t("common.cancel")}
             </button>
-            <button className="button button--primary" type="submit" disabled={!canSubmit || busy}>
+            <button className="button button--primary" type="submit" disabled={!canSubmit || busy || submitting}>
               <Icon name="sparkles" size={18} />
-              {busy
+              {busy || submitting
                 ? taskT("creator.actions.creating")
                 : taskT("creator.actions.create")}
             </button>
           </div>
+          </fieldset>
         </form>
       </div>
     </div>

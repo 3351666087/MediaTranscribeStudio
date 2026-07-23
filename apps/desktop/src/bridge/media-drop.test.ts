@@ -59,6 +59,28 @@ describe("native media-drop path policy", () => {
     });
   });
 
+  it("accepts known uppercase aliases from the shared capability registry", async () => {
+    await expect(
+      resolveMediaSelection(
+        "D:\\Media\\Legacy Capture.RMVB",
+        windowsPathOperations,
+      ),
+    ).resolves.toEqual({
+      sourcePath: "D:\\Media\\Legacy Capture.RMVB",
+      outputDirectory:
+        "D:\\Media\\Legacy-Capture-MediaTranscribeStudio",
+    });
+
+    await expect(
+      resolveMediaSelection(
+        "D:\\Media\\Camera Stream.H265",
+        windowsPathOperations,
+      ),
+    ).resolves.toMatchObject({
+      sourcePath: "D:\\Media\\Camera Stream.H265",
+    });
+  });
+
   it("preserves international letters while removing unsafe filename syntax", () => {
     expect(createSafeMediaStem(" 产品 评审：v2 / final ")).toBe(
       "产品-评审-v2-final",
@@ -67,9 +89,13 @@ describe("native media-drop path policy", () => {
     expect(createSafeMediaStem("***")).toBe("media");
   });
 
-  it("rejects unsupported, relative, network, traversal, and control paths", async () => {
+  it("rejects unknown, extensionless, relative, network, traversal, and control paths", async () => {
     await expectCode(
       resolveMediaSelection("D:\\Media\\meeting.exe", windowsPathOperations),
+      "unsupportedExtension",
+    );
+    await expectCode(
+      resolveMediaSelection("D:\\Media\\meeting", windowsPathOperations),
       "unsupportedExtension",
     );
     await expectCode(
@@ -276,6 +302,44 @@ describe("native media-drop path policy", () => {
         message: "Unsupported media extension.",
       },
     ]);
+  });
+
+  it("keeps known formats when unknown and extensionless siblings fail", async () => {
+    const adapter = new ControlledMediaDropAdapter(async (path) =>
+      await resolveMediaSelection(path, windowsPathOperations),
+    );
+    const paths = [
+      "D:\\Media\\voice.M4A",
+      "D:\\Media\\legacy.rmvb",
+      "D:\\Media\\unknown.xyz",
+      "D:\\Media\\extensionless",
+      "D:\\Media\\camera.M2TS",
+    ];
+
+    const result = await resolveMediaDropBatch(adapter, paths);
+
+    expect(result.selections.map(({ sourcePath }) => sourcePath)).toEqual([
+      paths[0],
+      paths[1],
+      paths[4],
+    ]);
+    expect(result.failures).toEqual([
+      expect.objectContaining({
+        index: 2,
+        path: paths[2],
+        code: "unsupportedExtension",
+      }),
+      expect.objectContaining({
+        index: 3,
+        path: paths[3],
+        code: "unsupportedExtension",
+      }),
+    ]);
+    expect(
+      result.failures.every(({ message }) =>
+        /probing is required/iu.test(message),
+      ),
+    ).toBe(true);
   });
 
   it("converts unexpected resolver rejection into an item failure", async () => {

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Minimal offline desktop capability set.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:default"]
 }

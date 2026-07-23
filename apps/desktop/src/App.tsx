@@ -1,8 +1,10 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   createMediaDropAdapter,
+  MediaDropError,
   type MediaDropAdapter,
-  type MediaSelection,
+  type MediaDropBatchResult,
+  type MediaDropFailure,
 } from "./bridge/media-drop";
 import { ArtifactBrowser } from "./components/ArtifactBrowser";
 import { DiarizationQualityPanel } from "./components/DiarizationQualityPanel";
@@ -23,7 +25,10 @@ import { ReviewQueue } from "./components/ReviewQueue";
 import { SceneBackdrop } from "./components/SceneBackdrop";
 import { SpeakerSetupPanel } from "./components/SpeakerSetupPanel";
 import { StatusBadge } from "./components/StatusBadge";
-import { TaskCreator } from "./components/TaskCreator";
+import {
+  TaskCreator,
+  type InitialMediaBatch,
+} from "./components/TaskCreator";
 import { TaskHero } from "./components/TaskHero";
 import { Toast } from "./components/Toast";
 import { TopBar } from "./components/TopBar";
@@ -74,31 +79,53 @@ function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
     useState<NavigationDirection>("neutral");
   const [roomDirection, setRoomDirection] =
     useState<NavigationDirection>("neutral");
-  const [initialMediaSelection, setInitialMediaSelection] = useState<
-    (MediaSelection & { sequence: number }) | null
-  >(null);
+  const [initialMediaBatch, setInitialMediaBatch] =
+    useState<InitialMediaBatch | null>(null);
   const mediaSelectionSequence = useRef(0);
   const mainRef = useRef<HTMLElement>(null);
   const closeTaskCreator = useCallback(() => {
     setTaskCreatorOpen(false);
-    setInitialMediaSelection(null);
+    setInitialMediaBatch(null);
   }, []);
   const openTaskCreator = useCallback(() => {
-    setInitialMediaSelection(null);
+    setInitialMediaBatch(null);
     setTaskCreatorOpen(true);
   }, []);
   const resolveMediaPath = useCallback(
     async (path: string) => await mediaDropAdapter.resolve(path),
     [mediaDropAdapter],
   );
-  const handleMediaSelection = useCallback((selection: MediaSelection) => {
-    mediaSelectionSequence.current += 1;
-    setInitialMediaSelection({
-      ...selection,
-      sequence: mediaSelectionSequence.current,
-    });
-    setTaskCreatorOpen(true);
-  }, []);
+  const notifyMediaDropFailure = useCallback(
+    (failure: MediaDropFailure) => {
+      const detail =
+        failure.code === "duplicatePath" ||
+        failure.code === "resolutionFailed"
+          ? failure.message
+          : t(
+              mediaDropErrorMessageKey(
+                new MediaDropError(failure.code, failure.message),
+              ),
+            );
+      notify("error", t("drop.errorTitle"), detail);
+    },
+    [notify, t],
+  );
+  const handleMediaSelection = useCallback(
+    (result: MediaDropBatchResult) => {
+      result.failures.forEach(notifyMediaDropFailure);
+      if (result.selections.length === 0) {
+        return;
+      }
+
+      mediaSelectionSequence.current += 1;
+      setInitialMediaBatch({
+        sequence: mediaSelectionSequence.current,
+        selections: result.selections,
+      });
+      setTaskCreatorOpen(true);
+    },
+    [notifyMediaDropFailure],
+  );
   const handleMediaDropError = useCallback(
     (error: unknown) => {
       notify(
@@ -448,7 +475,7 @@ function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
 
       <TaskCreator
         open={taskCreatorOpen}
-        initialMediaSelection={initialMediaSelection}
+        initialMediaBatch={initialMediaBatch}
         resolveMediaPath={resolveMediaPath}
         speakers={snapshot.speakers}
         initialSpeakerPolicy={snapshot.job.speakerPolicy}

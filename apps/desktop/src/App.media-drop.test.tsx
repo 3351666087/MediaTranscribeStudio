@@ -12,25 +12,48 @@ import {
   MediaDropError,
 } from "./bridge/media-drop";
 
+const OUTPUT_BY_SOURCE: Readonly<Record<string, string>> = {
+  "D:\\Media\\one.mov": "D:\\Media\\one-MediaTranscribeStudio",
+  "D:\\Media\\two.wav": "D:\\Media\\two-MediaTranscribeStudio",
+  "D:\\Media\\three.mp4": "D:\\Media\\three-MediaTranscribeStudio",
+};
+
+function createAdapter(): ControlledMediaDropAdapter {
+  return new ControlledMediaDropAdapter(async (path) => {
+    await Promise.resolve();
+    if (path.endsWith(".exe")) {
+      throw new MediaDropError(
+        "unsupportedExtension",
+        "Unsupported media extension.",
+      );
+    }
+    return {
+      sourcePath: path,
+      outputDirectory:
+        OUTPUT_BY_SOURCE[path] ?? "D:\\Media\\safe-MediaTranscribeStudio",
+    };
+  });
+}
+
 async function settleNativeListener(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
   });
 }
 
+async function openDropDialog(
+  adapter: ControlledMediaDropAdapter,
+  paths: readonly string[],
+): Promise<HTMLElement> {
+  act(() => adapter.emit({ type: "drop", paths }));
+  return await screen.findByRole("dialog", {
+    name: "Create transcription job",
+  });
+}
+
 describe("Tauri desktop media-drop integration", () => {
-  it("shows native drag state and opens an editable job with generated paths", async () => {
-    const user = userEvent.setup();
-    const adapter = new ControlledMediaDropAdapter(async (path) => {
-      await Promise.resolve();
-      return {
-        sourcePath: path,
-        outputDirectory:
-          path === "D:\\Media\\second.wav"
-            ? "D:\\Media\\second-MediaTranscribeStudio"
-            : "D:\\Media\\meeting-MediaTranscribeStudio",
-      };
-    });
+  it("keeps two dropped media files as two editable queue rows", async () => {
+    const adapter = createAdapter();
 
     render(<App mediaDropAdapter={adapter} />);
     await screen.findByRole("heading", {
@@ -39,66 +62,39 @@ describe("Tauri desktop media-drop integration", () => {
     });
     await settleNativeListener();
 
-    act(() => adapter.emit({ type: "enter", paths: ["D:\\Media\\meeting.mov"] }));
-    expect(
-      screen.getByText("Drop one local media file").closest(
-        ".media-drop-overlay",
-      ),
-    ).toHaveTextContent(
-      "Drop one local media file",
-    );
-
-    act(() => adapter.emit({ type: "leave" }));
+    const dialog = await openDropDialog(adapter, [
+      "D:\\Media\\one.mov",
+      "D:\\Media\\two.wav",
+    ]);
     await waitFor(() => {
       expect(
-        screen.queryByText("Drop one local media file"),
-      ).not.toBeInTheDocument();
+        within(dialog).getAllByPlaceholderText(
+          "Enter the absolute path to a media file",
+        ),
+      ).toHaveLength(2);
     });
-
-    act(() => adapter.emit({ type: "drop", paths: ["D:\\Media\\meeting.mov"] }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Create transcription job",
-    });
-    const sourceInput = within(dialog).getByPlaceholderText(
+    const sourceInputs = within(dialog).getAllByPlaceholderText(
       "Enter the absolute path to a media file",
     );
-    const outputInput = within(dialog).getByPlaceholderText(
+    const outputInputs = within(dialog).getAllByPlaceholderText(
       "Enter the absolute path to an output directory",
     );
-    await waitFor(() => {
-      expect(sourceInput).toHaveValue("D:\\Media\\meeting.mov");
-      expect(outputInput).toHaveValue(
-        "D:\\Media\\meeting-MediaTranscribeStudio",
-      );
-    });
 
-    await user.clear(outputInput);
-    await user.type(outputInput, "D:\\Media\\custom-output");
-    expect(outputInput).toHaveValue("D:\\Media\\custom-output");
-
-    act(() => adapter.emit({ type: "drop", paths: ["D:\\Media\\second.wav"] }));
-    await waitFor(() => {
-      expect(sourceInput).toHaveValue("D:\\Media\\second.wav");
-      expect(outputInput).toHaveValue(
-        "D:\\Media\\second-MediaTranscribeStudio",
-      );
-    });
+    expect(sourceInputs).toHaveLength(2);
+    expect(outputInputs).toHaveLength(2);
+    expect(sourceInputs[0]).toHaveValue("D:\\Media\\one.mov");
+    expect(sourceInputs[1]).toHaveValue("D:\\Media\\two.wav");
+    expect(outputInputs[0]).toHaveValue(
+      "D:\\Media\\one-MediaTranscribeStudio",
+    );
+    expect(outputInputs[1]).toHaveValue(
+      "D:\\Media\\two-MediaTranscribeStudio",
+    );
   });
 
-  it("fails closed for multiple or unsupported native drops", async () => {
-    const adapter = new ControlledMediaDropAdapter(async (path) => {
-      await Promise.resolve();
-      if (path.endsWith(".exe")) {
-        throw new MediaDropError(
-          "unsupportedExtension",
-          "Unsupported media extension.",
-        );
-      }
-      return {
-        sourcePath: path,
-        outputDirectory: "D:\\Media\\safe-MediaTranscribeStudio",
-      };
-    });
+  it("appends later drops without replacing existing rows or user output", async () => {
+    const user = userEvent.setup();
+    const adapter = createAdapter();
 
     render(<App mediaDropAdapter={adapter} />);
     await screen.findByRole("heading", {
@@ -106,31 +102,91 @@ describe("Tauri desktop media-drop integration", () => {
       name: "Return every sentence to the right speaker.",
     });
     await settleNativeListener();
+
+    const dialog = await openDropDialog(adapter, ["D:\\Media\\one.mov"]);
+    await waitFor(() => {
+      expect(
+        within(dialog).getByPlaceholderText(
+          "Enter the absolute path to an output directory",
+        ),
+      ).toHaveValue("D:\\Media\\one-MediaTranscribeStudio");
+    });
+    const firstOutput = within(dialog).getByPlaceholderText(
+      "Enter the absolute path to an output directory",
+    );
+    await user.clear(firstOutput);
+    await user.type(firstOutput, "D:\\Projects\\Final");
 
     act(() =>
       adapter.emit({
         type: "drop",
-        paths: ["D:\\Media\\one.mov", "D:\\Media\\two.mov"],
+        paths: ["D:\\Media\\two.wav", "D:\\Media\\three.mp4"],
       }),
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
+
+    await waitFor(() => {
+      expect(
+        within(dialog).getAllByPlaceholderText(
+          "Enter the absolute path to a media file",
+        ),
+      ).toHaveLength(3);
+    });
+    const sourceInputs = within(dialog).getAllByPlaceholderText(
+      "Enter the absolute path to a media file",
+    );
+    const outputInputs = within(dialog).getAllByPlaceholderText(
+      "Enter the absolute path to an output directory",
+    );
+
+    expect(
+      sourceInputs.map((input) => (input as HTMLInputElement).value),
+    ).toEqual([
+      "D:\\Media\\one.mov",
+      "D:\\Media\\two.wav",
+      "D:\\Media\\three.mp4",
+    ]);
+    expect(outputInputs[0]).toHaveValue("D:\\Projects\\Final");
+    expect(outputInputs[1]).toHaveValue(
+      "D:\\Media\\two-MediaTranscribeStudio",
+    );
+    expect(outputInputs[2]).toHaveValue(
+      "D:\\Media\\three-MediaTranscribeStudio",
+    );
+  });
+
+  it("retains supported files when a sibling path fails and reports the failure", async () => {
+    const adapter = createAdapter();
+
+    render(<App mediaDropAdapter={adapter} />);
+    await screen.findByRole("heading", {
+      level: 1,
+      name: "Return every sentence to the right speaker.",
+    });
+    await settleNativeListener();
+
+    const dialog = await openDropDialog(adapter, [
+      "D:\\Media\\one.mov",
+      "D:\\Media\\tool.exe",
+      "D:\\Media\\two.wav",
+    ]);
+
+    await waitFor(() => {
+      expect(
+        within(dialog).getAllByPlaceholderText(
+          "Enter the absolute path to a media file",
+        ),
+      ).toHaveLength(2);
+    });
+    const sourceInputs = within(dialog).getAllByPlaceholderText(
+      "Enter the absolute path to a media file",
+    );
+    expect(sourceInputs[0]).toHaveValue("D:\\Media\\one.mov");
+    expect(sourceInputs[1]).toHaveValue("D:\\Media\\two.wav");
+    expect(screen.getByRole("alert")).toHaveTextContent(
       "Media drop rejected",
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Drop exactly one local media file.",
+      "That file type is not supported.",
     );
-    expect(
-      screen.queryByRole("dialog", { name: "Create transcription job" }),
-    ).not.toBeInTheDocument();
-
-    act(() => adapter.emit({ type: "drop", paths: ["D:\\Media\\tool.exe"] }));
-    await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent(
-        "That file type is not supported.",
-      );
-    });
-    expect(
-      screen.queryByRole("dialog", { name: "Create transcription job" }),
-    ).not.toBeInTheDocument();
   });
 });

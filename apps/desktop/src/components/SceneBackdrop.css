@@ -27,42 +27,39 @@
 }
 
 .scene-backdrop__theme {
-  filter: saturate(1.08) contrast(1.04);
+  filter: saturate(1.12) contrast(1.06);
   opacity: 0;
-  transform: scale(1.015);
-  transition:
-    opacity 280ms var(--ease-out),
-    transform 280ms var(--ease-in-out);
-  will-change: opacity, transform;
+  transform: scale(1.008);
+  transition: opacity 280ms var(--ease-in-out);
+  will-change: opacity;
 }
 
 :root[data-theme="light"] .scene-backdrop__theme--light,
 :root[data-theme="dark"] .scene-backdrop__theme--dark {
   opacity: 1;
-  transform: scale(1);
 }
 
 :root[data-theme="dark"] .scene-backdrop__theme--dark {
-  filter: saturate(1.06) contrast(1.08) brightness(0.82);
+  filter: saturate(1.1) contrast(1.1) brightness(0.9);
 }
 
 .scene-backdrop__illustration {
-  opacity: 0.32;
+  opacity: 0.14;
   mix-blend-mode: soft-light;
-  transform: scale(1.045) translate3d(0, -0.8%, 0);
+  transform: scale(1.025) translate3d(0, -0.4%, 0);
   filter: saturate(1.2) contrast(1.08);
   -webkit-mask-image:
     linear-gradient(115deg, transparent 0 3%, black 19% 86%, transparent 100%);
   mask-image:
     linear-gradient(115deg, transparent 0 3%, black 19% 86%, transparent 100%);
-  animation: scene-backdrop-depth-drift 18s var(--ease-in-out) infinite alternate;
-  will-change: transform, opacity;
+  transition: opacity 220ms var(--ease-out);
+  will-change: opacity;
 }
 
 :root[data-theme="dark"] .scene-backdrop__illustration {
-  opacity: 0.2;
+  opacity: 0.1;
   mix-blend-mode: screen;
-  filter: saturate(0.92) contrast(1.08) brightness(0.68);
+  filter: saturate(0.94) contrast(1.08) brightness(0.76);
 }
 
 .scene-backdrop__aurora {
@@ -82,19 +79,24 @@
       color-mix(in srgb, var(--mint-200) 24%, transparent),
       transparent 36rem
   );
-  opacity: 0.74;
+  opacity: 0.34;
   transform: translateZ(0);
-  animation: scene-backdrop-aurora-drift 22s var(--ease-in-out) infinite alternate;
-  will-change: transform, opacity;
+  transition: opacity 220ms var(--ease-out);
+  will-change: opacity;
+}
+
+:root[data-theme="dark"] .scene-backdrop__aurora {
+  opacity: 0.26;
 }
 
 .scene-backdrop__veil {
   background: var(--background-overlay);
-  opacity: 0.72;
+  opacity: 0.36;
+  transition: opacity 220ms var(--ease-out);
 }
 
 :root[data-theme="dark"] .scene-backdrop__veil {
-  opacity: 0.66;
+  opacity: 0.28;
 }
 
 body::before,
@@ -102,38 +104,14 @@ body::after {
   opacity: 0 !important;
 }
 
-@keyframes scene-backdrop-depth-drift {
-  from {
-    transform: scale(1.045) translate3d(-0.35%, -0.8%, 0);
-  }
-
-  to {
-    transform: scale(1.065) translate3d(0.55%, 0.3%, 0);
-  }
-}
-
-@keyframes scene-backdrop-aurora-drift {
-  from {
-    opacity: 0.66;
-    transform: translate3d(-1.2%, -0.8%, 0) scale(1);
-  }
-
-  to {
-    opacity: 0.8;
-    transform: translate3d(1.1%, 0.9%, 0) scale(1.04);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .scene-backdrop__theme {
     transform: none;
-    transition:
-      opacity 180ms var(--ease-out);
+    transition: opacity 180ms var(--ease-out);
   }
 
   .scene-backdrop__illustration,
   .scene-backdrop__aurora {
-    animation: none;
     transform: none;
   }
 }

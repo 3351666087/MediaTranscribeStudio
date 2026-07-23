@@ -6595,6 +6595,7 @@ fn default_snapshot() -> StudioSnapshot {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(StudioStore(Mutex::new(AppState {
             snapshot: default_snapshot(),
             output_root: None,

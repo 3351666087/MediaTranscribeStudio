@@ -8,25 +8,16 @@ import {
 } from "@tauri-apps/api/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauriRuntime } from "./desktop-backend";
+import {
+  KNOWN_MEDIA_EXTENSIONS,
+  inspectMediaExtension,
+} from "./media-capabilities";
 
-export const SUPPORTED_MEDIA_EXTENSIONS = [
-  "mov",
-  "mp4",
-  "m4v",
-  "mkv",
-  "webm",
-  "wav",
-  "mp3",
-  "m4a",
-  "flac",
-  "aac",
-  "ogg",
-] as const;
+export { SUPPORTED_MEDIA_EXTENSIONS } from "./media-capabilities";
 
 export const MAX_MEDIA_DROP_PATHS = 32;
 export const DEFAULT_MEDIA_DROP_CONCURRENCY = 4;
 
-const SUPPORTED_EXTENSION_SET = new Set<string>(SUPPORTED_MEDIA_EXTENSIONS);
 const MAX_LOCAL_PATH_LENGTH = 4_096;
 const OUTPUT_SUFFIX = "-MediaTranscribeStudio";
 
@@ -198,15 +189,20 @@ export async function resolveMediaSelection(
     fail("absolutePath", "The normalized source is not a safe absolute local path.");
   }
 
-  const extension = (await pathOperations.extname(sourcePath))
-    .replace(/^\./u, "")
-    .toLocaleLowerCase("en-US");
-  if (!SUPPORTED_EXTENSION_SET.has(extension)) {
+  const extensionInspection = inspectMediaExtension(
+    await pathOperations.extname(sourcePath),
+  );
+  if (extensionInspection.status === "probe-required") {
+    const reason =
+      extensionInspection.reason === "missing-extension"
+        ? "has no filename extension"
+        : `uses the unknown extension ".${extensionInspection.extension}"`;
     fail(
       "unsupportedExtension",
-      `Supported media extensions are: ${SUPPORTED_MEDIA_EXTENSIONS.join(", ")}.`,
+      `This file ${reason}. Content probing is required before it can be accepted safely. Known media extensions include: ${KNOWN_MEDIA_EXTENSIONS.join(", ")}.`,
     );
   }
+  const extension = extensionInspection.extension;
 
   const sourceParent = await pathOperations.normalize(
     await pathOperations.dirname(sourcePath),

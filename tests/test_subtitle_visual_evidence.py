@@ -20,6 +20,7 @@ from backend.subtitle_visual_evidence import (
     EvidenceProcessResult,
     FontEvidenceObservation,
     FrameObservation,
+    PillowAnalysisPolicy,
     PillowFrameAnalyzer,
     SUBTITLE_RENDER_EVIDENCE_SCHEMA_VERSION,
     SubtitleVisualEvidenceCollector,
@@ -125,6 +126,85 @@ def _request(
     }
 
 
+def _ass_overlay(tmp_path: Path, *, text: str = "Hello world") -> Path:
+    overlay = tmp_path / "private-canonical-overlay.ass"
+    overlay.write_text(
+        "\n".join(
+            [
+                "[Script Info]",
+                "ScriptType: v4.00+",
+                "PlayResX: 1920",
+                "PlayResY: 1080",
+                "",
+                "[V4+ Styles]",
+                (
+                    "Format: Name, Fontname, Fontsize, PrimaryColour, "
+                    "SecondaryColour, OutlineColour, BackColour, Bold, "
+                    "Italic, Underline, StrikeOut, ScaleX, ScaleY, "
+                    "Spacing, Angle, BorderStyle, Outline, Shadow, "
+                    "Alignment, MarginL, MarginR, MarginV, Encoding"
+                ),
+                (
+                    "Style: Default,Noto Sans,62,&H00FFFFFF,&H000000FF,"
+                    "&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,"
+                    "2,80,80,72,1"
+                ),
+                "",
+                "[Events]",
+                (
+                    "Format: Layer, Start, End, Style, Name, MarginL, "
+                    "MarginR, MarginV, Effect, Text"
+                ),
+                (
+                    "Dialogue: 0,0:00:01.00,0:00:04.00,Default,"
+                    f"speaker-a,0,0,0,,{text}"
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return overlay
+
+
+def _delivery_receipt(
+    files: dict[str, Path],
+    *,
+    mode: str,
+    receipt_marker: str = "fixture-a",
+) -> dict[str, Any]:
+    source_payload = files["source"].read_bytes()
+    rendered_payload = files["rendered"].read_bytes()
+    source_evidence = {
+        "path": str(files["source"].resolve()),
+        "sizeBytes": len(source_payload),
+        "modifiedTimeNs": files["source"].stat().st_mtime_ns,
+        "sha256": hashlib.sha256(source_payload).hexdigest(),
+    }
+    return {
+        "schemaVersion": "1.0.0",
+        "status": "delivered",
+        "mode": mode,
+        "receiptMarker": receipt_marker,
+        "sourceIntegrity": {
+            "unchanged": True,
+            "before": source_evidence,
+            "after": dict(source_evidence),
+        },
+        "outputEvidence": {
+            "path": str(files["rendered"].resolve()),
+            "sizeBytes": len(rendered_payload),
+            "modifiedTimeNs": files["rendered"].stat().st_mtime_ns,
+            "sha256": hashlib.sha256(rendered_payload).hexdigest(),
+        },
+        "qa": {
+            "passed": True,
+            "outputNonEmpty": True,
+            "subtitleStreamVerified": mode == "soft-mux",
+        },
+    }
+
+
 class FakeRunner:
     def __init__(
         self,
@@ -193,6 +273,15 @@ class FakeRunner:
         if "-frames:v" in argv:
             output = Path(argv[-1])
             input_path = Path(argv[argv.index("-i") + 1])
+            if "-vf" in argv:
+                filter_value = argv[argv.index("-vf") + 1]
+                output.write_bytes(
+                    b"PNG-OVERLAY-FIXTURE\x00"
+                    + input_path.name.encode()
+                    + b"\x00"
+                    + filter_value.encode()
+                )
+                return EvidenceProcessResult(0, b"", b"")
             timestamp = argv[argv.index("-ss") + 1]
             output.write_bytes(
                 b"PNG-FIXTURE\x00"
@@ -465,6 +554,209 @@ def test_ffmpeg_outputs_are_temporary_and_never_alias_media(
         assert "-an" in command
         assert "-sn" in command
         assert "-dn" in command
+
+
+def test_soft_mux_renders_only_representative_png_with_private_ass(
+    tmp_path: Path,
+    validator: Draft202012Validator,
+) -> None:
+    files = _files(tmp_path)
+    overlay = _ass_overlay(tmp_path)
+    overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
+    receipt = _delivery_receipt(files, mode="soft-mux")
+    runner = FakeRunner()
+
+    payload = _collector(files, runner=runner).collect(
+        _request(files),
+        canonical_ass_overlay_path=overlay,
+        canonical_ass_overlay_sha256=overlay_sha256,
+        delivery_receipt=receipt,
+    ).to_dict()
+
+    assert not list(validator.iter_errors(payload))
+    overlay_commands = [
+        command for command in runner.commands if "-vf" in command
+    ]
+    assert len(overlay_commands) == 1
+    command = overlay_commands[0]
+    assert Path(command[command.index("-i") + 1]).suffix == ".png"
+    assert command[command.index("-vf") + 1] == (
+        "setpts=PTS+2.500/TB,ass=filename=canonical-overlay.ass"
+    )
+    assert "-frames:v" in command
+    assert command[command.index("-frames:v") + 1] == "1"
+    assert str(files["rendered"].resolve()) not in command
+    assert str(overlay.resolve()) not in command
+    serialized = canonical_json(payload)
+    assert str(overlay.resolve()) not in serialized
+    assert overlay_sha256 not in serialized
+    assert payload["renderArtifact"]["renderConfigurationSha256"] != SHA_A
+    assert payload["qaRequest"]["renderArtifact"][
+        "renderConfigurationSha256"
+    ] == payload["renderArtifact"]["renderConfigurationSha256"]
+    assert verify_evidence_artifact_hash(payload)
+    assert not list(
+        tmp_path.glob(".mts-subtitle-visual-evidence-*")
+    )
+
+
+def test_soft_mux_hash_chain_binds_overlay_receipt_and_font_evidence(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    first_overlay = _ass_overlay(tmp_path, text="First")
+    first_overlay_sha256 = hashlib.sha256(
+        first_overlay.read_bytes()
+    ).hexdigest()
+    first_receipt = _delivery_receipt(
+        files,
+        mode="soft-mux",
+        receipt_marker="receipt-a",
+    )
+    first = _collector(files).collect(
+        _request(files),
+        canonical_ass_overlay_path=first_overlay,
+        canonical_ass_overlay_sha256=first_overlay_sha256,
+        delivery_receipt=first_receipt,
+    ).to_dict()
+
+    second_receipt = _delivery_receipt(
+        files,
+        mode="soft-mux",
+        receipt_marker="receipt-b",
+    )
+    second = _collector(files).collect(
+        _request(files),
+        canonical_ass_overlay_path=first_overlay,
+        canonical_ass_overlay_sha256=first_overlay_sha256,
+        delivery_receipt=second_receipt,
+    ).to_dict()
+    assert first["requestSha256"] != second["requestSha256"]
+    assert first["renderArtifact"][
+        "renderConfigurationSha256"
+    ] != second["renderArtifact"]["renderConfigurationSha256"]
+    assert first["bindings"][0][
+        "bindingArtifactSha256"
+    ] != second["bindings"][0]["bindingArtifactSha256"]
+
+    evidence_path = tmp_path / "font-evidence.json"
+    font_path = tmp_path / "font.ttf"
+    evidence_path.write_bytes(b'{"resolved":"Noto Sans"}')
+    font_path.write_bytes(b"fixture-font")
+    provider = VerifiedFontProvider(
+        evidence_path=evidence_path,
+        font_path=font_path,
+    )
+    with_font = _collector(files, font_provider=provider).collect(
+        _request(files),
+        canonical_ass_overlay_path=first_overlay,
+        canonical_ass_overlay_sha256=first_overlay_sha256,
+        delivery_receipt=first_receipt,
+    ).to_dict()
+    assert with_font["renderArtifact"][
+        "renderConfigurationSha256"
+    ] != first["renderArtifact"]["renderConfigurationSha256"]
+    assert with_font["bindings"][0][
+        "bindingArtifactSha256"
+    ] != first["bindings"][0]["bindingArtifactSha256"]
+
+    second_overlay = tmp_path / "private-second-overlay.ass"
+    second_overlay.write_bytes(first_overlay.read_bytes().replace(
+        b"First",
+        b"Other",
+    ))
+    second_overlay_sha256 = hashlib.sha256(
+        second_overlay.read_bytes()
+    ).hexdigest()
+    with_other_overlay = _collector(files).collect(
+        _request(files),
+        canonical_ass_overlay_path=second_overlay,
+        canonical_ass_overlay_sha256=second_overlay_sha256,
+        delivery_receipt=first_receipt,
+    ).to_dict()
+    assert with_other_overlay["renderArtifact"][
+        "renderConfigurationSha256"
+    ] != first["renderArtifact"]["renderConfigurationSha256"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "include_overlay", "hash_override"),
+    [
+        ("soft-mux", False, None),
+        ("burn-in", True, None),
+        ("soft-mux", True, "f" * 64),
+    ],
+)
+def test_overlay_and_delivery_mismatch_fail_closed(
+    tmp_path: Path,
+    mode: str,
+    include_overlay: bool,
+    hash_override: str | None,
+) -> None:
+    files = _files(tmp_path)
+    overlay = _ass_overlay(tmp_path)
+    overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
+    kwargs: dict[str, Any] = {
+        "delivery_receipt": _delivery_receipt(files, mode=mode),
+    }
+    if include_overlay:
+        kwargs["canonical_ass_overlay_path"] = overlay
+        kwargs["canonical_ass_overlay_sha256"] = (
+            hash_override or overlay_sha256
+        )
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        _collector(files).collect(_request(files), **kwargs)
+    assert captured.value.code is SubtitleVisualEvidenceErrorCode.INVALID_REQUEST
+
+
+def test_overlay_mutation_during_collection_fails_closed(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    overlay = _ass_overlay(tmp_path)
+    overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
+    mutated = False
+
+    def mutate_overlay(argv: tuple[str, ...]) -> None:
+        nonlocal mutated
+        if "-frames:v" in argv and not mutated:
+            overlay.write_text(
+                overlay.read_text(encoding="utf-8") + "\n; changed",
+                encoding="utf-8",
+            )
+            mutated = True
+
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        _collector(
+            files,
+            runner=FakeRunner(on_run=mutate_overlay),
+        ).collect(
+            _request(files),
+            canonical_ass_overlay_path=overlay,
+            canonical_ass_overlay_sha256=overlay_sha256,
+            delivery_receipt=_delivery_receipt(
+                files,
+                mode="soft-mux",
+            ),
+        )
+    assert captured.value.code is SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED
+    assert not list(
+        tmp_path.glob(".mts-subtitle-visual-evidence-*")
+    )
+
+
+def test_burn_in_receipt_is_bound_without_ass_overlay(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    runner = FakeRunner()
+    payload = _collector(files, runner=runner).collect(
+        _request(files),
+        delivery_receipt=_delivery_receipt(files, mode="burn-in"),
+    ).to_dict()
+    assert payload["renderArtifact"]["renderConfigurationSha256"] != SHA_A
+    assert all("-vf" not in command for command in runner.commands)
+    assert verify_evidence_artifact_hash(payload)
 
 
 def test_injected_runner_output_is_bounded(
@@ -778,6 +1070,116 @@ def test_pillow_analyzer_collects_real_visible_ink_and_dark_light_pixels(
     assert all(
         sample.foreground_pixel_count == 400
         for sample in instance.contrast_samples
+    )
+
+
+def test_pillow_analyzer_ignores_coherent_low_delta_compression_noise(
+    tmp_path: Path,
+) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    source = image_module.new("RGB", (100, 100), (96, 96, 96))
+    rendered = source.copy()
+
+    # Simulate low-amplitude codec drift across the analyzed region and a
+    # coherent compression block that the old per-pixel threshold treated as
+    # subtitle ink.
+    for x_coord in range(5, 95):
+        for y_coord in range(20, 80):
+            drift = 18 if (x_coord + y_coord) % 2 == 0 else -18
+            rendered.putpixel(
+                (x_coord, y_coord),
+                (96 + drift, 96 + drift, 96 + drift),
+            )
+    for x_coord in range(12, 22):
+        for y_coord in range(30, 40):
+            rendered.putpixel((x_coord, y_coord), (132, 132, 132))
+
+    # Strong, connected subtitle-like evidence remains detectable.
+    for x_coord in range(55, 75):
+        for y_coord in range(45, 65):
+            rendered.putpixel((x_coord, y_coord), (255, 255, 255))
+
+    source_path = tmp_path / "source-noise.png"
+    rendered_path = tmp_path / "rendered-noise.png"
+    source.save(source_path)
+    rendered.save(rendered_path)
+    observation = PillowFrameAnalyzer().analyze(
+        rendered_frame_path=rendered_path,
+        source_frame_path=source_path,
+        frame_id="frame-compression-tolerant",
+        timestamp_ms=1000,
+        width_px=100,
+        height_px=100,
+        cues=[
+            {
+                "cueId": "cue-noise",
+                "bounds": {
+                    "x": 5,
+                    "y": 20,
+                    "width": 90,
+                    "height": 60,
+                },
+            }
+        ],
+        contrast_policy={
+            "darkMaximumLuminance": 0.35,
+            "lightMinimumLuminance": 0.65,
+        },
+    )
+    assert observation.instances[0].ink_bounds == {
+        "x": 55,
+        "y": 45,
+        "width": 20,
+        "height": 20,
+    }
+
+
+def test_pillow_analyzer_rejects_compression_noise_as_fake_ink(
+    tmp_path: Path,
+) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    source = image_module.new("RGB", (80, 80), (100, 100, 100))
+    rendered = source.copy()
+    for x_coord in range(20, 50):
+        for y_coord in range(30, 50):
+            rendered.putpixel((x_coord, y_coord), (136, 136, 136))
+    source_path = tmp_path / "source-false-ink.png"
+    rendered_path = tmp_path / "rendered-false-ink.png"
+    source.save(source_path)
+    rendered.save(rendered_path)
+
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        PillowFrameAnalyzer(
+            policy=PillowAnalysisPolicy(
+                difference_threshold=24,
+                strong_difference_threshold=48,
+            )
+        ).analyze(
+            rendered_frame_path=rendered_path,
+            source_frame_path=source_path,
+            frame_id="frame-false-ink",
+            timestamp_ms=1000,
+            width_px=80,
+            height_px=80,
+            cues=[
+                {
+                    "cueId": "cue-false-ink",
+                    "bounds": {
+                        "x": 10,
+                        "y": 20,
+                        "width": 60,
+                        "height": 40,
+                    },
+                }
+            ],
+            contrast_policy={
+                "darkMaximumLuminance": 0.35,
+                "lightMinimumLuminance": 0.65,
+            },
+        )
+    assert (
+        captured.value.code
+        is SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE
     )
 
 

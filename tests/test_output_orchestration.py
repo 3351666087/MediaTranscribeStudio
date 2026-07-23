@@ -287,6 +287,26 @@ def test_plan_plumbs_canonical_diy_settings_and_existing_subtitle_modules(
     ass = prepared.sidecars[0].payload
     assert f"Style: Default,{plan.subtitle_style.font_family}," in ass
     assert "Alice" in ass
+    declarations = prepared.visual_qa_speakers
+    assert declarations == prepared.arrangement.visual_qa_speakers()
+    assert [item["speakerId"] for item in declarations] == [
+        "speaker-1",
+        "speaker-2",
+    ]
+    for assignment in prepared.arrangement.speaker_colors:
+        red, green, blue = (
+            assignment.color[1:3],
+            assignment.color[3:5],
+            assignment.color[5:7],
+        )
+        assert (
+            f"Style: {assignment.style_name},"
+            f"{plan.subtitle_style.font_family},"
+            f"{plan.subtitle_style.font_size},"
+            f"&H00{blue}{green}{red}"
+        ) in ass
+    assert "MTS-Speaker-0001,Alice" in ass
+    assert "MTS-Speaker-0002,Bob" in ass
     assert source.read_bytes() == b"immutable source fixture"
 
     renderer_config = plan.report_renderer_config(
@@ -298,6 +318,99 @@ def test_plan_plumbs_canonical_diy_settings_and_existing_subtitle_modules(
         renderer_config["mediaProbeArtifact"]["sha256"]
         == artifact.sha256
     )
+
+
+def test_speaker_color_override_wins_for_stable_id_not_display_name(
+    tmp_path: Path,
+) -> None:
+    source, output, probe, artifact = _artifact(tmp_path)
+    customization = resolve_output_customization(
+        {
+            "subtitle": {
+                "speakerColors": {
+                    "seed": "orchestration-seed",
+                    "overrides": [
+                        {"speakerId": "speaker-1", "color": "#12AB34"}
+                    ],
+                }
+            }
+        }
+    )
+    plan = compile_output_execution_plan(
+        customization,
+        source_path=source,
+        output_directory=output,
+        media_probe=probe,
+        media_probe_artifact=artifact,
+        language="en",
+        speaker_count=2,
+        generated_date="2026-07-23",
+    )
+
+    prepared = prepare_subtitle_outputs(plan, _transcript())
+    assignments = {
+        item.speaker_id: item
+        for item in prepared.arrangement.speaker_colors
+    }
+    ass = prepared.sidecars[0].payload
+
+    assert assignments["speaker-1"].color == "#12AB34"
+    assert assignments["speaker-1"].source == "override"
+    assert assignments["speaker-1"].palette_index is None
+    assert assignments["speaker-2"].source == "palette"
+    assert "&H0034AB12" in ass
+    assert (
+        f"{assignments['speaker-1'].style_name},"
+        "Alice,0,0,0,,Alice Hello."
+        in ass
+    )
+    assert prepared.visual_qa_speakers == (
+        {"speakerId": "speaker-1", "color": "#12AB34"},
+        {
+            "speakerId": "speaker-2",
+            "color": assignments["speaker-2"].color,
+        },
+    )
+
+
+def test_monochrome_mode_does_not_declare_or_render_distinct_speaker_colors(
+    tmp_path: Path,
+) -> None:
+    source, output, probe, artifact = _artifact(tmp_path)
+    customization = resolve_output_customization(
+        {
+            "subtitle": {
+                "speakerColors": {
+                    "mode": "monochrome",
+                    "algorithm": "monochrome-v1",
+                    "minimumDeltaE": 0,
+                    "overrides": [
+                        {"speakerId": "speaker-1", "color": "#FF0000"}
+                    ],
+                }
+            }
+        }
+    )
+    plan = compile_output_execution_plan(
+        customization,
+        source_path=source,
+        output_directory=output,
+        media_probe=probe,
+        media_probe_artifact=artifact,
+        language="en",
+        speaker_count=2,
+        generated_date="2026-07-23",
+    )
+
+    prepared = prepare_subtitle_outputs(plan, _transcript())
+    ass = prepared.sidecars[0].payload
+
+    assert prepared.arrangement.speaker_colors == ()
+    assert prepared.visual_qa_speakers == ()
+    assert "MTS-SpeakerColor" not in ass
+    assert "Style: MTS-Speaker-" not in ass
+    assert ass.count(",Default,") == 2
+    assert "&H000000FF" not in ass
 
 
 def test_java_pdf_adapter_receives_exact_planned_report_configuration(
@@ -634,6 +747,25 @@ def test_media_is_quarantined_until_visual_qa_passes_then_published(
         )
         assert kwargs["rendered_path"].exists()
         assert not customer_output.exists()
+        assert (
+            kwargs["arrangement"].visual_qa_speakers()
+            == prepared.visual_qa_speakers
+        )
+        ass = next(
+            item.payload
+            for item in prepared.sidecars
+            if item.subtitle_format is SubtitleFormat.ASS
+        )
+        for assignment in kwargs["arrangement"].speaker_colors:
+            red, green, blue = (
+                assignment.color[1:3],
+                assignment.color[3:5],
+                assignment.color[5:7],
+            )
+            assert (
+                f"Style: {assignment.style_name},"
+                f"Noto Sans CJK SC,52,&H00{blue}{green}{red}"
+            ) in ass
         return {"passed": True, "analysisId": "qa-success"}
 
     result = execute_prepared_subtitle_outputs(

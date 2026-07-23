@@ -33,6 +33,7 @@ from .documents import (
 from .errors import JobCancelled, WorkerError, invalid_request
 from .local_llm import LocalLLMConfig, LocalLLMProvider, OllamaLocalProvider
 from .language import normalize_language_tag
+from .media_probe import MediaProbeResult
 from .models import (
     CHECKPOINT_SCHEMA_VERSION,
     JobStatus,
@@ -44,9 +45,27 @@ from .models import (
     TranscriptionResult,
     validate_job_id,
 )
-from .output_recipe import OutputRecipeError, parse_output_recipe
+from .output_orchestration import (
+    MediaProbeArtifact,
+    OutputExecutionPlan,
+    compile_output_execution_plan,
+    persist_media_probe_artifact,
+    render_planned_report,
+)
+from .output_publication import (
+    OUTPUT_PUBLICATION_SCHEMA_VERSION,
+    OutputPublicationManifest,
+    publish_output_plans,
+)
+from .output_recipe import (
+    OutputRecipeError,
+    compile_output_customizations,
+    parse_output_recipe,
+    render_recipe_file_name,
+)
 from .paths import PathPolicy
 from .persistence import (
+    atomic_publish_json_evidence,
     atomic_write_json,
     atomic_write_json_transaction,
     canonical_json_sha256,
@@ -54,6 +73,7 @@ from .persistence import (
     recover_json_transaction,
     validate_strict_json,
 )
+from .transcript_exports import export_transcript
 from .review import (
     assert_raw_text_unchanged,
     merge_speakers,
@@ -95,6 +115,24 @@ class JobRecord:
     review_queue_path: str | None = None
     review_open_count: int = 0
     pipeline_metrics_path: str | None = None
+    media_probe_result: MediaProbeResult | None = None
+    media_probe_artifact: MediaProbeArtifact | None = None
+    media_probe_artifact_path: str | None = None
+    output_execution_plans: tuple[OutputExecutionPlan, ...] = ()
+    output_plan_paths: list[str] = field(default_factory=list)
+    output_plan_hashes: list[str] = field(default_factory=list)
+    output_manifest_path: str | None = None
+    output_publication_status: str = "not-requested"
+    output_publication_manifest_path: str | None = None
+    output_publication_manifest_sha256: str | None = None
+    output_publication_manifest_file_sha256: str | None = None
+    output_publication_receipts: list[dict[str, Any]] = field(
+        default_factory=list
+    )
+    output_publication_error: dict[str, Any] | None = None
+    transcript_export_receipts: list[dict[str, Any]] = field(
+        default_factory=list
+    )
     artifact_paths: list[str] = field(default_factory=list)
     business_status: str = "not-requested"
     business_manifest_path: str | None = None
@@ -132,6 +170,11 @@ class WorkerService:
             [StartJobRequest, AdapterContext], BusinessProcessingRunner
         ]
         | None = None,
+        media_probe: Any | None = None,
+        output_publisher: Callable[..., OutputPublicationManifest]
+        | None = publish_output_plans,
+        subtitle_delivery_executor: Any | None = None,
+        subtitle_visual_qa_hook: Callable[..., Any] | None = None,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be positive")
@@ -163,6 +206,10 @@ class WorkerService:
         self.business_provider = business_provider
         self.business_provider_factory = business_provider_factory
         self.business_runner_factory = business_runner_factory
+        self.media_probe = media_probe
+        self.output_publisher = output_publisher
+        self.subtitle_delivery_executor = subtitle_delivery_executor
+        self.subtitle_visual_qa_hook = subtitle_visual_qa_hook
         self._jobs: dict[str, JobRecord] = {}
         self._active_outputs: dict[Path, str] = {}
         self._lock = threading.RLock()
@@ -723,6 +770,17 @@ class WorkerService:
                 "qualityReportPath": record.quality_report_path,
                 "renderManifestPath": record.render_manifest_path,
                 "pipelineMetricsPath": record.pipeline_metrics_path,
+                "mediaProbeArtifactPath": record.media_probe_artifact_path,
+                "outputPlanPaths": list(record.output_plan_paths),
+                "outputPlanHashes": list(record.output_plan_hashes),
+                "outputManifestPath": record.output_manifest_path,
+                "outputPublication": self._output_publication_event_payload(
+                    record
+                ),
+                "transcriptExports": [
+                    dict(receipt)
+                    for receipt in record.transcript_export_receipts
+                ],
                 "artifactPaths": list(record.artifact_paths),
                 "followupOperation": record.followup_operation,
                 "business": {
@@ -1105,6 +1163,8 @@ class WorkerService:
                 )
             self._sync_record_from_review_state(record, document, queue)
             self._run_business_processing(record, document, context)
+            self._ensure_output_execution_plans(record, document)
+            self._execute_transcript_exports(record, document, context)
             if operation == "rerender" or record.request.render_pdf:
                 self._transition(record, JobStatus.RUNNING, "rendering")
                 self._emit(
@@ -1121,6 +1181,8 @@ class WorkerService:
             elif record.quality_status == "review-complete":
                 record.quality_status = "not-requested"
             context.raise_if_cancelled()
+            self._execute_output_publication(record, document, context)
+            context.raise_if_cancelled()
             with record.lock:
                 record.followup_operation = None
             self._transition(record, JobStatus.COMPLETED, "completed")
@@ -1132,6 +1194,9 @@ class WorkerService:
                     "operation": operation,
                     "artifactPaths": list(record.artifact_paths),
                     "business": self._business_event_payload(record),
+                    "outputPublication": (
+                        self._output_publication_event_payload(record)
+                    ),
                 },
             )
         except JobCancelled:
@@ -1176,11 +1241,33 @@ class WorkerService:
         document: Mapping[str, Any],
         context: AdapterContext,
     ) -> None:
-        render_result = self.renderer_adapter.render(
-            document,
-            record.request,
-            context,
-        )
+        if record.request.output_recipe is not None:
+            report_plan = next(
+                (
+                    plan
+                    for plan in record.output_execution_plans
+                    if plan.report_enabled
+                ),
+                None,
+            )
+            if report_plan is None:
+                raise WorkerError(
+                    "OUTPUT_PLAN_MISSING",
+                    "the output recipe enables PDF but no report execution plan exists",
+                )
+            render_result = render_planned_report(
+                report_plan,
+                renderer=self.renderer_adapter,
+                document=document,
+                request=record.request,
+                context=context,
+            )
+        else:
+            render_result = self.renderer_adapter.render(
+                document,
+                record.request,
+                context,
+            )
         if not isinstance(render_result, RenderResult):
             raise WorkerError(
                 "RENDER_RESULT_INVALID",
@@ -1188,6 +1275,1001 @@ class WorkerService:
             )
         render_result.validate()
         self._accept_render_result(record, render_result)
+
+    def _probe_source_media(
+        self,
+        record: JobRecord,
+        context: AdapterContext,
+    ) -> None:
+        if self.media_probe is None:
+            if record.request.output_recipe is not None:
+                raise WorkerError(
+                    "MEDIA_PROBE_REQUIRED",
+                    "output recipes require a trusted content-driven media probe",
+                )
+            return
+        self._transition(record, JobStatus.RUNNING, "media_probe")
+        self._emit(
+            record,
+            "stage.started",
+            {
+                "stage": "media_probe",
+                "admission": "content-driven",
+                "extensionTrusted": False,
+            },
+        )
+        context.raise_if_cancelled()
+        raw_probe = self.media_probe.probe(record.request.source_path)
+        if not isinstance(raw_probe, MediaProbeResult):
+            raise WorkerError(
+                "MEDIA_PROBE_RESULT_INVALID",
+                "trusted media probe must return MediaProbeResult",
+            )
+        artifact = persist_media_probe_artifact(
+            raw_probe,
+            source_path=record.request.source_path,
+            output_directory=record.request.output_directory,
+        )
+        context.raise_if_cancelled()
+        record.media_probe_result = raw_probe
+        record.media_probe_artifact = artifact
+        record.media_probe_artifact_path = str(artifact.path)
+        if str(artifact.path) not in record.artifact_paths:
+            record.artifact_paths.append(str(artifact.path))
+        self._emit(
+            record,
+            "artifact.created",
+            {
+                "artifactType": "media-probe-v1",
+                "path": str(artifact.path),
+                "sha256": artifact.sha256,
+            },
+        )
+
+    def _ensure_output_execution_plans(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+    ) -> tuple[OutputExecutionPlan, ...]:
+        recipe = record.request.output_recipe
+        if recipe is None:
+            return ()
+        if record.output_execution_plans:
+            return record.output_execution_plans
+        media_probe = record.media_probe_result
+        media_probe_artifact = record.media_probe_artifact
+        if media_probe is None or media_probe_artifact is None:
+            raise WorkerError(
+                "MEDIA_PROBE_REQUIRED",
+                "output planning requires persisted trusted media-probe evidence",
+            )
+        speaker_policy = document.get("speakerPolicy")
+        if not isinstance(speaker_policy, MappingABC):
+            raise WorkerError(
+                "OUTPUT_PLAN_INPUT_INVALID",
+                "transcript document is missing speakerPolicy",
+            )
+        speaker_count = speaker_policy.get("resolvedCount")
+        if isinstance(speaker_count, bool) or not isinstance(speaker_count, int):
+            raise WorkerError(
+                "OUTPUT_PLAN_INPUT_INVALID",
+                "transcript document has no resolved speaker count",
+            )
+        language = document.get("language")
+        if not isinstance(language, str) or not language.strip():
+            raise WorkerError(
+                "OUTPUT_PLAN_INPUT_INVALID",
+                "transcript document has no persisted language",
+            )
+        generated_at = document.get("generatedAt")
+        if (
+            not isinstance(generated_at, str)
+            or len(generated_at) < 10
+            or generated_at[4:5] != "-"
+            or generated_at[7:8] != "-"
+        ):
+            raise WorkerError(
+                "OUTPUT_PLAN_INPUT_INVALID",
+                "transcript document has no canonical generated date",
+            )
+        generated_date = generated_at[:10]
+        try:
+            compiled = compile_output_customizations(
+                recipe,
+                source_path=record.request.source_path,
+                output_directory=record.request.output_directory,
+                media_probe=media_probe,
+                media_probe_artifact=media_probe_artifact,
+            )
+        except OutputRecipeError as exc:
+            raise WorkerError(
+                "OUTPUT_RECIPE_COMPILE_FAILED",
+                "the canonical output recipe could not be compiled",
+                details={"reason": str(exc)},
+            ) from exc
+        plans: list[OutputExecutionPlan] = []
+        plan_paths: list[str] = []
+        plan_hashes: list[str] = []
+        snapshots_root = record.request.output_directory / "output-plans"
+        for index, item in enumerate(compiled, start=1):
+            plan = compile_output_execution_plan(
+                item.customization,
+                source_path=record.request.source_path,
+                output_directory=record.request.output_directory,
+                media_probe=media_probe,
+                media_probe_artifact=media_probe_artifact,
+                language=language,
+                speaker_count=speaker_count,
+                generated_date=generated_date,
+            )
+            mode = item.delivery_mode
+            customization_path = (
+                snapshots_root
+                / f"{index:02d}-{mode}.output-customization.v1.json"
+            )
+            plan_path = (
+                snapshots_root / f"{index:02d}-{mode}.output-plan.v1.json"
+            )
+            customization_evidence = atomic_publish_json_evidence(
+                customization_path,
+                item.customization.canonical_dict(),
+            )
+            plan_evidence = atomic_publish_json_evidence(
+                plan_path,
+                plan.to_dict(),
+            )
+            for artifact_type, evidence in (
+                ("output-customization-v1", customization_evidence),
+                ("output-execution-plan-v1", plan_evidence),
+            ):
+                text = str(evidence.path)
+                if text not in record.artifact_paths:
+                    record.artifact_paths.append(text)
+                self._emit(
+                    record,
+                    "artifact.created",
+                    {
+                        "artifactType": artifact_type,
+                        "path": text,
+                        "sha256": evidence.sha256,
+                    },
+                )
+            plans.append(plan)
+            plan_paths.append(str(plan_evidence.path))
+            plan_hashes.append(plan.deterministic_hash())
+        record.output_execution_plans = tuple(plans)
+        record.output_plan_paths = plan_paths
+        record.output_plan_hashes = plan_hashes
+        return record.output_execution_plans
+
+    def _execute_transcript_exports(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+        context: AdapterContext,
+    ) -> tuple[dict[str, Any], ...]:
+        recipe = record.request.output_recipe
+        if recipe is None:
+            return ()
+        if record.transcript_export_receipts:
+            return tuple(
+                dict(receipt)
+                for receipt in record.transcript_export_receipts
+            )
+        requested = tuple(
+            value
+            for value in ("json", "txt", "markdown", "html")
+            if value in recipe.formats
+        )
+        if not requested:
+            return ()
+        speaker_policy = document.get("speakerPolicy")
+        if not isinstance(speaker_policy, MappingABC):
+            raise WorkerError(
+                "TRANSCRIPT_EXPORT_DOCUMENT_INVALID",
+                "transcript export requires persisted speakerPolicy",
+            )
+        speaker_count = speaker_policy.get("resolvedCount")
+        if isinstance(speaker_count, bool) or not isinstance(speaker_count, int):
+            raise WorkerError(
+                "TRANSCRIPT_EXPORT_DOCUMENT_INVALID",
+                "transcript export requires a resolved speaker count",
+            )
+        language = document.get("language")
+        if not isinstance(language, str) or not language:
+            raise WorkerError(
+                "TRANSCRIPT_EXPORT_DOCUMENT_INVALID",
+                "transcript export requires a persisted language",
+            )
+        generated_at = document.get("generatedAt")
+        if (
+            not isinstance(generated_at, str)
+            or len(generated_at) < 10
+            or generated_at[4:5] != "-"
+            or generated_at[7:8] != "-"
+        ):
+            raise WorkerError(
+                "TRANSCRIPT_EXPORT_DOCUMENT_INVALID",
+                "transcript export requires a canonical generated date",
+            )
+        try:
+            output_stem = render_recipe_file_name(
+                recipe,
+                source_stem=record.request.source_path.stem,
+                artifact="transcript",
+                language=language,
+                generated_date=generated_at[:10],
+                speaker_count=speaker_count,
+            )
+        except OutputRecipeError as exc:
+            raise WorkerError(
+                "TRANSCRIPT_EXPORT_FILENAME_INVALID",
+                "the output recipe could not derive a transcript file name",
+                details={"reason": str(exc)},
+            ) from exc
+        suffixes = {
+            "json": ".json",
+            "txt": ".txt",
+            "markdown": ".md",
+            "html": ".html",
+        }
+        self._transition(record, JobStatus.RUNNING, "transcript_exports")
+        self._emit(
+            record,
+            "stage.started",
+            {
+                "stage": "transcript_exports",
+                "formats": list(requested),
+            },
+        )
+        receipts: list[dict[str, Any]] = []
+        for export_format in requested:
+            context.raise_if_cancelled()
+            receipt = export_transcript(
+                document,
+                export_format=export_format,
+                output_root=record.request.output_directory,
+                output_path=output_stem + suffixes[export_format],
+            )
+            payload = receipt.to_dict()
+            receipts.append(payload)
+            path_text = str(receipt.path)
+            if path_text not in record.artifact_paths:
+                record.artifact_paths.append(path_text)
+            self._emit(
+                record,
+                "artifact.created",
+                {
+                    "artifactType": (
+                        f"transcript-export-{export_format}-v1"
+                    ),
+                    **payload,
+                },
+            )
+        record.transcript_export_receipts = receipts
+        return tuple(dict(receipt) for receipt in receipts)
+
+    def _execute_output_publication(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+        context: AdapterContext,
+    ) -> dict[str, Any] | None:
+        recipe = record.request.output_recipe
+        if recipe is None or not recipe.canonical_dict()["subtitles"]["enabled"]:
+            record.output_publication_status = "not-requested"
+            record.output_publication_error = None
+            return None
+
+        plans = tuple(record.output_execution_plans)
+        if not plans:
+            error = WorkerError(
+                "OUTPUT_PUBLICATION_PLANS_REQUIRED",
+                "subtitle publication requires canonical output execution plans",
+            )
+            self._invalidate_output_publication(record, error)
+            raise error
+        try:
+            self._verify_persisted_output_plans(record, plans)
+            existing = self._load_valid_output_publication(record, plans)
+        except WorkerError as exc:
+            self._invalidate_output_publication(record, exc)
+            self._emit(
+                record,
+                "output.publication.invalid",
+                self._output_publication_event_payload(record),
+            )
+            raise
+
+        if existing is not None:
+            self._record_output_publication(
+                record,
+                manifest_path=(
+                    record.request.output_directory
+                    / "output-publication-manifest.v1.json"
+                ),
+                manifest_payload=existing,
+                manifest_file_sha256=self._exact_file_sha256(
+                    record.request.output_directory
+                    / "output-publication-manifest.v1.json"
+                ),
+            )
+            self._emit(
+                record,
+                "output.publication.reused",
+                self._output_publication_event_payload(record),
+            )
+            return existing
+
+        if not callable(self.output_publisher):
+            error = WorkerError(
+                "OUTPUT_PUBLICATION_RUNTIME_UNAVAILABLE",
+                "subtitle publication has no configured transactional publisher",
+            )
+            self._invalidate_output_publication(record, error)
+            raise error
+        if self.subtitle_delivery_executor is None:
+            error = WorkerError(
+                "OUTPUT_PUBLICATION_RUNTIME_UNAVAILABLE",
+                "subtitle publication has no configured delivery executor",
+            )
+            self._invalidate_output_publication(record, error)
+            raise error
+
+        self._transition(record, JobStatus.RUNNING, "output_publication")
+        record.output_publication_status = "publishing"
+        record.output_publication_error = None
+        self._emit(
+            record,
+            "stage.started",
+            {
+                "stage": "output_publication",
+                "recipeSha256": recipe.deterministic_hash(),
+                "planSha256": [
+                    plan.deterministic_hash() for plan in plans
+                ],
+            },
+        )
+        context.raise_if_cancelled()
+        manifest: OutputPublicationManifest | None = None
+        manifest_published = False
+        try:
+            raw_manifest = self.output_publisher(
+                recipe,
+                plans,
+                document,
+                executor=self.subtitle_delivery_executor,
+                visual_qa_hook=self.subtitle_visual_qa_hook,
+                subtitle_language=self._publication_language(document),
+                subtitle_title=self._publication_title(document),
+                make_subtitle_default=False,
+                cancellation_check=context.raise_if_cancelled,
+            )
+            if not isinstance(raw_manifest, OutputPublicationManifest):
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_RESULT_INVALID",
+                    "transactional publisher must return OutputPublicationManifest",
+                    details={
+                        "resultType": type(raw_manifest).__name__,
+                    },
+                )
+            manifest = raw_manifest
+            manifest_payload = manifest.to_dict()
+            self._validate_output_publication_manifest(
+                record,
+                plans,
+                manifest_payload,
+                expected_manifest_sha256=manifest.manifest_sha256,
+            )
+            context.raise_if_cancelled()
+
+            manifest_path = (
+                record.request.output_directory
+                / "output-publication-manifest.v1.json"
+            )
+            evidence = atomic_publish_json_evidence(
+                manifest_path,
+                manifest_payload,
+            )
+            manifest_published = True
+            persisted = read_json_strict(evidence.path)
+            if persisted != manifest_payload:
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_MISMATCH",
+                    "persisted output publication manifest changed during publication",
+                )
+            self._validate_output_publication_manifest(
+                record,
+                plans,
+                persisted,
+                expected_manifest_sha256=manifest.manifest_sha256,
+            )
+            self._record_output_publication(
+                record,
+                manifest_path=evidence.path,
+                manifest_payload=persisted,
+                manifest_file_sha256=evidence.sha256,
+            )
+            for receipt in record.output_publication_receipts:
+                self._emit(
+                    record,
+                    "artifact.created",
+                    {
+                        **dict(receipt),
+                        "artifactType": receipt["artifactType"],
+                    },
+                )
+            self._emit(
+                record,
+                "artifact.created",
+                {
+                    "artifactType": "output-publication-manifest-v1",
+                    "path": str(evidence.path),
+                    "sha256": evidence.sha256,
+                    "manifestSha256": manifest.manifest_sha256,
+                },
+            )
+            self._emit(
+                record,
+                "output.publication.completed",
+                self._output_publication_event_payload(record),
+            )
+            return persisted
+        except JobCancelled:
+            record.output_publication_status = "cancelled"
+            record.output_publication_error = None
+            if manifest is not None:
+                self._rollback_unmanifested_output_publication(
+                    record,
+                    manifest,
+                    cause=WorkerError(
+                        "OUTPUT_PUBLICATION_CANCELLED",
+                        "output publication was cancelled before its manifest committed",
+                    ),
+                    remove_manifest=manifest_published,
+                )
+            raise
+        except WorkerError as exc:
+            record.output_publication_status = "failed"
+            record.output_publication_error = exc.as_payload()
+            if manifest is not None:
+                self._rollback_unmanifested_output_publication(
+                    record,
+                    manifest,
+                    cause=exc,
+                    remove_manifest=manifest_published,
+                )
+            raise
+        except Exception as exc:
+            error = WorkerError(
+                "OUTPUT_PUBLICATION_FAILED",
+                "subtitle and media publication failed closed",
+                details={"exceptionType": type(exc).__name__},
+            )
+            record.output_publication_status = "failed"
+            record.output_publication_error = error.as_payload()
+            if manifest is not None:
+                self._rollback_unmanifested_output_publication(
+                    record,
+                    manifest,
+                    cause=error,
+                    remove_manifest=manifest_published,
+                )
+            raise error from exc
+
+    def _verify_persisted_output_plans(
+        self,
+        record: JobRecord,
+        plans: tuple[OutputExecutionPlan, ...],
+    ) -> None:
+        expected_hashes = [plan.deterministic_hash() for plan in plans]
+        if record.output_plan_hashes != expected_hashes:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_PLAN_MISMATCH",
+                "in-memory output plan hashes do not match canonical plans",
+            )
+        if len(record.output_plan_paths) != len(plans):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_PLAN_MISMATCH",
+                "persisted output plan paths do not match canonical plans",
+            )
+        for path_text, plan, expected_hash in zip(
+            record.output_plan_paths,
+            plans,
+            expected_hashes,
+            strict=True,
+        ):
+            path = self.path_policy.verify_artifact(
+                Path(path_text),
+                record.request.output_directory,
+            )
+            payload = read_json_strict(path)
+            if (
+                payload != plan.to_dict()
+                or canonical_json_sha256(payload) != expected_hash
+            ):
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_PLAN_MISMATCH",
+                    "persisted output plan no longer matches the canonical plan",
+                )
+
+    def _load_valid_output_publication(
+        self,
+        record: JobRecord,
+        plans: tuple[OutputExecutionPlan, ...],
+    ) -> dict[str, Any] | None:
+        manifest_path = (
+            record.request.output_directory
+            / "output-publication-manifest.v1.json"
+        )
+        if not manifest_path.exists():
+            return None
+        if not manifest_path.is_file():
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest path is not a regular file",
+            )
+        recorded_publication = any(
+            (
+                record.output_publication_manifest_path,
+                record.output_publication_manifest_sha256,
+                record.output_publication_receipts,
+                record.output_publication_status == "published",
+            )
+        )
+        expected_file_sha256 = (
+            record.output_publication_manifest_file_sha256
+        )
+        if recorded_publication and not expected_file_sha256:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_FILE_HASH_MISSING",
+                "recorded output publication has no exact manifest file hash",
+            )
+        if expected_file_sha256 is not None:
+            actual_file_sha256 = self._exact_file_sha256(manifest_path)
+            if actual_file_sha256 != expected_file_sha256:
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_FILE_CHANGED",
+                    "output publication manifest bytes changed after publication",
+                    details={
+                        "expectedSha256": expected_file_sha256,
+                        "actualSha256": actual_file_sha256,
+                    },
+                )
+        payload = read_json_strict(manifest_path)
+        self._validate_output_publication_manifest(record, plans, payload)
+        return payload
+
+    def _validate_output_publication_manifest(
+        self,
+        record: JobRecord,
+        plans: tuple[OutputExecutionPlan, ...],
+        payload: Mapping[str, Any],
+        *,
+        expected_manifest_sha256: str | None = None,
+    ) -> None:
+        required_keys = {
+            "schemaVersion",
+            "status",
+            "recipeSha256",
+            "source",
+            "plans",
+            "customerArtifacts",
+            "internalEvidence",
+            "transaction",
+            "manifestSha256",
+        }
+        if set(payload) != required_keys:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest fields are not canonical",
+            )
+        if (
+            payload.get("schemaVersion")
+            != OUTPUT_PUBLICATION_SCHEMA_VERSION
+            or payload.get("status") != "published"
+        ):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest status or version is unsupported",
+            )
+        claimed_hash = payload.get("manifestSha256")
+        if not isinstance(claimed_hash, str) or len(claimed_hash) != 64:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest has no valid self hash",
+            )
+        body = dict(payload)
+        body.pop("manifestSha256")
+        if canonical_json_sha256(body) != claimed_hash:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest self hash does not verify",
+            )
+        if (
+            expected_manifest_sha256 is not None
+            and claimed_hash != expected_manifest_sha256
+        ):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_MISMATCH",
+                "publisher and persisted manifest hashes do not match",
+            )
+
+        recipe = record.request.output_recipe
+        assert recipe is not None
+        if payload.get("recipeSha256") != recipe.deterministic_hash():
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_STALE",
+                "output publication manifest belongs to another output recipe",
+            )
+
+        source = payload.get("source")
+        canonical_source = record.request.source_path.resolve(strict=True)
+        if not isinstance(source, MappingABC):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest has no source evidence",
+            )
+        try:
+            manifest_source = Path(str(source.get("path"))).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest source path is invalid",
+            ) from exc
+        if manifest_source != canonical_source:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_STALE",
+                "output publication manifest belongs to another source",
+            )
+        source_size = canonical_source.stat().st_size
+        source_sha256 = self._artifact_sha256(canonical_source)
+        if (
+            source.get("sizeBytes") != source_size
+            or source.get("sha256") != source_sha256
+            or source.get("unchanged") is not True
+        ):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_SOURCE_CHANGED",
+                "source media no longer matches output publication evidence",
+            )
+
+        expected_plans = [
+            {
+                "deliveryMode": plan.delivery_mode.value,
+                "customizationSha256": plan.customization_sha256,
+                "executionPlanSha256": plan.deterministic_hash(),
+            }
+            for plan in plans
+            if plan.subtitle_enabled
+        ]
+        mode_order = {"sidecar": 0, "soft-mux": 1, "burn-in": 2}
+        expected_plans.sort(
+            key=lambda item: mode_order[item["deliveryMode"]]
+        )
+        if payload.get("plans") != expected_plans:
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_STALE",
+                "output publication manifest plan hashes are stale",
+            )
+
+        internal = payload.get("internalEvidence")
+        if not isinstance(internal, MappingABC):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest internal evidence is invalid",
+            )
+        self._assert_no_private_publication_paths(internal)
+        if (
+            internal.get("privatePathsExcluded") is not True
+            or internal.get("customerAndInternalEvidenceSeparated") is not True
+        ):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication manifest does not prove path separation",
+            )
+
+        transaction = payload.get("transaction")
+        if not isinstance(transaction, MappingABC) or any(
+            transaction.get(key) is not True
+            for key in (
+                "allConflictsCheckedBeforeWrites",
+                "mediaQuarantinedBeforePublication",
+                "allMediaQaPassedBeforePublication",
+                "rollbackSupported",
+                "privatePathsExcluded",
+                "sourceMediaImmutable",
+            )
+        ):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication transaction evidence is incomplete",
+            )
+
+        receipts = payload.get("customerArtifacts")
+        if not isinstance(receipts, list):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                "output publication customer artifacts must be a list",
+            )
+        expected_receipts = self._expected_output_publication_receipts(recipe)
+        actual_receipts: list[tuple[str, str | None, str | None]] = []
+        seen_paths: set[Path] = set()
+        for receipt in receipts:
+            if not isinstance(receipt, MappingABC):
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                    "output publication receipt must be an object",
+                )
+            if set(receipt) != {
+                "artifactType",
+                "path",
+                "sizeBytes",
+                "sha256",
+                "subtitleFormat",
+                "deliveryMode",
+                "visualQaEvidenceSha256",
+                "sourceIntegrity",
+                "publication",
+            }:
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                    "output publication receipt fields are not canonical",
+                )
+            path_text = receipt.get("path")
+            if not isinstance(path_text, str) or not path_text:
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                    "output publication receipt path is invalid",
+                )
+            path = self.path_policy.verify_artifact(
+                Path(path_text),
+                record.request.output_directory,
+            )
+            if path == canonical_source or path in seen_paths:
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                    "output publication receipt path is duplicated or aliases the source",
+                )
+            seen_paths.add(path)
+            size_bytes = receipt.get("sizeBytes")
+            digest = receipt.get("sha256")
+            if (
+                isinstance(size_bytes, bool)
+                or not isinstance(size_bytes, int)
+                or size_bytes <= 0
+                or path.stat().st_size != size_bytes
+                or not isinstance(digest, str)
+                or self._artifact_sha256(path) != digest
+            ):
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_ARTIFACT_CHANGED",
+                    "published customer artifact no longer matches its receipt",
+                )
+            source_integrity = receipt.get("sourceIntegrity")
+            publication = receipt.get("publication")
+            if (
+                not isinstance(source_integrity, MappingABC)
+                or source_integrity.get("unchanged") is not True
+                or source_integrity.get("sourceSha256") != source_sha256
+                or not isinstance(publication, MappingABC)
+                or publication.get("atomic") is not True
+                or publication.get("noReplace") is not True
+                or publication.get("sourceMediaImmutable") is not True
+            ):
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                    "customer artifact receipt lacks source and publication evidence",
+                )
+            artifact_type = receipt.get("artifactType")
+            subtitle_format = receipt.get("subtitleFormat")
+            delivery_mode = receipt.get("deliveryMode")
+            visual_hash = receipt.get("visualQaEvidenceSha256")
+            if artifact_type == "subtitled-media":
+                if not isinstance(visual_hash, str) or len(visual_hash) != 64:
+                    raise WorkerError(
+                        "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                        "published media lacks representative-frame QA evidence",
+                    )
+            elif visual_hash is not None:
+                raise WorkerError(
+                    "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                    "sidecar receipt must not claim media visual-QA evidence",
+                )
+            actual_receipts.append(
+                (
+                    str(artifact_type),
+                    (
+                        str(subtitle_format)
+                        if subtitle_format is not None
+                        else None
+                    ),
+                    str(delivery_mode) if delivery_mode is not None else None,
+                )
+            )
+        if sorted(actual_receipts) != sorted(expected_receipts):
+            raise WorkerError(
+                "OUTPUT_PUBLICATION_MANIFEST_STALE",
+                "published customer artifacts do not match the output recipe",
+            )
+
+    @staticmethod
+    def _expected_output_publication_receipts(
+        recipe: Any,
+    ) -> list[tuple[str, str | None, str | None]]:
+        payload = recipe.canonical_dict()
+        delivery = payload["delivery"]
+        formats = [
+            value
+            for value in delivery["formats"]
+            if value in {"srt", "webvtt", "ass"}
+        ]
+        expected = [
+            ("subtitle-sidecar", value, "sidecar") for value in formats
+        ]
+        expected.extend(
+            ("subtitled-media", "ass", mode)
+            for mode in delivery["subtitleModes"]
+            if mode in {"soft-mux", "burn-in"}
+        )
+        return expected
+
+    @classmethod
+    def _assert_no_private_publication_paths(cls, value: Any) -> None:
+        if isinstance(value, MappingABC):
+            for key, item in value.items():
+                lowered = str(key).casefold()
+                if (
+                    lowered == "path"
+                    or lowered.endswith("path")
+                    or lowered.endswith("paths")
+                ) and isinstance(item, str):
+                    raise WorkerError(
+                        "OUTPUT_PUBLICATION_MANIFEST_INVALID",
+                        "internal publication evidence discloses a private path",
+                    )
+                cls._assert_no_private_publication_paths(item)
+        elif isinstance(value, list):
+            for item in value:
+                cls._assert_no_private_publication_paths(item)
+
+    def _record_output_publication(
+        self,
+        record: JobRecord,
+        *,
+        manifest_path: Path,
+        manifest_payload: Mapping[str, Any],
+        manifest_file_sha256: str,
+    ) -> None:
+        verified_manifest = self.path_policy.verify_artifact(
+            manifest_path,
+            record.request.output_directory,
+        )
+        receipts = [
+            dict(receipt)
+            for receipt in manifest_payload["customerArtifacts"]
+        ]
+        record.output_publication_status = "published"
+        record.output_publication_manifest_path = str(verified_manifest)
+        record.output_publication_manifest_sha256 = str(
+            manifest_payload["manifestSha256"]
+        )
+        record.output_publication_manifest_file_sha256 = (
+            manifest_file_sha256
+        )
+        record.output_publication_receipts = receipts
+        record.output_publication_error = None
+        record.output_manifest_path = str(verified_manifest)
+        for receipt in receipts:
+            path_text = str(receipt["path"])
+            if path_text not in record.artifact_paths:
+                record.artifact_paths.append(path_text)
+        manifest_text = str(verified_manifest)
+        if manifest_text not in record.artifact_paths:
+            record.artifact_paths.append(manifest_text)
+
+    @staticmethod
+    def _exact_file_sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _invalidate_output_publication(
+        record: JobRecord,
+        error: WorkerError,
+    ) -> None:
+        invalidated_paths = {
+            str(receipt.get("path"))
+            for receipt in record.output_publication_receipts
+            if isinstance(receipt.get("path"), str)
+        }
+        if record.output_publication_manifest_path:
+            invalidated_paths.add(record.output_publication_manifest_path)
+        record.artifact_paths = [
+            path
+            for path in record.artifact_paths
+            if path not in invalidated_paths
+        ]
+        record.output_publication_status = "failed"
+        record.output_publication_manifest_path = None
+        record.output_publication_manifest_sha256 = None
+        record.output_publication_manifest_file_sha256 = None
+        record.output_publication_receipts = []
+        record.output_publication_error = error.as_payload()
+        record.output_manifest_path = None
+
+    def _rollback_unmanifested_output_publication(
+        self,
+        record: JobRecord,
+        manifest: OutputPublicationManifest,
+        *,
+        cause: WorkerError,
+        remove_manifest: bool = False,
+    ) -> None:
+        removed = 0
+        refused = 0
+        source = record.request.source_path.resolve(strict=True)
+        for receipt in manifest.customer_artifacts:
+            try:
+                path = self.path_policy.verify_artifact(
+                    receipt.path,
+                    record.request.output_directory,
+                )
+                if (
+                    path == source
+                    or path.stat().st_size != receipt.size_bytes
+                    or self._artifact_sha256(path) != receipt.sha256
+                ):
+                    refused += 1
+                    continue
+                path.unlink()
+                removed += 1
+            except (OSError, WorkerError):
+                refused += 1
+        if remove_manifest:
+            manifest_path = (
+                record.request.output_directory
+                / "output-publication-manifest.v1.json"
+            )
+            try:
+                persisted = read_json_strict(manifest_path)
+                if (
+                    persisted.get("manifestSha256")
+                    == manifest.manifest_sha256
+                ):
+                    manifest_path.unlink()
+                else:
+                    refused += 1
+            except (OSError, WorkerError):
+                refused += 1
+        if refused:
+            error = WorkerError(
+                "OUTPUT_PUBLICATION_ROLLBACK_INCOMPLETE",
+                "unmanifested customer artifacts could not be fully rolled back",
+                details={
+                    "removedCount": removed,
+                    "refusedCount": refused,
+                    "causeCode": cause.code,
+                },
+            )
+            record.output_publication_status = "failed"
+            record.output_publication_error = error.as_payload()
+            raise error from cause
+
+    @staticmethod
+    def _publication_language(document: Mapping[str, Any]) -> str:
+        value = document.get("language")
+        return value if isinstance(value, str) and value.strip() else "und"
+
+    @staticmethod
+    def _publication_title(document: Mapping[str, Any]) -> str:
+        value = document.get("title")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "MediaTranscribeStudio subtitles"
 
     def _business_runner(
         self,
@@ -1349,6 +2431,8 @@ class WorkerService:
             cancellation=record.cancellation,
         )
         try:
+            context.raise_if_cancelled()
+            self._probe_source_media(record, context)
             context.raise_if_cancelled()
             self._transition(record, JobStatus.RUNNING, "transcription")
             self._emit(record, "job.started", {"status": "running"})
@@ -1538,6 +2622,8 @@ class WorkerService:
                 return
 
             self._run_business_processing(record, document, context)
+            self._ensure_output_execution_plans(record, document)
+            self._execute_transcript_exports(record, document, context)
             if record.request.render_pdf:
                 self._transition(record, JobStatus.RUNNING, "rendering")
                 self._emit(
@@ -1553,6 +2639,8 @@ class WorkerService:
             else:
                 record.quality_status = "not-requested"
             context.raise_if_cancelled()
+            self._execute_output_publication(record, document, context)
+            context.raise_if_cancelled()
             self._transition(record, JobStatus.COMPLETED, "completed")
             self._emit(
                 record,
@@ -1561,6 +2649,9 @@ class WorkerService:
                     "status": "completed",
                     "artifactPaths": list(record.artifact_paths),
                     "business": self._business_event_payload(record),
+                    "outputPublication": (
+                        self._output_publication_event_payload(record)
+                    ),
                 },
             )
         except JobCancelled:
@@ -1717,6 +2808,9 @@ class WorkerService:
             {
                 **error.as_payload(),
                 "business": self._business_event_payload(record),
+                "outputPublication": self._output_publication_event_payload(
+                    record
+                ),
             },
         )
 
@@ -1739,6 +2833,9 @@ class WorkerService:
             {
                 "status": "cancelled",
                 "business": self._business_event_payload(record),
+                "outputPublication": self._output_publication_event_payload(
+                    record
+                ),
             },
         )
         with self._lock:
@@ -1760,6 +2857,28 @@ class WorkerService:
             "error": (
                 dict(record.business_error)
                 if record.business_error
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _output_publication_event_payload(
+        record: JobRecord,
+    ) -> dict[str, Any]:
+        return {
+            "status": record.output_publication_status,
+            "manifestPath": record.output_publication_manifest_path,
+            "manifestSha256": record.output_publication_manifest_sha256,
+            "manifestFileSha256": (
+                record.output_publication_manifest_file_sha256
+            ),
+            "customerArtifacts": [
+                dict(receipt)
+                for receipt in record.output_publication_receipts
+            ],
+            "error": (
+                dict(record.output_publication_error)
+                if record.output_publication_error
                 else None
             ),
         }
@@ -1835,6 +2954,17 @@ class WorkerService:
                 "reviewQueuePath": record.review_queue_path,
                 "reviewOpenCount": record.review_open_count,
                 "pipelineMetricsPath": record.pipeline_metrics_path,
+                "mediaProbeArtifactPath": record.media_probe_artifact_path,
+                "outputPlanPaths": list(record.output_plan_paths),
+                "outputPlanHashes": list(record.output_plan_hashes),
+                "outputManifestPath": record.output_manifest_path,
+                "outputPublication": self._output_publication_event_payload(
+                    record
+                ),
+                "transcriptExports": [
+                    dict(receipt)
+                    for receipt in record.transcript_export_receipts
+                ],
                 "artifactPaths": list(record.artifact_paths),
                 "error": dict(record.error) if record.error else None,
             }

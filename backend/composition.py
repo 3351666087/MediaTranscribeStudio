@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from reporting import JavaPdfClient, ReportDocumentAssembler
 
 from .adapters import JavaPdfRendererAdapter
 from .local_llm import LocalLLMConfig, OllamaLocalProvider
+from .media_probe import MediaProbe
 from .paths import PathPolicy
 from .production_config import (
     ProductionConfig,
@@ -49,6 +51,7 @@ class ProductionFactories:
     assembler: Callable[..., Any] = ReportDocumentAssembler
     java_client_from_jar: Callable[..., Any] = JavaPdfClient.from_jar
     renderer: Callable[..., Any] = JavaPdfRendererAdapter
+    media_probe: Callable[..., Any] = MediaProbe
     service: Callable[..., Any] = WorkerService
 
 
@@ -159,6 +162,18 @@ def build_production_composition(
         assembler=assembler,
         java_client=java_client,
     )
+    ffmpeg_path = Path(config.executables.ffmpeg)
+    ffprobe_name = "ffprobe.exe" if ffmpeg_path.suffix.casefold() == ".exe" else "ffprobe"
+    sibling_ffprobe = ffmpeg_path.with_name(ffprobe_name)
+    ffprobe_command = (
+        str(sibling_ffprobe)
+        if sibling_ffprobe.is_file()
+        else "ffprobe"
+    )
+    media_probe = factories.media_probe(
+        ffprobe_command=(ffprobe_command,),
+        ffmpeg_command=(config.executables.ffmpeg,),
+    )
     service = factories.service(
         path_policy=PathPolicy(
             allowed_input_roots=config.paths.allowed_input_roots,
@@ -166,6 +181,7 @@ def build_production_composition(
         ),
         transcription_adapter=transcription,
         renderer_adapter=renderer,
+        media_probe=media_probe,
         event_sink=event_sink,
         max_workers=config.runtime.max_workers,
         max_pending_jobs=config.runtime.max_pending_jobs,

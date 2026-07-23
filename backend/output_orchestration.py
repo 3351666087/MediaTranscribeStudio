@@ -52,6 +52,7 @@ from .subtitles import (
     arrange_cues,
     build_subtitle_output_plan,
     export_subtitles,
+    resolve_speaker_colors,
 )
 
 
@@ -275,6 +276,12 @@ class PreparedSubtitleOutputs:
     sidecars: tuple[PreparedSubtitleArtifact, ...]
     media_delivery_plan: SubtitleOutputPlan | None
     visual_qa_required: bool
+
+    @property
+    def visual_qa_speakers(self) -> tuple[dict[str, str], ...]:
+        """Exact speaker colors rendered by ASS, or empty when disabled."""
+
+        return self.arrangement.visual_qa_speakers()
 
 
 def persist_media_probe_artifact(
@@ -622,6 +629,7 @@ def transcript_subtitle_segments(
                 "endMs": raw.get("endMs"),
                 "text": text,
                 "speaker": speaker_names.get(speaker_id, speaker_id or None),
+                "speakerId": speaker_id or None,
             }
         )
     return result
@@ -650,6 +658,19 @@ def prepare_subtitle_outputs(
             transcript_subtitle_segments(document),
             policy=plan.cue_policy,
         )
+        speaker_color_config = plan.subtitle_config["speakerColors"]
+        assignments = resolve_speaker_colors(
+            arrangement.cues,
+            mode=plan.speaker_color_mode,
+            seed=plan.speaker_color_seed,
+            overrides=plan.speaker_color_overrides,
+            algorithm=speaker_color_config["algorithm"],
+        )
+        arrangement = SubtitleArrangement(
+            cues=arrangement.cues,
+            qa=arrangement.qa,
+            speaker_colors=assignments,
+        )
         sidecars: list[PreparedSubtitleArtifact] = []
         for subtitle_format, output_path in plan.sidecar_paths:
             payload = export_subtitles(
@@ -666,6 +687,15 @@ def prepare_subtitle_outputs(
                     else None
                 ),
                 title=title,
+                speaker_color_mode=plan.speaker_color_mode,
+                speaker_color_seed=plan.speaker_color_seed,
+                speaker_color_overrides=plan.speaker_color_overrides,
+                speaker_color_algorithm=speaker_color_config["algorithm"],
+                speaker_color_assignments=(
+                    assignments
+                    if subtitle_format is SubtitleFormat.ASS
+                    else None
+                ),
             )
             delivery_plan = build_subtitle_output_plan(
                 source_path=plan.source_path,

@@ -145,15 +145,15 @@
 
 ### 7.3 字幕、视频写回与事务式发布
 
-- [ ] SRT、WebVTT、ASS sidecar 使用同一不可变 transcript document 和输出配方。
-- [ ] ASS 支持确定性大规模说话人配色、用户覆盖色、禁用角色色和字幕样式 DIY。
-- [ ] Soft-mux 与 burn-in 始终使用高保真 ASS carrier，不以 SRT 作为视频写回载体。
+- [x] SRT、WebVTT、ASS sidecar 使用同一不可变 transcript document 和输出配方。
+- [x] ASS 支持确定性大规模说话人配色、用户覆盖色、禁用角色色和字幕样式 DIY。
+- [x] Soft-mux 与 burn-in 始终使用高保真 ASS carrier，不以 SRT 作为视频写回载体。
 - [ ] 提供 YouTube 级字幕排版：安全区、行宽、断句、阅读速度、描边/阴影、角色色、屏幕分辨率适配和无障碍选项。
-- [ ] 每个视频输出先进入隔离区，完成代表帧视觉 QA 后再原子发布。
-- [ ] 事务失败、取消、QA 不通过或 manifest 持久化失败时回滚本事务拥有的全部产物。
-- [ ] 发布 manifest 绑定 recipe、customization、完整 execution plan、源媒体和每个客户产物哈希。
-- [ ] rerender 复用通过验证的字幕/视频产物；任何篡改都必须 fail closed。
-- [ ] 通过字幕、输出编排、代表帧 QA、输出发布和 WorkerService 全套测试。
+- [x] 每个视频输出先进入隔离区，完成代表帧视觉 QA 后再原子发布。
+- [x] 事务失败、取消、QA 不通过或 manifest 持久化失败时回滚本事务拥有的全部产物。
+- [x] 发布 manifest 绑定 recipe、customization、完整 execution plan、源媒体和每个客户产物哈希。
+- [x] rerender 复用通过验证的字幕/视频产物；任何篡改都必须 fail closed。
+- [x] 通过字幕、输出编排、代表帧 QA、输出发布和 WorkerService 全套测试。
 - [ ] 用真实视频分别验收 sidecar、soft-mux 和 burn-in 的同步、字体、颜色、清晰度和兼容性。
 
 ### 7.4 报告、字体和 DIY

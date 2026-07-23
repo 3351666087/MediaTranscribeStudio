@@ -20,6 +20,16 @@ from backend import (
     WorkerProtocol,
     WorkerService,
 )
+from backend.media_probe import MediaProbe, ProcessLimits, ProcessResult
+from backend.output_publication import (
+    CustomerArtifactReceipt,
+    OutputPublicationManifest,
+)
+from backend.persistence import (
+    atomic_publish_json_evidence as persist_json_evidence,
+)
+from backend.persistence import canonical_json_sha256, sha256_file
+from backend.subtitles import SubtitleFormat, SubtitleOutputMode
 from test_worker_support import (
     FakeDynamicRenderer,
     FakeTranscriptionAdapter,
@@ -36,6 +46,10 @@ def _service(
     runner_factory: Any | None = None,
     renderer: Any | None = None,
     event_sink: Any | None = None,
+    media_probe: Any | None = None,
+    output_publisher: Any | None = None,
+    subtitle_delivery_executor: Any | None = None,
+    subtitle_visual_qa_hook: Any | None = None,
 ) -> WorkerService:
     input_root = root / "input"
     output_root = root / "output"
@@ -53,6 +67,22 @@ def _service(
         max_workers=1,
         business_provider=provider,
         business_runner_factory=runner_factory,
+        media_probe=media_probe,
+        output_publisher=(
+            output_publisher
+            if output_publisher is not None
+            else _fake_output_publisher
+        ),
+        subtitle_delivery_executor=(
+            subtitle_delivery_executor
+            if subtitle_delivery_executor is not None
+            else object()
+        ),
+        subtitle_visual_qa_hook=(
+            subtitle_visual_qa_hook
+            if subtitle_visual_qa_hook is not None
+            else (lambda **_: {"passed": True})
+        ),
     )
 
 
@@ -65,6 +95,215 @@ def _translation_response(source: str = "你好") -> dict[str, Any]:
         "sourceTextHash": hashlib.sha256(source.encode("utf-8")).hexdigest(),
         "text": "Hello",
         "language": "en",
+    }
+
+
+class _RecordingProbeRunner:
+    def __init__(self, order: list[str]) -> None:
+        self.order = order
+
+    def run(
+        self,
+        command: tuple[str, ...] | list[str],
+        *,
+        limits: ProcessLimits,
+    ) -> ProcessResult:
+        del limits
+        self.order.append("media-probe")
+        argv = tuple(command)
+        if "-version" in argv:
+            tool = Path(argv[0]).name
+            return ProcessResult(
+                returncode=0,
+                stdout=(
+                    f"{tool} version 8.0-test\n"
+                    "configuration: --enable-gpl --enable-libass\n"
+                ).encode(),
+                stderr=b"",
+                elapsed_ms=1,
+            )
+        if "-show_streams" in argv:
+            return ProcessResult(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "index": 0,
+                                "codec_name": "h264",
+                                "codec_type": "video",
+                                "width": 1920,
+                                "height": 1080,
+                                "pix_fmt": "yuv420p",
+                                "duration": "8.0",
+                                "color_transfer": "bt709",
+                                "disposition": {
+                                    "default": 1,
+                                    "attached_pic": 0,
+                                },
+                            },
+                            {
+                                "index": 1,
+                                "codec_name": "aac",
+                                "codec_type": "audio",
+                                "sample_rate": "48000",
+                                "channels": 2,
+                                "duration": "8.0",
+                                "disposition": {"default": 1},
+                            },
+                        ],
+                        "format": {
+                            "format_name": "mov,mp4",
+                            "format_long_name": "fixture media",
+                            "duration": "8.0",
+                            "bit_rate": "1000000",
+                        },
+                        "programs": [],
+                        "chapters": [],
+                    }
+                ).encode(),
+                stderr=b"",
+                elapsed_ms=2,
+            )
+        return ProcessResult(
+            returncode=0,
+            stdout=b"",
+            stderr=b"",
+            elapsed_ms=3,
+        )
+
+
+class _RecordingTranscriptionAdapter(FakeTranscriptionAdapter):
+    def __init__(self, order: list[str]) -> None:
+        super().__init__(result_mapping(1))
+        self.order = order
+
+    def transcribe(self, request, context):
+        self.order.append("transcription")
+        return super().transcribe(request, context)
+
+
+class _PlannedRenderer(FakeDynamicRenderer):
+    def __init__(self) -> None:
+        self.output_plans: list[Any] = []
+
+    def render(self, document, request, context, *, output_plan=None):
+        self.output_plans.append(output_plan)
+        return super().render(document, request, context)
+
+
+def _fake_output_publisher(
+    recipe,
+    plans,
+    document,
+    **kwargs,
+) -> OutputPublicationManifest:
+    del document, kwargs
+    source = plans[0].source_path.resolve(strict=True)
+    output_root = plans[0].output_directory.resolve(strict=True)
+    source_sha256 = sha256_file(source)
+    payload = recipe.canonical_dict()
+    receipts: list[CustomerArtifactReceipt] = []
+    suffixes = {"srt": ".srt", "webvtt": ".vtt", "ass": ".ass"}
+    for subtitle_format in payload["delivery"]["formats"]:
+        if subtitle_format not in suffixes:
+            continue
+        path = output_root / f"published{suffixes[subtitle_format]}"
+        path.write_text(
+            f"{subtitle_format} publication fixture\n",
+            encoding="utf-8",
+        )
+        receipts.append(
+            CustomerArtifactReceipt(
+                artifact_type="subtitle-sidecar",
+                path=path,
+                size_bytes=path.stat().st_size,
+                sha256=sha256_file(path),
+                source_sha256=source_sha256,
+                subtitle_format=SubtitleFormat(subtitle_format),
+                delivery_mode=SubtitleOutputMode.SIDECAR,
+            )
+        )
+    for plan in plans:
+        if plan.delivery_mode not in {
+            SubtitleOutputMode.SOFT_MUX,
+            SubtitleOutputMode.BURN_IN,
+        }:
+            continue
+        assert plan.delivery_output_path is not None
+        path = plan.delivery_output_path
+        path.write_bytes(
+            f"{plan.delivery_mode.value} publication fixture".encode()
+        )
+        receipts.append(
+            CustomerArtifactReceipt(
+                artifact_type="subtitled-media",
+                path=path,
+                size_bytes=path.stat().st_size,
+                sha256=sha256_file(path),
+                source_sha256=source_sha256,
+                subtitle_format=SubtitleFormat.ASS,
+                delivery_mode=plan.delivery_mode,
+                visual_qa_evidence_sha256="b" * 64,
+            )
+        )
+    mode_order = {
+        SubtitleOutputMode.SIDECAR: 0,
+        SubtitleOutputMode.SOFT_MUX: 1,
+        SubtitleOutputMode.BURN_IN: 2,
+    }
+    return OutputPublicationManifest(
+        recipe_sha256=recipe.deterministic_hash(),
+        source_path=source,
+        source_size_bytes=source.stat().st_size,
+        source_sha256=source_sha256,
+        plan_sha256=tuple(
+            (
+                plan.delivery_mode.value,
+                plan.customization_sha256,
+                plan.deterministic_hash(),
+            )
+            for plan in sorted(
+                (item for item in plans if item.subtitle_enabled),
+                key=lambda item: mode_order[item.delivery_mode],
+            )
+        ),
+        customer_artifacts=tuple(receipts),
+        internal_evidence={
+            "privateAssCarrier": {
+                "created": False,
+                "customerArtifact": False,
+                "pathDisclosed": False,
+                "unpredictableName": False,
+                "payloadSha256": None,
+                "sizeBytes": None,
+                "cleanup": "not-created",
+                "reason": "public-ass-reused",
+            },
+            "mediaQuarantine": [],
+            "customerAndInternalEvidenceSeparated": True,
+            "privatePathsExcluded": True,
+        },
+    )
+
+
+def _publication_job_payload(
+    job_id: str,
+    *,
+    formats: list[str] | None = None,
+    modes: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "jobId": job_id,
+        "sourcePath": "source.wav",
+        "outputDirectory": "job",
+        "speakerCountMode": "manual",
+        "speakerCount": 1,
+        "language": "zh-Hans",
+        "outputCustomization": recipe_payload(
+            formats=formats or ["pdf", "ass"],
+            modes=modes or ["sidecar", "burn-in"],
+        ),
     }
 
 
@@ -147,6 +386,209 @@ def test_start_payload_rejects_render_pdf_recipe_conflict() -> None:
 
         assert raised.value.code == "INVALID_REQUEST"
         assert raised.value.details["resolvedRenderPdf"] is True
+        service.shutdown()
+
+
+def test_recipe_job_probes_before_transcription_and_persists_exact_plans() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        order: list[str] = []
+        events: list[dict[str, Any]] = []
+        renderer = _PlannedRenderer()
+        probe = MediaProbe(runner=_RecordingProbeRunner(order))
+        service = _service(
+            root,
+            adapter=_RecordingTranscriptionAdapter(order),
+            renderer=renderer,
+            event_sink=events.append,
+            media_probe=probe,
+        )
+        source = root / "input" / "source.wav"
+        source_hash = sha256_file(source)
+        started = service.start(
+            {
+                "jobId": "recipe-planning",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "language": "zh-Hans",
+                "outputCustomization": recipe_payload(
+                    formats=[
+                        "pdf",
+                        "html",
+                        "markdown",
+                        "txt",
+                        "json",
+                        "srt",
+                        "webvtt",
+                        "ass",
+                    ],
+                    modes=["sidecar", "soft-mux", "burn-in"],
+                ),
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "completed"
+        assert order.index("media-probe") < order.index("transcription")
+        assert sha256_file(source) == source_hash
+        output = root / "output" / "job"
+        probe_path = output / "media-probe.v1.json"
+        assert probe_path.is_file()
+        assert final["mediaProbeArtifactPath"] == str(probe_path.resolve())
+        plan_paths = [Path(path) for path in final["outputPlanPaths"]]
+        assert len(plan_paths) == 3
+        assert [path.name for path in plan_paths] == [
+            "01-sidecar.output-plan.v1.json",
+            "02-soft-mux.output-plan.v1.json",
+            "03-burn-in.output-plan.v1.json",
+        ]
+        plan_payloads = [
+            json.loads(path.read_text(encoding="utf-8")) for path in plan_paths
+        ]
+        assert final["outputPlanHashes"] == [
+            canonical_json_sha256(payload) for payload in plan_payloads
+        ]
+        assert [
+            receipt["format"] for receipt in final["transcriptExports"]
+        ] == ["json", "txt", "markdown", "html"]
+        for receipt in final["transcriptExports"]:
+            export_path = Path(receipt["path"])
+            assert export_path.is_file()
+            assert receipt["sha256"] == sha256_file(export_path)
+            assert receipt["size"] == export_path.stat().st_size
+        assert len(renderer.output_plans) == 1
+        assert renderer.output_plans[0].to_dict() == plan_payloads[0]
+        assert renderer.output_plans[0].deterministic_hash() == (
+            final["outputPlanHashes"][0]
+        )
+        checkpoint = json.loads(
+            (output / "checkpoint.v2.json").read_text(encoding="utf-8")
+        )
+        assert checkpoint["mediaProbeArtifactPath"] == str(probe_path.resolve())
+        assert checkpoint["outputPlanPaths"] == final["outputPlanPaths"]
+        assert checkpoint["outputPlanHashes"] == final["outputPlanHashes"]
+        assert checkpoint["transcriptExports"] == final["transcriptExports"]
+        publication = final["outputPublication"]
+        assert publication["status"] == "published"
+        manifest_path = output / "output-publication-manifest.v1.json"
+        assert publication["manifestPath"] == str(manifest_path.resolve())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_body = dict(manifest)
+        claimed_manifest_hash = manifest_body.pop("manifestSha256")
+        assert canonical_json_sha256(manifest_body) == claimed_manifest_hash
+        assert publication["manifestSha256"] == claimed_manifest_hash
+        assert publication["manifestFileSha256"] == sha256_file(manifest_path)
+        assert checkpoint["outputPublication"] == publication
+        artifact_events = [
+            event
+            for event in events
+            if event["type"] == "artifact.created"
+        ]
+        assert any(
+            event["payload"]["artifactType"] == "media-probe-v1"
+            and event["payload"]["sha256"] == sha256_file(probe_path)
+            for event in artifact_events
+        )
+        assert sum(
+            event["payload"]["artifactType"] == "output-execution-plan-v1"
+            for event in artifact_events
+        ) == 3
+        assert {
+            event["payload"]["artifactType"]
+            for event in artifact_events
+            if str(event["payload"]["artifactType"]).startswith(
+                "transcript-export-"
+            )
+        } == {
+            "transcript-export-json-v1",
+            "transcript-export-txt-v1",
+            "transcript-export-markdown-v1",
+            "transcript-export-html-v1",
+        }
+        rendering_artifact_indexes = [
+            index
+            for index, event in enumerate(events)
+            if event["type"] == "artifact.created"
+            and event["payload"]["artifactType"]
+            in {
+                "pdf",
+                "pdf-quality-report-v1",
+                "pdf-render-manifest-v1",
+            }
+        ]
+        publication_stage_index = next(
+            index
+            for index, event in enumerate(events)
+            if event["type"] == "stage.started"
+            and event["payload"]["stage"] == "output_publication"
+        )
+        publication_completed_index = next(
+            index
+            for index, event in enumerate(events)
+            if event["type"] == "output.publication.completed"
+        )
+        assert rendering_artifact_indexes
+        assert max(rendering_artifact_indexes) < publication_stage_index
+        assert publication_stage_index < publication_completed_index
+        service.shutdown()
+
+
+def test_recipe_job_fails_closed_without_trusted_media_probe() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+        )
+        started = service.start(
+            {
+                "jobId": "recipe-no-probe",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "outputCustomization": recipe_payload(),
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "failed"
+        assert final["error"]["code"] == "MEDIA_PROBE_REQUIRED"
+        assert not (root / "output" / "job" / "transcript-document.v2.json").exists()
+        service.shutdown()
+
+
+def test_recipe_job_rejects_untyped_media_probe_result() -> None:
+    class WrongProbe:
+        def probe(self, source):
+            del source
+            return {"accepted": True}
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            media_probe=WrongProbe(),
+        )
+        started = service.start(
+            {
+                "jobId": "recipe-wrong-probe",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "outputCustomization": recipe_payload(),
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "failed"
+        assert final["error"]["code"] == "MEDIA_PROBE_RESULT_INVALID"
         service.shutdown()
 
 
@@ -374,4 +816,272 @@ def test_business_cancellation_remains_job_cancelled() -> None:
         final = service.wait(started["jobId"], timeout=5)
         assert final["status"] == "cancelled"
         assert final["business"]["status"] == "cancelled"
+        service.shutdown()
+
+
+def test_rerender_reuses_verified_output_publication_without_republishing() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        calls: list[tuple[str, ...]] = []
+        events: list[dict[str, Any]] = []
+
+        def publisher(recipe, plans, document, **kwargs):
+            calls.append(tuple(plan.delivery_mode.value for plan in plans))
+            return _fake_output_publisher(
+                recipe,
+                plans,
+                document,
+                **kwargs,
+            )
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            event_sink=events.append,
+            media_probe=MediaProbe(runner=_RecordingProbeRunner([])),
+            output_publisher=publisher,
+        )
+        first = service.start(_publication_job_payload("publication-reuse"))
+        completed = service.wait(first["jobId"], timeout=5)
+        assert completed["status"] == "completed"
+        assert len(calls) == 1
+        first_publication = completed["outputPublication"]
+        first_receipts = {
+            receipt["path"]: (
+                receipt["sha256"],
+                receipt["sizeBytes"],
+            )
+            for receipt in first_publication["customerArtifacts"]
+        }
+
+        service.rerender("publication-reuse")
+        rerendered = service.wait("publication-reuse", timeout=5)
+
+        assert rerendered["status"] == "completed"
+        assert len(calls) == 1
+        assert rerendered["outputPublication"] == first_publication
+        assert {
+            receipt["path"]: (
+                receipt["sha256"],
+                receipt["sizeBytes"],
+            )
+            for receipt in rerendered["outputPublication"]["customerArtifacts"]
+        } == first_receipts
+        assert sum(
+            event["type"] == "output.publication.completed"
+            for event in events
+        ) == 1
+        assert sum(
+            event["type"] == "output.publication.reused"
+            for event in events
+        ) == 1
+        service.shutdown()
+
+
+def test_rerender_rejects_tampered_customer_artifact_without_republishing() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        calls = 0
+
+        def publisher(recipe, plans, document, **kwargs):
+            nonlocal calls
+            calls += 1
+            return _fake_output_publisher(
+                recipe,
+                plans,
+                document,
+                **kwargs,
+            )
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            media_probe=MediaProbe(runner=_RecordingProbeRunner([])),
+            output_publisher=publisher,
+        )
+        started = service.start(_publication_job_payload("publication-tamper"))
+        completed = service.wait(started["jobId"], timeout=5)
+        assert completed["status"] == "completed"
+        sidecar = next(
+            Path(receipt["path"])
+            for receipt in completed["outputPublication"]["customerArtifacts"]
+            if receipt["artifactType"] == "subtitle-sidecar"
+        )
+        sidecar.write_text("tampered\n", encoding="utf-8")
+
+        service.rerender("publication-tamper")
+        failed = service.wait("publication-tamper", timeout=5)
+
+        assert failed["status"] == "failed"
+        assert failed["error"]["code"] == "OUTPUT_PUBLICATION_ARTIFACT_CHANGED"
+        assert failed["outputPublication"]["status"] == "failed"
+        assert failed["outputPublication"]["customerArtifacts"] == []
+        assert calls == 1
+        service.shutdown()
+
+
+def test_rerender_rejects_byte_only_manifest_change_without_republishing() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        calls = 0
+
+        def publisher(recipe, plans, document, **kwargs):
+            nonlocal calls
+            calls += 1
+            return _fake_output_publisher(
+                recipe,
+                plans,
+                document,
+                **kwargs,
+            )
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            media_probe=MediaProbe(runner=_RecordingProbeRunner([])),
+            output_publisher=publisher,
+        )
+        started = service.start(_publication_job_payload("publication-byte-tamper"))
+        completed = service.wait(started["jobId"], timeout=5)
+        assert completed["status"] == "completed"
+        manifest_path = Path(completed["outputPublication"]["manifestPath"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(
+            json.dumps(manifest, indent=4, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        assert canonical_json_sha256(
+            {key: value for key, value in manifest.items() if key != "manifestSha256"}
+        ) == manifest["manifestSha256"]
+
+        service.rerender("publication-byte-tamper")
+        failed = service.wait("publication-byte-tamper", timeout=5)
+
+        assert failed["status"] == "failed"
+        assert failed["error"]["code"] == (
+            "OUTPUT_PUBLICATION_MANIFEST_FILE_CHANGED"
+        )
+        assert failed["outputPublication"]["status"] == "failed"
+        assert calls == 1
+        service.shutdown()
+
+
+def test_rerender_rejects_missing_recorded_manifest_file_hash() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        calls = 0
+
+        def publisher(recipe, plans, document, **kwargs):
+            nonlocal calls
+            calls += 1
+            return _fake_output_publisher(
+                recipe,
+                plans,
+                document,
+                **kwargs,
+            )
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            media_probe=MediaProbe(runner=_RecordingProbeRunner([])),
+            output_publisher=publisher,
+        )
+        started = service.start(_publication_job_payload("publication-hash-missing"))
+        completed = service.wait(started["jobId"], timeout=5)
+        assert completed["status"] == "completed"
+        record = service._get_job("publication-hash-missing")
+        with record.lock:
+            record.output_publication_manifest_file_sha256 = None
+
+        service.rerender("publication-hash-missing")
+        failed = service.wait("publication-hash-missing", timeout=5)
+
+        assert failed["status"] == "failed"
+        assert failed["error"]["code"] == (
+            "OUTPUT_PUBLICATION_MANIFEST_FILE_HASH_MISSING"
+        )
+        assert failed["outputPublication"]["status"] == "failed"
+        assert calls == 1
+        service.shutdown()
+
+
+def test_manifest_persistence_failure_rolls_back_publication_artifacts() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+
+        def fail_manifest_only(path: Path, value: Any):
+            if path.name == "output-publication-manifest.v1.json":
+                raise OSError("injected manifest persistence failure")
+            return persist_json_evidence(path, value)
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            media_probe=MediaProbe(runner=_RecordingProbeRunner([])),
+        )
+        with patch(
+            "backend.service.atomic_publish_json_evidence",
+            side_effect=fail_manifest_only,
+        ):
+            started = service.start(
+                _publication_job_payload("publication-manifest-failure")
+            )
+            failed = service.wait(started["jobId"], timeout=5)
+
+        output = root / "output" / "job"
+        assert failed["status"] == "failed"
+        assert failed["error"]["code"] == "OUTPUT_PUBLICATION_FAILED"
+        assert failed["outputPublication"]["status"] == "failed"
+        assert not (output / "output-publication-manifest.v1.json").exists()
+        assert not list(output.glob("published.*"))
+        for plan_path in failed["outputPlanPaths"]:
+            plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+            delivery_path = plan.get("deliveryOutputPath")
+            if delivery_path:
+                assert not Path(delivery_path).exists()
+        service.shutdown()
+
+
+def test_cancellation_after_publisher_return_rolls_back_before_manifest() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        holder: dict[str, WorkerService] = {}
+
+        def cancelling_publisher(recipe, plans, document, **kwargs):
+            manifest = _fake_output_publisher(
+                recipe,
+                plans,
+                document,
+                **kwargs,
+            )
+            holder["service"].cancel("publication-cancel")
+            return manifest
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            renderer=_PlannedRenderer(),
+            media_probe=MediaProbe(runner=_RecordingProbeRunner([])),
+            output_publisher=cancelling_publisher,
+        )
+        holder["service"] = service
+        started = service.start(_publication_job_payload("publication-cancel"))
+        cancelled = service.wait(started["jobId"], timeout=5)
+
+        output = root / "output" / "job"
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["outputPublication"]["status"] == "cancelled"
+        assert not (output / "output-publication-manifest.v1.json").exists()
+        assert not list(output.glob("published.*"))
+        for plan_path in cancelled["outputPlanPaths"]:
+            plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+            delivery_path = plan.get("deliveryOutputPath")
+            if delivery_path:
+                assert not Path(delivery_path).exists()
         service.shutdown()

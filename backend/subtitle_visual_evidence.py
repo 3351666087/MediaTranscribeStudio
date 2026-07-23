@@ -155,12 +155,17 @@ class SubtitleVisualEvidencePolicy:
         default_factory=EvidenceProcessLimits
     )
     maximum_frame_bytes: int = 128 * 1024 * 1024
+    maximum_overlay_bytes: int = 64 * 1024 * 1024
     hash_chunk_bytes: int = 4 * 1024 * 1024
     maximum_frames: int = 100_000
 
     def __post_init__(self) -> None:
         if not 1_024 <= self.maximum_frame_bytes <= 512 * 1024 * 1024:
             raise ValueError("maximum_frame_bytes must be 1 KiB..512 MiB")
+        if not 1_024 <= self.maximum_overlay_bytes <= 256 * 1024 * 1024:
+            raise ValueError(
+                "maximum_overlay_bytes must be 1 KiB..256 MiB"
+            )
         if not 4_096 <= self.hash_chunk_bytes <= 64 * 1024 * 1024:
             raise ValueError("hash_chunk_bytes must be 4 KiB..64 MiB")
         if not 1 <= self.maximum_frames <= 100_000:
@@ -408,13 +413,40 @@ class FrameAnalyzer(Protocol):
 @dataclass(frozen=True)
 class PillowAnalysisPolicy:
     difference_threshold: int = 24
+    strong_difference_threshold: int = 48
+    compression_noise_percentile: float = 0.98
+    compression_noise_margin: int = 8
+    strong_difference_margin: int = 12
+    minimum_component_pixels: int = 4
+    minimum_strong_ink_pixels: int = 4
     minimum_ink_pixels: int = 8
     search_margin_px: int = 8
     maximum_analyzed_pixels_per_cue: int = 20_000_000
+    maximum_candidate_pixels_per_cue: int = 2_000_000
 
     def __post_init__(self) -> None:
         if not 1 <= self.difference_threshold <= 255:
             raise ValueError("difference_threshold must be 1..255")
+        if not 1 <= self.strong_difference_threshold <= 255:
+            raise ValueError(
+                "strong_difference_threshold must be 1..255"
+            )
+        if not 0.5 <= self.compression_noise_percentile <= 1.0:
+            raise ValueError(
+                "compression_noise_percentile must be 0.5..1.0"
+            )
+        if not 0 <= self.compression_noise_margin <= 64:
+            raise ValueError("compression_noise_margin must be 0..64")
+        if not 0 <= self.strong_difference_margin <= 64:
+            raise ValueError("strong_difference_margin must be 0..64")
+        if not 1 <= self.minimum_component_pixels <= 1_000_000:
+            raise ValueError(
+                "minimum_component_pixels must be 1..1000000"
+            )
+        if not 1 <= self.minimum_strong_ink_pixels <= 1_000_000:
+            raise ValueError(
+                "minimum_strong_ink_pixels must be 1..1000000"
+            )
         if not 1 <= self.minimum_ink_pixels <= 1_000_000:
             raise ValueError("minimum_ink_pixels must be 1..1000000")
         if not 0 <= self.search_margin_px <= 128:
@@ -426,6 +458,15 @@ class PillowAnalysisPolicy:
         ):
             raise ValueError(
                 "maximum_analyzed_pixels_per_cue must be 1024..200000000"
+            )
+        if not (
+            1_024
+            <= self.maximum_candidate_pixels_per_cue
+            <= self.maximum_analyzed_pixels_per_cue
+        ):
+            raise ValueError(
+                "maximum_candidate_pixels_per_cue must be 1024.."
+                "maximum_analyzed_pixels_per_cue"
             )
 
 
@@ -444,15 +485,36 @@ class PillowFrameAnalyzer:
         )
         configuration = {
             "differenceThreshold": self.policy.difference_threshold,
+            "strongDifferenceThreshold": (
+                self.policy.strong_difference_threshold
+            ),
+            "compressionNoisePercentile": (
+                self.policy.compression_noise_percentile
+            ),
+            "compressionNoiseMargin": (
+                self.policy.compression_noise_margin
+            ),
+            "strongDifferenceMargin": (
+                self.policy.strong_difference_margin
+            ),
+            "minimumComponentPixels": (
+                self.policy.minimum_component_pixels
+            ),
+            "minimumStrongInkPixels": (
+                self.policy.minimum_strong_ink_pixels
+            ),
             "minimumInkPixels": self.policy.minimum_ink_pixels,
             "searchMarginPx": self.policy.search_margin_px,
             "maximumAnalyzedPixelsPerCue": (
                 self.policy.maximum_analyzed_pixels_per_cue
             ),
+            "maximumCandidatePixelsPerCue": (
+                self.policy.maximum_candidate_pixels_per_cue
+            ),
         }
         self._descriptor = ComponentDescriptor(
             name="pillow-source-render-delta",
-            version="1.0.0",
+            version="1.1.0",
             configuration_sha256=deterministic_sha256(configuration),
         )
 
@@ -567,32 +629,102 @@ class PillowFrameAnalyzer:
                 f"Cue {cue['cueId']!r} exceeds the bounded analysis area.",
             )
 
-        changed: list[tuple[int, int, tuple[int, int, int], tuple[int, int, int]]] = []
-        inside: list[tuple[int, int, tuple[int, int, int], tuple[int, int, int]]] = []
         bound_right = bounds["x"] + bounds["width"]
         bound_bottom = bounds["y"] + bounds["height"]
-        threshold = self.policy.difference_threshold
+
+        # Burn-in delivery normally re-encodes the video. Comparing that frame
+        # directly with a source decode produces low-amplitude codec noise even
+        # where no subtitle exists. Estimate a local noise floor from the
+        # bounded margin outside the declared subtitle rectangle instead of
+        # treating every changed pixel as subtitle ink.
+        noise_histogram = [0] * 256
+        noise_samples = 0
+        for y_coord in range(top, bottom):
+            for x_coord in range(left, right):
+                if (
+                    bounds["x"] <= x_coord < bound_right
+                    and bounds["y"] <= y_coord < bound_bottom
+                ):
+                    continue
+                rendered_rgb = rendered_pixels[x_coord, y_coord]
+                source_rgb = source_pixels[x_coord, y_coord]
+                difference = max(
+                    abs(rendered_rgb[channel] - source_rgb[channel])
+                    for channel in range(3)
+                )
+                noise_histogram[difference] += 1
+                noise_samples += 1
+
+        noise_floor = _histogram_percentile(
+            noise_histogram,
+            noise_samples,
+            self.policy.compression_noise_percentile,
+        )
+        threshold = min(
+            255,
+            max(
+                self.policy.difference_threshold,
+                noise_floor + self.policy.compression_noise_margin,
+            ),
+        )
+        strong_threshold = min(
+            255,
+            max(
+                self.policy.strong_difference_threshold,
+                threshold + self.policy.strong_difference_margin,
+            ),
+        )
+
+        candidates: dict[
+            tuple[int, int],
+            tuple[
+                int,
+                int,
+                tuple[int, int, int],
+                tuple[int, int, int],
+                int,
+            ],
+        ] = {}
         for y_coord in range(top, bottom):
             for x_coord in range(left, right):
                 rendered_rgb = rendered_pixels[x_coord, y_coord]
                 source_rgb = source_pixels[x_coord, y_coord]
-                if max(
+                difference = max(
                     abs(rendered_rgb[channel] - source_rgb[channel])
                     for channel in range(3)
-                ) < threshold:
+                )
+                if difference < threshold:
                     continue
                 observation = (
                     x_coord,
                     y_coord,
                     rendered_rgb,
                     source_rgb,
+                    difference,
                 )
-                changed.append(observation)
+                candidates[(x_coord, y_coord)] = observation
                 if (
-                    bounds["x"] <= x_coord < bound_right
-                    and bounds["y"] <= y_coord < bound_bottom
+                    len(candidates)
+                    > self.policy.maximum_candidate_pixels_per_cue
                 ):
-                    inside.append(observation)
+                    raise SubtitleVisualEvidenceError(
+                        SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                        f"Cue {cue['cueId']!r} exceeds the bounded "
+                        "candidate-pixel allowance.",
+                    )
+
+        changed = self._coherent_ink_components(
+            candidates,
+            strong_threshold=strong_threshold,
+        )
+        inside = [
+            item
+            for item in changed
+            if (
+                bounds["x"] <= item[0] < bound_right
+                and bounds["y"] <= item[1] < bound_bottom
+            )
+        ]
 
         if len(inside) < self.policy.minimum_ink_pixels:
             raise SubtitleVisualEvidenceError(
@@ -611,7 +743,7 @@ class PillowFrameAnalyzer:
         outside_count = len(changed) - len(inside)
         frame_edge_count = sum(
             1
-            for x_coord, y_coord, _rendered, _source in changed
+            for x_coord, y_coord, _rendered, _source, _difference in changed
             if (
                 x_coord == 0
                 or y_coord == 0
@@ -626,7 +758,7 @@ class PillowFrameAnalyzer:
                 or x_coord == bound_right - 1
                 or y_coord == bound_bottom - 1
             )
-            for x_coord, y_coord, _rendered, _source in inside
+            for x_coord, y_coord, _rendered, _source, _difference in inside
         )
 
         dark_maximum = _require_number(
@@ -649,6 +781,7 @@ class PillowFrameAnalyzer:
                     int,
                     tuple[int, int, int],
                     tuple[int, int, int],
+                    int,
                 ]
             ],
         ] = {"dark": [], "light": []}
@@ -694,6 +827,73 @@ class PillowFrameAnalyzer:
             overflow_detected=outside_count > 0 or touches_declared_edge,
             contrast_samples=tuple(samples),
         )
+
+    def _coherent_ink_components(
+        self,
+        candidates: Mapping[
+            tuple[int, int],
+            tuple[
+                int,
+                int,
+                tuple[int, int, int],
+                tuple[int, int, int],
+                int,
+            ],
+        ],
+        *,
+        strong_threshold: int,
+    ) -> list[
+        tuple[
+            int,
+            int,
+            tuple[int, int, int],
+            tuple[int, int, int],
+            int,
+        ]
+    ]:
+        """Discard isolated/block-noise deltas that cannot prove subtitle ink."""
+
+        remaining = dict(candidates)
+        accepted: list[
+            tuple[
+                int,
+                int,
+                tuple[int, int, int],
+                tuple[int, int, int],
+                int,
+            ]
+        ] = []
+        while remaining:
+            start, first = remaining.popitem()
+            stack = [start]
+            component = [first]
+            strong_count = int(first[4] >= strong_threshold)
+            while stack:
+                x_coord, y_coord = stack.pop()
+                for y_offset in (-1, 0, 1):
+                    for x_offset in (-1, 0, 1):
+                        if x_offset == 0 and y_offset == 0:
+                            continue
+                        neighbor = (
+                            x_coord + x_offset,
+                            y_coord + y_offset,
+                        )
+                        observation = remaining.pop(neighbor, None)
+                        if observation is None:
+                            continue
+                        component.append(observation)
+                        strong_count += int(
+                            observation[4] >= strong_threshold
+                        )
+                        stack.append(neighbor)
+            if (
+                len(component) >= self.policy.minimum_component_pixels
+                and strong_count
+                >= self.policy.minimum_strong_ink_pixels
+            ):
+                accepted.extend(component)
+        accepted.sort(key=lambda item: (item[1], item[0]))
+        return accepted
 
 
 @dataclass(frozen=True)
@@ -782,6 +982,18 @@ class SubtitleRenderEvidenceResult:
         return canonical_json(self.payload)
 
 
+@dataclass(frozen=True)
+class _RenderEvidenceContext:
+    """Path-private inputs that are bound into public evidence hashes."""
+
+    delivery_mode: str | None
+    overlay_path: Path | None
+    overlay_snapshot: Mapping[str, Any] | None
+    overlay_sha256: str | None
+    delivery_receipt_sha256: str | None
+    effective_render_configuration_sha256: str
+
+
 def default_subtitle_visual_evidence_sampling() -> dict[str, Any]:
     return {
         "strategy": SUBTITLE_RENDER_EVIDENCE_STRATEGY,
@@ -851,6 +1063,10 @@ class SubtitleVisualEvidenceCollector:
     def collect(
         self,
         request: Mapping[str, Any],
+        *,
+        canonical_ass_overlay_path: str | Path | None = None,
+        canonical_ass_overlay_sha256: str | None = None,
+        delivery_receipt: Mapping[str, Any] | Any | None = None,
     ) -> SubtitleRenderEvidenceResult:
         normalized = _parse_request(request)
         source_path = _canonical_media_path(
@@ -869,9 +1085,22 @@ class SubtitleVisualEvidenceCollector:
 
         source_before = self._snapshot(source_path)
         rendered_before = self._snapshot(rendered_path)
+        render_context = self._prepare_render_context(
+            normalized=normalized,
+            source_path=source_path,
+            rendered_path=rendered_path,
+            source_snapshot=source_before,
+            rendered_snapshot=rendered_before,
+            canonical_ass_overlay_path=canonical_ass_overlay_path,
+            canonical_ass_overlay_sha256=canonical_ass_overlay_sha256,
+            delivery_receipt=delivery_receipt,
+        )
         request_binding = copy.deepcopy(normalized)
         request_binding["sourceMediaPath"] = str(source_path)
         request_binding["renderedMediaPath"] = str(rendered_path)
+        request_binding["renderArtifact"][
+            "renderConfigurationSha256"
+        ] = render_context.effective_render_configuration_sha256
         request_binding["injectedTools"] = {
             "ffmpegPath": str(self.ffmpeg_path),
             "ffprobePath": str(self.ffprobe_path),
@@ -882,10 +1111,22 @@ class SubtitleVisualEvidenceCollector:
                 self.font_evidence_provider.descriptor.to_dict()
             ),
         }
+        request_binding["externalEvidenceBindings"] = {
+            "deliveryMode": render_context.delivery_mode,
+            "canonicalAssOverlaySha256": render_context.overlay_sha256,
+            "deliveryReceiptSha256": (
+                render_context.delivery_receipt_sha256
+            ),
+            "privatePathsIncluded": False,
+        }
         request_sha256 = deterministic_sha256(request_binding)
 
         temporary_root = self._make_same_directory_temp(rendered_path)
         try:
+            staged_ass_overlay = self._stage_ass_overlay(
+                render_context,
+                temporary_root=temporary_root,
+            )
             tools = {
                 "ffmpeg": self._tool_evidence(
                     self.ffmpeg_path, temporary_root
@@ -922,6 +1163,8 @@ class SubtitleVisualEvidenceCollector:
                 cues=normalized["cues"],
                 contrast_policy=normalized["policy"]["contrast"],
                 temporary_root=temporary_root,
+                staged_ass_overlay=staged_ass_overlay,
+                render_context=render_context,
             )
             selection_core = {
                 "strategy": normalized["sampling"]["strategy"],
@@ -945,9 +1188,9 @@ class SubtitleVisualEvidenceCollector:
                     "rendererVersion": normalized["renderArtifact"][
                         "rendererVersion"
                     ],
-                    "renderConfigurationSha256": normalized[
-                        "renderArtifact"
-                    ]["renderConfigurationSha256"],
+                    "renderConfigurationSha256": (
+                        render_context.effective_render_configuration_sha256
+                    ),
                 },
                 "policy": copy.deepcopy(normalized["policy"]),
                 "sampling": {
@@ -980,6 +1223,7 @@ class SubtitleVisualEvidenceCollector:
                     SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED,
                     "Source or rendered media changed during evidence collection.",
                 )
+            self._require_overlay_unchanged(render_context)
 
             payload: dict[str, Any] = {
                 "kind": SUBTITLE_RENDER_EVIDENCE_RESULT_KIND,
@@ -993,9 +1237,9 @@ class SubtitleVisualEvidenceCollector:
                     "rendererVersion": normalized["renderArtifact"][
                         "rendererVersion"
                     ],
-                    "renderConfigurationSha256": normalized[
-                        "renderArtifact"
-                    ]["renderConfigurationSha256"],
+                    "renderConfigurationSha256": (
+                        render_context.effective_render_configuration_sha256
+                    ),
                 },
                 "tools": tools,
                 "components": {
@@ -1028,6 +1272,182 @@ class SubtitleVisualEvidenceCollector:
                         "Representative-frame temporary directory could not be removed.",
                         detail=cleanup_error,
                     )
+
+    def _prepare_render_context(
+        self,
+        *,
+        normalized: Mapping[str, Any],
+        source_path: Path,
+        rendered_path: Path,
+        source_snapshot: Mapping[str, Any],
+        rendered_snapshot: Mapping[str, Any],
+        canonical_ass_overlay_path: str | Path | None,
+        canonical_ass_overlay_sha256: str | None,
+        delivery_receipt: Mapping[str, Any] | Any | None,
+    ) -> _RenderEvidenceContext:
+        has_overlay_path = canonical_ass_overlay_path is not None
+        has_overlay_hash = canonical_ass_overlay_sha256 is not None
+        if has_overlay_path != has_overlay_hash:
+            _invalid(
+                "canonical ASS overlay path and SHA-256 must be supplied "
+                "together"
+            )
+
+        receipt_payload: dict[str, Any] | None = None
+        delivery_mode: str | None = None
+        receipt_sha256: str | None = None
+        if delivery_receipt is not None:
+            receipt_payload = _canonical_delivery_receipt(delivery_receipt)
+            delivery_mode = _validate_delivery_receipt(
+                receipt_payload,
+                source_snapshot=source_snapshot,
+                rendered_snapshot=rendered_snapshot,
+            )
+            receipt_sha256 = deterministic_sha256(receipt_payload)
+
+        if has_overlay_path and receipt_payload is None:
+            _invalid(
+                "soft-mux overlay evidence requires a delivery receipt"
+            )
+        if delivery_mode == "soft-mux" and not has_overlay_path:
+            _invalid(
+                "soft-mux visual evidence requires the canonical private "
+                "ASS overlay"
+            )
+        if has_overlay_path and delivery_mode != "soft-mux":
+            _invalid(
+                "canonical ASS overlay evidence is only valid for soft-mux "
+                "delivery"
+            )
+        if delivery_mode not in {None, "soft-mux", "burn-in"}:
+            _invalid(
+                "visual evidence only supports soft-mux or burn-in delivery"
+            )
+
+        overlay_path: Path | None = None
+        overlay_snapshot: Mapping[str, Any] | None = None
+        overlay_sha256: str | None = None
+        if has_overlay_path:
+            assert canonical_ass_overlay_path is not None
+            assert canonical_ass_overlay_sha256 is not None
+            overlay_sha256 = _require_sha256(
+                canonical_ass_overlay_sha256,
+                "canonical_ass_overlay_sha256",
+            )
+            overlay_path = _canonical_private_ass_path(
+                canonical_ass_overlay_path,
+                maximum_bytes=self.policy.maximum_overlay_bytes,
+            )
+            if (
+                os.path.samefile(overlay_path, source_path)
+                or os.path.samefile(overlay_path, rendered_path)
+            ):
+                raise SubtitleVisualEvidenceError(
+                    SubtitleVisualEvidenceErrorCode.PATH_ALIAS,
+                    "The canonical ASS overlay must not alias media input.",
+                )
+            overlay_snapshot = self._snapshot(overlay_path)
+            if overlay_snapshot["sha256"] != overlay_sha256:
+                _invalid(
+                    "canonical_ass_overlay_sha256 does not match the "
+                    "private ASS artifact"
+                )
+            _validate_ass_payload(
+                overlay_path,
+                maximum_bytes=self.policy.maximum_overlay_bytes,
+            )
+
+        declared_configuration_sha256 = normalized["renderArtifact"][
+            "renderConfigurationSha256"
+        ]
+        if delivery_mode is None:
+            effective_configuration_sha256 = declared_configuration_sha256
+        else:
+            effective_configuration_sha256 = deterministic_sha256(
+                {
+                    "schemaVersion": "1.0.0",
+                    "declaredRenderConfigurationSha256": (
+                        declared_configuration_sha256
+                    ),
+                    "deliveryMode": delivery_mode,
+                    "canonicalAssOverlaySha256": overlay_sha256,
+                    "deliveryReceiptSha256": receipt_sha256,
+                    "representativeFrameRendering": (
+                        "ffmpeg-libass-single-png-absolute-pts-v1"
+                        if delivery_mode == "soft-mux"
+                        else "burn-in-rendered-media-delta-v1"
+                    ),
+                    "fullMediaPreviewRendered": False,
+                    "frameAnalyzer": self.analyzer.descriptor.to_dict(),
+                    "fontEvidenceProvider": (
+                        self.font_evidence_provider.descriptor.to_dict()
+                    ),
+                }
+            )
+        return _RenderEvidenceContext(
+            delivery_mode=delivery_mode,
+            overlay_path=overlay_path,
+            overlay_snapshot=overlay_snapshot,
+            overlay_sha256=overlay_sha256,
+            delivery_receipt_sha256=receipt_sha256,
+            effective_render_configuration_sha256=(
+                effective_configuration_sha256
+            ),
+        )
+
+    def _stage_ass_overlay(
+        self,
+        context: _RenderEvidenceContext,
+        *,
+        temporary_root: Path,
+    ) -> Path | None:
+        if context.overlay_path is None:
+            return None
+        destination = temporary_root / "canonical-overlay.ass"
+        if destination.exists():
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "Temporary canonical ASS overlay unexpectedly exists.",
+            )
+        try:
+            with context.overlay_path.open("rb") as source_handle:
+                with destination.open("xb") as destination_handle:
+                    shutil.copyfileobj(
+                        source_handle,
+                        destination_handle,
+                        length=self.policy.hash_chunk_bytes,
+                    )
+        except OSError as exc:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The private ASS overlay could not be staged for "
+                "representative-frame rendering.",
+                detail=str(exc),
+            ) from exc
+        staged_sha256 = _hash_bounded_file(
+            destination,
+            maximum=self.policy.maximum_overlay_bytes,
+            chunk_bytes=self.policy.hash_chunk_bytes,
+        )
+        if staged_sha256 != context.overlay_sha256:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED,
+                "The canonical ASS overlay changed while it was staged.",
+            )
+        return destination
+
+    def _require_overlay_unchanged(
+        self,
+        context: _RenderEvidenceContext,
+    ) -> None:
+        if context.overlay_path is None or context.overlay_snapshot is None:
+            return
+        if self._snapshot(context.overlay_path) != context.overlay_snapshot:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED,
+                "The canonical ASS overlay changed during evidence "
+                "collection.",
+            )
 
     def _snapshot(self, path: Path) -> dict[str, Any]:
         stat = path.stat()
@@ -1347,6 +1767,8 @@ class SubtitleVisualEvidenceCollector:
         cues: Sequence[Mapping[str, Any]],
         contrast_policy: Mapping[str, Any],
         temporary_root: Path,
+        staged_ass_overlay: Path | None,
+        render_context: _RenderEvidenceContext,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         by_timestamp: dict[int, str] = {}
         for candidate in candidates:
@@ -1368,6 +1790,7 @@ class SubtitleVisualEvidenceCollector:
                 timestamp_ms,
                 rendered_frame,
                 temporary_root,
+                ass_overlay_path=staged_ass_overlay,
             )
             self._extract_frame(
                 source_path,
@@ -1416,6 +1839,7 @@ class SubtitleVisualEvidenceCollector:
                 source_image_sha256=source_image_sha256,
                 video=video,
                 bindings=bindings,
+                render_context=render_context,
             )
             frame_payloads.append(
                 {
@@ -1463,12 +1887,38 @@ class SubtitleVisualEvidenceCollector:
         timestamp_ms: int,
         output_path: Path,
         temporary_root: Path,
+        *,
+        ass_overlay_path: Path | None = None,
     ) -> None:
         if output_path.exists():
             raise SubtitleVisualEvidenceError(
                 SubtitleVisualEvidenceErrorCode.INVALID_PATH,
                 "Temporary frame output unexpectedly exists.",
             )
+        if ass_overlay_path is not None:
+            self._extract_ass_overlay_frame(
+                media_path=media_path,
+                timestamp_ms=timestamp_ms,
+                output_path=output_path,
+                temporary_root=temporary_root,
+                ass_overlay_path=ass_overlay_path,
+            )
+            return
+        self._extract_plain_frame(
+            media_path=media_path,
+            timestamp_ms=timestamp_ms,
+            output_path=output_path,
+            temporary_root=temporary_root,
+        )
+
+    def _extract_plain_frame(
+        self,
+        *,
+        media_path: Path,
+        timestamp_ms: int,
+        output_path: Path,
+        temporary_root: Path,
+    ) -> None:
         command = (
             str(self.ffmpeg_path),
             "-nostdin",
@@ -1510,6 +1960,82 @@ class SubtitleVisualEvidenceCollector:
                 "Representative frame exceeds the configured byte limit.",
             )
 
+    def _extract_ass_overlay_frame(
+        self,
+        *,
+        media_path: Path,
+        timestamp_ms: int,
+        output_path: Path,
+        temporary_root: Path,
+        ass_overlay_path: Path,
+    ) -> None:
+        if ass_overlay_path.parent != temporary_root:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The staged ASS overlay escaped the evidence workspace.",
+            )
+        if ass_overlay_path.name != "canonical-overlay.ass":
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The staged ASS overlay name is not canonical.",
+            )
+        base_frame = output_path.with_name(
+            f"{output_path.stem}-unsubtitled.png"
+        )
+        self._extract_plain_frame(
+            media_path=media_path,
+            timestamp_ms=timestamp_ms,
+            output_path=base_frame,
+            temporary_root=temporary_root,
+        )
+        filter_value = (
+            f"setpts=PTS+{_seconds_text(timestamp_ms)}/TB,"
+            "ass=filename=canonical-overlay.ass"
+        )
+        command = (
+            str(self.ffmpeg_path),
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(base_frame),
+            "-map",
+            "0:v:0",
+            "-vf",
+            filter_value,
+            "-frames:v",
+            "1",
+            "-an",
+            "-sn",
+            "-dn",
+            "-c:v",
+            "png",
+            "-f",
+            "image2",
+            str(output_path),
+        )
+        result = self._run(command, temporary_root)
+        if result.returncode != 0:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.FRAME_EXTRACTION_FAILED,
+                "FFmpeg/libass could not render the canonical ASS overlay "
+                f"at {timestamp_ms} ms.",
+                detail=_bounded_detail(result.stderr),
+            )
+        if not output_path.is_file() or output_path.stat().st_size < 1:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.FRAME_EXTRACTION_FAILED,
+                "FFmpeg/libass did not create a non-empty representative "
+                "overlay frame.",
+            )
+        if output_path.stat().st_size > self.policy.maximum_frame_bytes:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.FRAME_OUTPUT_LIMIT,
+                "Representative overlay frame exceeds the configured byte "
+                "limit.",
+            )
+
     def _normalize_frame_observation(
         self,
         *,
@@ -1523,6 +2049,7 @@ class SubtitleVisualEvidenceCollector:
         source_image_sha256: str,
         video: Mapping[str, Any],
         bindings: list[dict[str, Any]],
+        render_context: _RenderEvidenceContext,
     ) -> list[dict[str, Any]]:
         if (
             observation.width_px != video["widthPx"]
@@ -1676,6 +2203,15 @@ class SubtitleVisualEvidenceCollector:
                 "inkBounds": ink_bounds,
                 "fontEvidence": font_evidence,
                 "contrastSamples": contrast_samples,
+                "renderConfigurationSha256": (
+                    render_context.effective_render_configuration_sha256
+                ),
+                "canonicalAssOverlaySha256": (
+                    render_context.overlay_sha256
+                ),
+                "deliveryReceiptSha256": (
+                    render_context.delivery_receipt_sha256
+                ),
             }
             bindings.append(
                 {
@@ -2264,6 +2800,196 @@ def _canonical_evidence_file(value: str | Path, *, label: str) -> Path:
     return _canonical_media_path(str(value), label=label)
 
 
+def _canonical_private_ass_path(
+    value: str | Path,
+    *,
+    maximum_bytes: int,
+) -> Path:
+    raw = str(value)
+    if (
+        not raw
+        or len(raw) > 32_768
+        or "\x00" in raw
+        or _URL_SCHEME.match(raw)
+    ):
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay must be an explicit local path.",
+        )
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay path must be absolute.",
+        )
+    try:
+        if candidate.is_symlink():
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The canonical ASS overlay must not be a symbolic link.",
+            )
+        resolved = candidate.resolve(strict=True)
+        stat = resolved.stat()
+    except SubtitleVisualEvidenceError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INPUT_MISSING,
+            "The canonical ASS overlay is unavailable.",
+            detail=str(exc),
+        ) from exc
+    if not resolved.is_file() or resolved.suffix.lower() != ".ass":
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical subtitle overlay must be a regular .ass file.",
+        )
+    if not 1 <= stat.st_size <= maximum_bytes:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay is empty or exceeds its byte limit.",
+        )
+    return resolved
+
+
+def _validate_ass_payload(path: Path, *, maximum_bytes: int) -> None:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(maximum_bytes + 1)
+    except OSError as exc:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay could not be read.",
+            detail=str(exc),
+        ) from exc
+    if not payload or len(payload) > maximum_bytes:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay is empty or exceeds its byte limit.",
+        )
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_REQUEST,
+            "The canonical ASS overlay must be strict UTF-8.",
+            detail=str(exc),
+        ) from exc
+    casefolded = text.casefold()
+    if (
+        "[script info]" not in casefolded
+        or "[events]" not in casefolded
+        or not any(
+            line.lstrip().casefold().startswith("dialogue:")
+            for line in text.splitlines()
+        )
+    ):
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_REQUEST,
+            "The canonical ASS overlay lacks required Script Info, Events, "
+            "or Dialogue evidence.",
+        )
+
+
+def _canonical_delivery_receipt(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        payload: Any = value
+    else:
+        to_dict = getattr(value, "to_dict", None)
+        if not callable(to_dict):
+            _invalid(
+                "delivery_receipt must be an object or expose to_dict()"
+            )
+        try:
+            payload = to_dict()
+        except Exception as exc:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_REQUEST,
+                "delivery_receipt.to_dict() failed.",
+                detail=str(exc),
+            ) from exc
+    canonical = _canonical_mapping(payload, "delivery_receipt")
+    if len(canonical_json(canonical).encode("utf-8")) > 2 * 1024 * 1024:
+        _invalid("delivery_receipt exceeds the 2 MiB evidence limit")
+    return canonical
+
+
+def _validate_delivery_receipt(
+    receipt: Mapping[str, Any],
+    *,
+    source_snapshot: Mapping[str, Any],
+    rendered_snapshot: Mapping[str, Any],
+) -> str:
+    mode = _require_enum(
+        receipt.get("mode"),
+        "delivery_receipt.mode",
+        frozenset({"soft-mux", "burn-in"}),
+    )
+    output = _require_mapping(
+        receipt.get("outputEvidence"),
+        "delivery_receipt.outputEvidence",
+    )
+    output_sha256 = _require_sha256(
+        output.get("sha256"),
+        "delivery_receipt.outputEvidence.sha256",
+    )
+    output_size = _require_integer(
+        output.get("sizeBytes"),
+        "delivery_receipt.outputEvidence.sizeBytes",
+        minimum=1,
+        maximum=sys.maxsize,
+    )
+    if (
+        output_sha256 != rendered_snapshot["sha256"]
+        or output_size != rendered_snapshot["sizeBytes"]
+    ):
+        _invalid(
+            "delivery_receipt output evidence does not bind the rendered "
+            "media artifact"
+        )
+
+    integrity = _require_mapping(
+        receipt.get("sourceIntegrity"),
+        "delivery_receipt.sourceIntegrity",
+    )
+    if integrity.get("unchanged") is not True:
+        _invalid("delivery_receipt must prove source integrity")
+    before = _require_mapping(
+        integrity.get("before"),
+        "delivery_receipt.sourceIntegrity.before",
+    )
+    after = _require_mapping(
+        integrity.get("after"),
+        "delivery_receipt.sourceIntegrity.after",
+    )
+    for label, item in (("before", before), ("after", after)):
+        sha256 = _require_sha256(
+            item.get("sha256"),
+            f"delivery_receipt.sourceIntegrity.{label}.sha256",
+        )
+        size = _require_integer(
+            item.get("sizeBytes"),
+            f"delivery_receipt.sourceIntegrity.{label}.sizeBytes",
+            minimum=1,
+            maximum=sys.maxsize,
+        )
+        if (
+            sha256 != source_snapshot["sha256"]
+            or size != source_snapshot["sizeBytes"]
+        ):
+            _invalid(
+                "delivery_receipt source evidence does not bind the source "
+                "media artifact"
+            )
+    qa = _require_mapping(receipt.get("qa"), "delivery_receipt.qa")
+    if qa.get("passed") is not True or qa.get("outputNonEmpty") is not True:
+        _invalid("delivery_receipt must contain passing delivery QA")
+    if mode == "soft-mux" and qa.get("subtitleStreamVerified") is not True:
+        _invalid(
+            "soft-mux delivery_receipt must verify its subtitle stream"
+        )
+    return mode
+
+
 def _hash_file(path: Path, *, chunk_bytes: int) -> str:
     digest = hashlib.sha256()
     try:
@@ -2367,6 +3093,22 @@ def _fractional_timestamp(
 
 def _seconds_text(timestamp_ms: int) -> str:
     return f"{timestamp_ms // 1000}.{timestamp_ms % 1000:03d}"
+
+
+def _histogram_percentile(
+    histogram: Sequence[int],
+    sample_count: int,
+    percentile: float,
+) -> int:
+    if sample_count <= 0:
+        return 0
+    rank = max(1, int(sample_count * percentile + 0.999999999))
+    cumulative = 0
+    for value, count in enumerate(histogram):
+        cumulative += count
+        if cumulative >= rank:
+            return value
+    return len(histogram) - 1
 
 
 def _relative_luminance_tuple(color: tuple[int, int, int]) -> float:

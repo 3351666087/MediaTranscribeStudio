@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 from backend.subtitles import (
     CuePolicy,
     SourceProtectionError,
+    SubtitleCue,
     SubtitleFormat,
     SubtitleOutputMode,
     SubtitleStyle,
@@ -16,6 +17,7 @@ from backend.subtitles import (
     arrange_cues,
     build_subtitle_output_plan,
     export_subtitles,
+    resolve_speaker_colors,
     style_for_theme,
 )
 
@@ -142,6 +144,151 @@ def test_srt_vtt_and_ass_have_expected_syntax_and_timestamps() -> None:
     assert "[V4+ Styles]" in ass
     assert "[Events]" in ass
     assert "Dialogue: 0,0:00:01.23,0:00:03.23" in ass
+
+
+def test_ass_speaker_override_controls_real_style_and_dialogue() -> None:
+    result = arrange_cues(
+        [
+            {
+                "startMs": 0,
+                "endMs": 1800,
+                "text": "Host line",
+                "speaker": "Host",
+                "speakerId": "speaker-host",
+            },
+            {
+                "startMs": 2000,
+                "endMs": 3800,
+                "text": "Guest line",
+                "speaker": "Guest",
+                "speakerId": "speaker-guest",
+            },
+        ]
+    )
+
+    ass = export_subtitles(
+        result,
+        SubtitleFormat.ASS,
+        theme=SubtitleTheme.YOUTUBE_CLEAN,
+        speaker_color_mode="automatic",
+        speaker_color_seed="launch-seed",
+        speaker_color_overrides={"speaker-host": "#12AB34"},
+        speaker_color_algorithm="oklch-hash-v1",
+    )
+
+    assert (
+        "Style: MTS-Speaker-0002,Noto Sans CJK SC,58,&H0034AB12,"
+        in ass
+    )
+    assert (
+        "Dialogue: 0,0:00:00.00,0:00:01.80,"
+        "MTS-Speaker-0002,Host,0,0,0,,Host line"
+    ) in ass
+    assert '"color":"#12AB34"' in ass
+    assert '"source":"override"' in ass
+    assert '"speakerId":"speaker-host"' in ass
+
+
+def test_seeded_palette_is_order_independent_unique_and_auditable_at_large_n() -> None:
+    cues = tuple(
+        SubtitleCue(
+            number=index + 1,
+            start_ms=index * 1000,
+            end_ms=index * 1000 + 900,
+            text=f"Line {index}",
+            source_text=f"Line {index}",
+            source_segment_index=index,
+            speaker=f"Speaker {index}",
+            speaker_id=f"speaker-{index:04d}",
+        )
+        for index in range(512)
+    )
+
+    first = resolve_speaker_colors(
+        cues,
+        mode="accessible",
+        seed="large-n-seed",
+        algorithm="accessible-oklch-hash-v1",
+    )
+    repeated = resolve_speaker_colors(
+        tuple(reversed(cues)),
+        mode="accessible",
+        seed="large-n-seed",
+        algorithm="accessible-oklch-hash-v1",
+    )
+    changed_seed = resolve_speaker_colors(
+        cues,
+        mode="accessible",
+        seed="different-seed",
+        algorithm="accessible-oklch-hash-v1",
+    )
+
+    assert first == repeated
+    assert len(first) == 512
+    assert len({assignment.color for assignment in first}) == 512
+    assert all(
+        assignment.palette_index is not None
+        and assignment.source == "palette"
+        for assignment in first
+    )
+    assert [item.color for item in first] != [
+        item.color for item in changed_seed
+    ]
+
+    ass = export_subtitles(
+        cues,
+        SubtitleFormat.ASS,
+        speaker_color_mode="accessible",
+        speaker_color_seed="large-n-seed",
+        speaker_color_algorithm="accessible-oklch-hash-v1",
+        speaker_color_assignments=first,
+    )
+    assert "; MTS-SpeakerColor-Count: 512" in ass
+    assert ass.count("; MTS-SpeakerColor-Assignment: ") == 512
+    assert ass.count("Style: MTS-Speaker-") == 512
+    assert ass.count("Dialogue: ") == 512
+
+
+def test_monochrome_ass_has_no_color_declarations_or_distinct_styles() -> None:
+    result = arrange_cues(
+        [
+            {
+                "startMs": 0,
+                "endMs": 1800,
+                "text": "One",
+                "speaker": "Alice",
+                "speakerId": "speaker-1",
+            },
+            {
+                "startMs": 2000,
+                "endMs": 3800,
+                "text": "Two",
+                "speaker": "Bob",
+                "speakerId": "speaker-2",
+            },
+        ]
+    )
+
+    assert resolve_speaker_colors(
+        result.cues,
+        mode="monochrome",
+        seed="ignored",
+        overrides={"speaker-1": "#FF0000"},
+        algorithm="monochrome-v1",
+    ) == ()
+    ass = export_subtitles(
+        result,
+        SubtitleFormat.ASS,
+        speaker_color_mode="monochrome",
+        speaker_color_seed="ignored",
+        speaker_color_overrides={"speaker-1": "#FF0000"},
+        speaker_color_algorithm="monochrome-v1",
+    )
+
+    assert "MTS-SpeakerColor" not in ass
+    assert "Style: MTS-Speaker-" not in ass
+    assert ass.count(",Default,") == 2
+    assert "&H000000FF" not in ass
 
 
 def test_all_named_themes_resolve_and_custom_requires_style() -> None:

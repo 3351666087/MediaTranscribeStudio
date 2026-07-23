@@ -8,10 +8,6 @@ import {
 } from "@tauri-apps/api/path";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isTauriRuntime } from "./desktop-backend";
-import {
-  KNOWN_MEDIA_EXTENSIONS,
-  inspectMediaExtension,
-} from "./media-capabilities";
 
 export { SUPPORTED_MEDIA_EXTENSIONS } from "./media-capabilities";
 
@@ -189,28 +185,17 @@ export async function resolveMediaSelection(
     fail("absolutePath", "The normalized source is not a safe absolute local path.");
   }
 
-  const extensionInspection = inspectMediaExtension(
-    await pathOperations.extname(sourcePath),
-  );
-  if (extensionInspection.status === "probe-required") {
-    const reason =
-      extensionInspection.reason === "missing-extension"
-        ? "has no filename extension"
-        : `uses the unknown extension ".${extensionInspection.extension}"`;
-    fail(
-      "unsupportedExtension",
-      `This file ${reason}. Content probing is required before it can be accepted safely. Known media extensions include: ${KNOWN_MEDIA_EXTENSIONS.join(", ")}.`,
-    );
-  }
-  const extension = extensionInspection.extension;
-
   const sourceParent = await pathOperations.normalize(
     await pathOperations.dirname(sourcePath),
   );
   const sourceName = await pathOperations.basename(sourcePath);
-  const suffixLength = extension.length + 1;
+  const rawExtension = await pathOperations.extname(sourcePath);
+  const suffixLength = rawExtension.length;
   const rawStem =
-    sourceName.toLocaleLowerCase("en-US").endsWith(`.${extension}`) &&
+    suffixLength > 0 &&
+    sourceName.toLocaleLowerCase("en-US").endsWith(
+      rawExtension.toLocaleLowerCase("en-US"),
+    ) &&
     sourceName.length > suffixLength
       ? sourceName.slice(0, -suffixLength)
       : sourceName;

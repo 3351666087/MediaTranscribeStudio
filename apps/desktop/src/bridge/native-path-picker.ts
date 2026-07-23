@@ -3,7 +3,6 @@ import {
   type OpenDialogOptions,
 } from "@tauri-apps/plugin-dialog";
 import { isTauriRuntime } from "./desktop-backend";
-import { createMediaPickerFilters } from "./media-capabilities";
 
 type OpenDialog = (
   options: OpenDialogOptions,
@@ -56,10 +55,6 @@ export async function selectNativeMediaFiles(
     title: "Select media files",
     multiple: true,
     directory: false,
-    filters: createMediaPickerFilters().map(({ name, extensions }) => ({
-      name,
-      extensions: [...extensions],
-    })),
   });
   return parseMediaPickerResult(result);
 }

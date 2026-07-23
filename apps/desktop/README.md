@@ -39,11 +39,12 @@ npm run tauri dev
   Frontend code does not construct or execute shell commands.
 - No Rust command was added for media drag-and-drop or output-path generation.
   The TypeScript bridge uses Tauri window events and Tauri path helpers.
-- The TypeScript boundary validates the single-file rule, supported media
-  extensions, absolute local path shape, traversal/control-character rejection,
-  lexical containment, and source/output inequality. Canonical existence,
-  file-versus-directory, permissions, final symlink resolution, and filesystem
-  containment remain at the existing backend boundary.
+- The TypeScript boundary validates bounded multi-file intake, absolute local
+  path shape, traversal/control-character rejection, lexical containment, and
+  source/output inequality. It deliberately does not treat filename extensions
+  as a media-security boundary. Canonical existence, regular-file identity,
+  permissions, final symlink resolution, content probing, decodability, and
+  filesystem containment remain at the trusted native/backend boundary.
 - `src/contracts/studio.ts` contains the versioned UI contracts.
 - `src/assets/day.jpg` and `src/assets/night.jpg` are packaged light/dark
   full-viewport backgrounds. `src/assets/scene.webp` and `src/assets/scene.png`
@@ -90,24 +91,26 @@ The production adapter subscribes to:
 getCurrentWindow().onDragDropEvent(...)
 ```
 
-It accepts exactly one local media path with one of these extensions:
+It accepts a bounded batch of absolute local file paths. The native Windows
+picker intentionally has no extension filter, and drag-and-drop also admits
+uncommon, misleading, and extensionless filenames. Filename extensions are
+only UI hints; trusted FFprobe/FFmpeg content evidence decides whether each
+source is usable media before processing.
 
-```text
-mov mp4 m4v mkv webm wav mp3 m4a flac aac ogg
-```
-
-A valid drop opens the task creator and fills both paths. The editable default
-output directory is a safe sibling derived from the source:
+A valid intake opens the task creator and fills both paths for every queue row.
+The editable default output directory is a safe sibling derived from each
+source:
 
 ```text
 D:\Media\meeting.mov
 → D:\Media\meeting-MediaTranscribeStudio
 ```
 
-Relative, traversal-bearing, control-character, overlong, UNC/network/device,
-unsupported, and multiple-file drops fail closed. Browser tests use only a
-controlled adapter that emits the same typed events; production behavior does
-not depend on browser UI or browser filesystem APIs.
+Relative, traversal-bearing, control-character, overlong, and
+UNC/network/device paths fail closed. Empty and oversized batches also fail
+closed. Browser tests use only a controlled adapter that emits the same typed
+events; production behavior does not depend on browser UI or browser filesystem
+APIs.
 
 ## Global UI and source-language policy
 

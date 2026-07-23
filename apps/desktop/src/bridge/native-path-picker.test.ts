@@ -1,5 +1,4 @@
 import type { OpenDialogOptions } from "@tauri-apps/plugin-dialog";
-import { createMediaPickerFilters } from "./media-capabilities";
 import {
   selectNativeMediaFiles,
   selectNativeOutputDirectory,
@@ -18,7 +17,7 @@ describe("native path picker bridge", () => {
     expect(openDialog).not.toHaveBeenCalled();
   });
 
-  it("opens the native media picker with multi-select and supported filters", async () => {
+  it("opens the native media picker with multi-select and no extension gate", async () => {
     const openDialog = vi
       .fn<
         (
@@ -40,22 +39,11 @@ describe("native path picker bridge", () => {
       "D:\\Media\\second.wav",
     ]);
 
-    const expectedFilters = createMediaPickerFilters().map(
-      ({ name, extensions }) => ({
-        name,
-        extensions: [...extensions],
-      }),
-    );
-
     expect(openDialog).toHaveBeenCalledWith({
       title: "Select media files",
       multiple: true,
       directory: false,
-      filters: expectedFilters,
     });
-    expect(expectedFilters[0].extensions.length).toBeGreaterThan(100);
-    expect(expectedFilters[0].extensions).toContain("m4a");
-    expect(expectedFilters[0].extensions).toContain("m2ts");
   });
 
   it("opens the native Windows folder picker for one editable output path", async () => {

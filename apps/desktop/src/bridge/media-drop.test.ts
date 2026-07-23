@@ -89,15 +89,22 @@ describe("native media-drop path policy", () => {
     expect(createSafeMediaStem("***")).toBe("media");
   });
 
-  it("rejects unknown, extensionless, relative, network, traversal, and control paths", async () => {
-    await expectCode(
-      resolveMediaSelection("D:\\Media\\meeting.exe", windowsPathOperations),
-      "unsupportedExtension",
-    );
-    await expectCode(
+  it("admits unknown and extensionless names for trusted content probing", async () => {
+    await expect(
+      resolveMediaSelection("D:\\Media\\meeting.uncommon", windowsPathOperations),
+    ).resolves.toEqual({
+      sourcePath: "D:\\Media\\meeting.uncommon",
+      outputDirectory: "D:\\Media\\meeting-MediaTranscribeStudio",
+    });
+    await expect(
       resolveMediaSelection("D:\\Media\\meeting", windowsPathOperations),
-      "unsupportedExtension",
-    );
+    ).resolves.toEqual({
+      sourcePath: "D:\\Media\\meeting",
+      outputDirectory: "D:\\Media\\meeting-MediaTranscribeStudio",
+    });
+  });
+
+  it("still rejects relative, network, traversal, and control paths", async () => {
     await expectCode(
       resolveMediaSelection("Media\\meeting.mov", windowsPathOperations),
       "absolutePath",
@@ -304,7 +311,7 @@ describe("native media-drop path policy", () => {
     ]);
   });
 
-  it("keeps known formats when unknown and extensionless siblings fail", async () => {
+  it("keeps known, unknown, and extensionless names for the backend probe", async () => {
     const adapter = new ControlledMediaDropAdapter(async (path) =>
       await resolveMediaSelection(path, windowsPathOperations),
     );
@@ -319,27 +326,9 @@ describe("native media-drop path policy", () => {
     const result = await resolveMediaDropBatch(adapter, paths);
 
     expect(result.selections.map(({ sourcePath }) => sourcePath)).toEqual([
-      paths[0],
-      paths[1],
-      paths[4],
+      ...paths,
     ]);
-    expect(result.failures).toEqual([
-      expect.objectContaining({
-        index: 2,
-        path: paths[2],
-        code: "unsupportedExtension",
-      }),
-      expect.objectContaining({
-        index: 3,
-        path: paths[3],
-        code: "unsupportedExtension",
-      }),
-    ]);
-    expect(
-      result.failures.every(({ message }) =>
-        /probing is required/iu.test(message),
-      ),
-    ).toBe(true);
+    expect(result.failures).toEqual([]);
   });
 
   it("converts unexpected resolver rejection into an item failure", async () => {

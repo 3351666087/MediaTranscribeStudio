@@ -1473,6 +1473,281 @@ class ProductionRunnerTests(unittest.TestCase):
         cache_material = verifier.cache_material(candidate, segments)
         self.assertEqual(len(cache_material["references"]), 2)
 
+    def test_eres2netv2_serializes_shared_pipeline_inference(self) -> None:
+        class ConcurrentTrackingPipeline:
+            def __init__(self) -> None:
+                self.active = 0
+                self.maximum_active = 0
+                self.lock = threading.Lock()
+
+            def __call__(self, audio, output_emb):
+                self.assert_output_emb(output_emb)
+                with self.lock:
+                    self.active += 1
+                    self.maximum_active = max(
+                        self.maximum_active,
+                        self.active,
+                    )
+                time.sleep(0.03)
+                with self.lock:
+                    self.active -= 1
+                return {"embs": [[1.0, 0.0] for _ in audio]}
+
+            @staticmethod
+            def assert_output_emb(output_emb) -> None:
+                if output_emb is not True:
+                    raise AssertionError("output_emb=True is required")
+
+        pipeline = ConcurrentTrackingPipeline()
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="cpu",
+            pipeline_factory=lambda **_kwargs: pipeline,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(
+                executor.map(
+                    lambda _index: verifier._embeddings([[0.1, 0.2]]),
+                    range(2),
+                )
+            )
+
+        self.assertEqual(pipeline.maximum_active, 1)
+        self.assertEqual(results, [[(1.0, 0.0)], [(1.0, 0.0)]])
+
+    def test_eres2netv2_release_resources_is_idempotent_and_reloads(
+        self,
+    ) -> None:
+        instances = []
+
+        class Pipeline:
+            def __call__(self, audio, output_emb):
+                return {"embs": [[1.0, 0.0] for _ in audio]}
+
+        def factory(**_kwargs):
+            pipeline = Pipeline()
+            instances.append(pipeline)
+            return pipeline
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="cpu",
+            pipeline_factory=factory,
+        )
+        verifier._embeddings([[0.1]])
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+        ) as release_memory:
+            verifier.release_resources()
+            verifier.release_resources()
+
+        self.assertIsNone(verifier._pipeline_instance)
+        self.assertEqual(release_memory.call_count, 2)
+
+        verifier._embeddings([[0.2]])
+        self.assertEqual(len(instances), 2)
+        self.assertIs(verifier._pipeline_instance, instances[-1])
+
+    def test_eres2netv2_release_holds_locks_until_finalize_and_flush(
+        self,
+    ) -> None:
+        finalize_started = threading.Event()
+        allow_finalize = threading.Event()
+        second_load_started = threading.Event()
+        events: list[str] = []
+        factory_calls = 0
+
+        class Pipeline:
+            def __init__(self, generation: int) -> None:
+                self.generation = generation
+
+            def __call__(self, audio, output_emb):
+                return {"embs": [[1.0, 0.0] for _ in audio]}
+
+            def __del__(self) -> None:
+                if self.generation != 1:
+                    return
+                events.append("finalize-start")
+                finalize_started.set()
+                allow_finalize.wait(timeout=2.0)
+                events.append("finalize-end")
+
+        def factory(**_kwargs):
+            nonlocal factory_calls
+            factory_calls += 1
+            if factory_calls == 2:
+                second_load_started.set()
+                events.append("load-2")
+            return Pipeline(factory_calls)
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="cpu",
+            pipeline_factory=factory,
+        )
+        verifier._embeddings([[0.1]])
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+            side_effect=lambda: events.append("flush"),
+        ):
+            release_thread = threading.Thread(
+                target=verifier.release_resources,
+            )
+            release_thread.start()
+            self.assertTrue(finalize_started.wait(timeout=1.0))
+
+            inference_thread = threading.Thread(
+                target=lambda: verifier._embeddings([[0.2]]),
+            )
+            inference_thread.start()
+            self.assertFalse(second_load_started.wait(timeout=0.1))
+
+            allow_finalize.set()
+            release_thread.join(timeout=2.0)
+            inference_thread.join(timeout=2.0)
+
+        self.assertFalse(release_thread.is_alive())
+        self.assertFalse(inference_thread.is_alive())
+        self.assertEqual(
+            events[:4],
+            ["finalize-start", "finalize-end", "flush", "load-2"],
+        )
+
+    def test_eres2netv2_model_load_oom_is_retryable_and_path_free(
+        self,
+    ) -> None:
+        class OutOfMemoryError(RuntimeError):
+            pass
+
+        private_path = str(self.eres_model)
+
+        def factory(**_kwargs):
+            raise OutOfMemoryError(
+                f"{private_path}: CUDA out of memory"
+            )
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="gpu",
+            pipeline_factory=factory,
+        )
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+        ) as release_memory:
+            with self.assertRaises(WorkerError) as captured:
+                verifier._embeddings([[0.1]])
+
+        error = captured.exception
+        self.assertEqual(
+            error.code,
+            "ERES2NETV2_ACCELERATOR_MEMORY_EXHAUSTED",
+        )
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.details["phase"], "model-load")
+        self.assertEqual(error.details["clipCount"], 0)
+        self.assertFalse(error.details["modelQualityChanged"])
+        self.assertNotIn(private_path, json.dumps(error.as_payload()))
+        self.assertIsNone(verifier._pipeline_instance)
+        release_memory.assert_called_once_with()
+
+    def test_eres2netv2_cpu_memory_error_is_host_memory_failure(
+        self,
+    ) -> None:
+        class HostOomPipeline:
+            def __call__(self, audio, output_emb):
+                raise MemoryError("host allocation failed")
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="cpu",
+            pipeline_factory=lambda **_kwargs: HostOomPipeline(),
+        )
+
+        with self.assertRaises(WorkerError) as captured:
+            verifier._embeddings([[0.1]])
+
+        error = captured.exception
+        self.assertEqual(
+            error.code,
+            "ERES2NETV2_HOST_MEMORY_EXHAUSTED",
+        )
+        self.assertFalse(error.retryable)
+        self.assertEqual(error.details["requestedDevice"], "cpu")
+        self.assertNotIn("accelerator", str(error).casefold())
+        self.assertIsNone(verifier._pipeline_instance)
+
+    def test_eres2netv2_inference_oom_finalizes_before_allocator_flush(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class OutOfMemoryError(RuntimeError):
+            pass
+
+        class OomPipeline:
+            def __call__(self, audio, output_emb):
+                raise OutOfMemoryError("CUDA out of memory")
+
+            def __del__(self) -> None:
+                events.append("finalize")
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="gpu",
+            pipeline_factory=lambda **_kwargs: OomPipeline(),
+        )
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+            side_effect=lambda: events.append("flush"),
+        ):
+            with self.assertRaises(WorkerError):
+                verifier._embeddings([[0.1]])
+
+        self.assertEqual(events, ["finalize", "flush"])
+
+    def test_eres2netv2_inference_oom_unloads_shared_pipeline(
+        self,
+    ) -> None:
+        class OutOfMemoryError(RuntimeError):
+            pass
+
+        class OomPipeline:
+            def __call__(self, audio, output_emb):
+                raise OutOfMemoryError("CUDA out of memory")
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="gpu",
+            pipeline_factory=lambda **_kwargs: OomPipeline(),
+        )
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+        ) as release_memory:
+            with self.assertRaises(WorkerError) as captured:
+                verifier._embeddings([[0.1], [0.2]])
+
+        error = captured.exception
+        self.assertEqual(
+            error.code,
+            "ERES2NETV2_ACCELERATOR_MEMORY_EXHAUSTED",
+        )
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.details["phase"], "embedding-inference")
+        self.assertEqual(error.details["clipCount"], 2)
+        self.assertIsNone(verifier._pipeline_instance)
+        release_memory.assert_called_once_with()
+
     def test_eres2netv2_distinguishes_reference_and_margin_outcomes(self) -> None:
         def segment(
             segment_id: str,
@@ -1688,6 +1963,38 @@ class ProductionRunnerTests(unittest.TestCase):
             captured.exception.code,
             "PYANNOTE_RUNTIME_INCOMPATIBLE",
         )
+
+    def test_pyannote_release_resources_is_idempotent_and_reloads(
+        self,
+    ) -> None:
+        instances = []
+
+        def factory(**_kwargs):
+            pipeline = FakePyannotePipeline(
+                SimpleNamespace(speaker_diarization=FakeAnnotation([]))
+            )
+            instances.append(pipeline)
+            return pipeline
+
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            pipeline_factory=factory,
+        )
+        first = adapter._pipeline()
+
+        with mock.patch.object(
+            production_runners,
+            "_release_accelerator_memory",
+        ) as release_memory:
+            adapter.release_resources()
+            adapter.release_resources()
+
+        self.assertIsNone(adapter._pipeline_instance)
+        self.assertEqual(release_memory.call_count, 2)
+        second = adapter._pipeline()
+        self.assertIsNot(first, second)
+        self.assertEqual(len(instances), 2)
 
     def test_ffmpeg_funasr_preparation_persists_normalized_audio(self) -> None:
         ffmpeg = shutil.which("ffmpeg")

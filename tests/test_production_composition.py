@@ -21,6 +21,7 @@ from backend.production_config import (
     production_diagnostics,
     run_production_preflight,
 )
+from backend.speaker_pipeline import SpeakerPipeline
 
 
 class RecordingFactory:
@@ -106,6 +107,10 @@ class ProductionCompositionTests(unittest.TestCase):
             },
             "speaker": {
                 "maxAutoSpeakers": None,
+                "maxClusteringWindows": 12_345,
+                "maxClusteringWorkItems": 234_567,
+                "countStabilityRuns": 5,
+                "eigengapLandmarkLimit": 128,
                 "pyannoteMode": pyannote_mode,
                 "localLlmMode": "disabled",
             },
@@ -127,6 +132,10 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(config.paths.allowed_input_roots, (self.input_root,))
         self.assertEqual(config.models.qwen3_asr, self.root / "asr")
         self.assertIsNone(config.speaker.max_auto_speakers)
+        self.assertEqual(config.speaker.max_clustering_windows, 12_345)
+        self.assertEqual(config.speaker.max_clustering_work_items, 234_567)
+        self.assertEqual(config.speaker.count_stability_runs, 5)
+        self.assertEqual(config.speaker.eigengap_landmark_limit, 128)
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
         self.assertEqual(config.runtime.vad_device, "cpu")
         self.assertTrue(config.offline)
@@ -148,6 +157,29 @@ class ProductionCompositionTests(unittest.TestCase):
             ProductionConfigError, "models.pyannote is required"
         ):
             ProductionConfig.load(self.config_path)
+
+    def test_removed_pyannote_audit_mode_requires_explicit_migration(
+        self,
+    ) -> None:
+        for removed_value in ("audit", " audit "):
+            with self.subTest(removed_value=removed_value):
+                with self.assertRaises(ProductionConfigError) as captured:
+                    self.load(pyannote_mode=removed_value)
+
+                error = captured.exception
+                self.assertEqual(
+                    error.code,
+                    "PRODUCTION_CONFIG_MIGRATION_REQUIRED",
+                )
+                self.assertEqual(
+                    error.details["field"],
+                    "speaker.pyannoteMode",
+                )
+                self.assertEqual(error.details["removedValue"], "audit")
+                self.assertEqual(
+                    error.details["supportedValues"],
+                    ["disabled", "fallback"],
+                )
 
     def test_secondary_fraction_cannot_consume_the_full_corpus(self) -> None:
         value = self.mapping()
@@ -236,9 +268,74 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertIsNotNone(pipeline.kwargs["secondary_adapter"])
         self.assertIsNotNone(pipeline.kwargs["pyannote_adapter"])
         self.assertIsNone(pipeline.kwargs["config"].max_auto_speakers)
+        self.assertEqual(
+            pipeline.kwargs["config"].max_clustering_windows,
+            12_345,
+        )
+        self.assertEqual(
+            pipeline.kwargs["config"].max_clustering_work_items,
+            234_567,
+        )
+        self.assertEqual(
+            pipeline.kwargs["config"].count_stability_runs,
+            5,
+        )
+        self.assertEqual(
+            pipeline.kwargs["config"].eigengap_landmark_limit,
+            128,
+        )
         self.assertEqual(len(secondary.calls), 1)
         self.assertEqual(len(pyannote.calls), 1)
         self.assertEqual(preparation.calls[0][1]["device"], "cpu")
+
+    def test_real_config_builds_real_speaker_pipeline_config(self) -> None:
+        config = self.load(pyannote_mode="fallback")
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        composition = build_production_composition(
+            config,
+            preflight_report=report,
+            factories=ProductionFactories(
+                preparation=RecordingFactory(
+                    SimpleNamespace(adapter_id="prep")
+                ),
+                asr=RecordingFactory(SimpleNamespace(adapter_id="asr")),
+                embedding=RecordingFactory(
+                    SimpleNamespace(adapter_id="cam")
+                ),
+                secondary=RecordingFactory(
+                    SimpleNamespace(adapter_id="eres")
+                ),
+                pyannote=RecordingFactory(
+                    SimpleNamespace(
+                        adapter_id="pyannote",
+                        telemetry_enabled=False,
+                    )
+                ),
+                cache=RecordingFactory(SimpleNamespace()),
+                assembler=RecordingFactory(SimpleNamespace()),
+                java_client_from_jar=RecordingFactory(SimpleNamespace()),
+                renderer=RecordingFactory(
+                    SimpleNamespace(adapter_id="renderer")
+                ),
+                service=FakeService,
+            ),
+        )
+
+        pipeline = composition.service.kwargs["transcription_adapter"]
+        self.assertIsInstance(pipeline, SpeakerPipeline)
+        self.assertEqual(pipeline.config.pyannote_mode, "fallback")
+        self.assertEqual(pipeline.config.max_clustering_windows, 12_345)
+        self.assertEqual(
+            pipeline.config.max_clustering_work_items,
+            234_567,
+        )
+        self.assertEqual(pipeline.config.count_stability_runs, 5)
+        self.assertEqual(pipeline.config.eigengap_landmark_limit, 128)
+        self.assertIsNotNone(pipeline.pyannote_adapter)
 
     def test_explicit_vad_device_override_is_preserved(self) -> None:
         value = self.mapping()

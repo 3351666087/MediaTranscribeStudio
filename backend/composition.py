@@ -116,6 +116,8 @@ def build_production_composition(
         high_margin_threshold=config.speaker.high_margin_threshold,
         outlier_score_threshold=config.speaker.outlier_score_threshold,
         max_auto_speakers=config.speaker.max_auto_speakers,
+        max_clustering_windows=config.speaker.max_clustering_windows,
+        max_clustering_work_items=config.speaker.max_clustering_work_items,
         kmeans_iterations=config.speaker.kmeans_iterations,
         max_batch_size=config.speaker.max_batch_size,
         max_secondary_fraction=config.speaker.max_secondary_fraction,
@@ -125,6 +127,8 @@ def build_production_composition(
         auto_count_confidence_threshold=(
             config.speaker.auto_count_confidence_threshold
         ),
+        count_stability_runs=config.speaker.count_stability_runs,
+        eigengap_landmark_limit=config.speaker.eigengap_landmark_limit,
         pyannote_mode=config.speaker.pyannote_mode,
         local_llm_mode=config.speaker.local_llm_mode,
         local_llm_model=config.speaker.local_llm_model,

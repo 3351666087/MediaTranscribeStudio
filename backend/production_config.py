@@ -237,11 +237,15 @@ class ProductionSpeakerPolicy:
     high_margin_threshold: float = 0.35
     outlier_score_threshold: float = 0.30
     max_auto_speakers: int | None = None
+    max_clustering_windows: int = 100_000
+    max_clustering_work_items: int = 5_000_000
     kmeans_iterations: int = 30
     max_batch_size: int = 32
     max_secondary_fraction: float = 0.25
     max_count_uncertainty_candidates: int = 8
     auto_count_confidence_threshold: float = 0.75
+    count_stability_runs: int = 3
+    eigengap_landmark_limit: int = 256
     eres2net_decision_margin: float = 0.05
     pyannote_mode: str = "disabled"
     local_llm_mode: str = "disabled"
@@ -556,11 +560,15 @@ class ProductionConfig:
                 "highMarginThreshold",
                 "outlierScoreThreshold",
                 "maxAutoSpeakers",
+                "maxClusteringWindows",
+                "maxClusteringWorkItems",
                 "kmeansIterations",
                 "maxBatchSize",
                 "maxSecondaryFraction",
                 "maxCountUncertaintyCandidates",
                 "autoCountConfidenceThreshold",
+                "countStabilityRuns",
+                "eigengapLandmarkLimit",
                 "eres2netDecisionMargin",
                 "pyannoteMode",
                 "localLlmMode",
@@ -578,6 +586,24 @@ class ProductionConfig:
                 maximum=4096,
             )
         )
+        raw_pyannote_mode = _nonempty_text(
+            raw_speaker.get("pyannoteMode", "disabled"),
+            field="speaker.pyannoteMode",
+        )
+        if raw_pyannote_mode == "audit":
+            raise ProductionConfigError(
+                "speaker.pyannoteMode='audit' is no longer supported",
+                code="PRODUCTION_CONFIG_MIGRATION_REQUIRED",
+                details={
+                    "field": "speaker.pyannoteMode",
+                    "removedValue": "audit",
+                    "supportedValues": ["disabled", "fallback"],
+                    "migration": (
+                        "Use 'fallback' for unresolved-segment review or "
+                        "'disabled' to omit pyannote."
+                    ),
+                },
+            )
         speaker = ProductionSpeakerPolicy(
             normalization_profile=_nonempty_text(
                 raw_speaker.get(
@@ -610,6 +636,18 @@ class ProductionConfig:
                 maximum=1.0,
             ),
             max_auto_speakers=max_auto_speakers,
+            max_clustering_windows=_integer(
+                raw_speaker.get("maxClusteringWindows", 100_000),
+                field="speaker.maxClusteringWindows",
+                minimum=1,
+                maximum=10_000_000,
+            ),
+            max_clustering_work_items=_integer(
+                raw_speaker.get("maxClusteringWorkItems", 5_000_000),
+                field="speaker.maxClusteringWorkItems",
+                minimum=1,
+                maximum=1_000_000_000,
+            ),
             kmeans_iterations=_integer(
                 raw_speaker.get("kmeansIterations", 30),
                 field="speaker.kmeansIterations",
@@ -641,6 +679,18 @@ class ProductionConfig:
                 minimum=0.0,
                 maximum=1.0,
             ),
+            count_stability_runs=_integer(
+                raw_speaker.get("countStabilityRuns", 3),
+                field="speaker.countStabilityRuns",
+                minimum=1,
+                maximum=64,
+            ),
+            eigengap_landmark_limit=_integer(
+                raw_speaker.get("eigengapLandmarkLimit", 256),
+                field="speaker.eigengapLandmarkLimit",
+                minimum=2,
+                maximum=4096,
+            ),
             eres2net_decision_margin=_number(
                 raw_speaker.get("eres2netDecisionMargin", 0.05),
                 field="speaker.eres2netDecisionMargin",
@@ -648,9 +698,9 @@ class ProductionConfig:
                 maximum=1.0,
             ),
             pyannote_mode=_choice(
-                raw_speaker.get("pyannoteMode", "disabled"),
+                raw_pyannote_mode,
                 field="speaker.pyannoteMode",
-                choices={"disabled", "audit", "fallback"},
+                choices={"disabled", "fallback"},
             ),
             local_llm_mode=_choice(
                 raw_speaker.get("localLlmMode", "disabled"),
@@ -835,6 +885,14 @@ class ProductionConfig:
             "pyannoteMode": self.speaker.pyannote_mode,
             "maxWorkers": self.runtime.max_workers,
             "maxAutoSpeakers": self.speaker.max_auto_speakers,
+            "maxClusteringWindows": self.speaker.max_clustering_windows,
+            "maxClusteringWorkItems": (
+                self.speaker.max_clustering_work_items
+            ),
+            "countStabilityRuns": self.speaker.count_stability_runs,
+            "eigengapLandmarkLimit": (
+                self.speaker.eigengap_landmark_limit
+            ),
             "pdfTemplate": self.pdf.template_id,
             "paths": [
                 hashlib.sha256(str(path).encode("utf-8")).hexdigest()
@@ -1210,6 +1268,18 @@ def production_diagnostics(
             "modes": ["auto", "manual", "hybrid"],
             "fixedFivePersonLimit": False,
             "configuredAutoResourceLimit": config.speaker.max_auto_speakers,
+            "resourceBudgets": {
+                "maxClusteringWindows": (
+                    config.speaker.max_clustering_windows
+                ),
+                "maxClusteringWorkItems": (
+                    config.speaker.max_clustering_work_items
+                ),
+                "countStabilityRuns": config.speaker.count_stability_runs,
+                "eigengapLandmarkLimit": (
+                    config.speaker.eigengap_landmark_limit
+                ),
+            },
         },
         "localLlm": {
             "mode": config.speaker.local_llm_mode,

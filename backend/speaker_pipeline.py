@@ -72,7 +72,23 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
     }
 )
-_CLUSTER_SELECTION_METHOD = "dynamic-n-multimetric-stability-v5"
+_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v7"
+_STABILITY_MASK_ALGORITHM = "sha256-ranked-retained-mask-v1"
+_REQUIRED_STABILITY_COMPONENTS = frozenset(
+    {
+        "adjustedRand",
+        "pairwiseJaccard",
+        "coassociationAgreement",
+        "alignedAccuracy",
+        "coverage",
+    }
+)
+_SEARCH_TRUNCATION_REASONS = frozenset(
+    {
+        "resource-limit",
+        "adaptive-budget-unresolved-local-bracket",
+    }
+)
 _SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v4"
 _ASR_NON_LEXICAL_DISPOSITION = "rejected-non-lexical"
 
@@ -1097,6 +1113,10 @@ class _ClusterCandidateScore:
     correction_reasons: tuple[str, ...]
     prior_distance: int | None
     work_items: int
+    stability_components: Mapping[str, float] = field(default_factory=dict)
+    resample_objectives: tuple[float, ...] = ()
+    stability_requested_runs: int = 0
+    stability_effective_unique_runs: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1132,6 +1152,12 @@ class _ClusterCandidateScore:
             "correctionReasons": list(self.correction_reasons),
             "priorDistance": self.prior_distance,
             "workItems": self.work_items,
+            "stabilityComponents": dict(self.stability_components),
+            "resampleObjectives": list(self.resample_objectives),
+            "stabilityRequestedRuns": self.stability_requested_runs,
+            "stabilityEffectiveUniqueRuns": (
+                self.stability_effective_unique_runs
+            ),
         }
 
     @classmethod
@@ -1170,6 +1196,44 @@ class _ClusterCandidateScore:
         metric_votes = int(value.get("metricVotes", 0))
         if metric_votes < 0:
             raise ValueError("cluster candidate metric votes are invalid")
+        raw_stability_components = value.get("stabilityComponents", {})
+        if not isinstance(raw_stability_components, Mapping):
+            raise ValueError("cluster candidate stability components are invalid")
+        stability_components = {
+            str(key): _probability(
+                item,
+                f"cluster.candidate.stabilityComponents.{key}",
+            )
+            for key, item in raw_stability_components.items()
+        }
+        if set(stability_components) != _REQUIRED_STABILITY_COMPONENTS:
+            raise ValueError(
+                "cluster candidate stability components are incomplete"
+            )
+        raw_resample_objectives = value.get("resampleObjectives", ())
+        if not isinstance(raw_resample_objectives, Sequence) or isinstance(
+            raw_resample_objectives,
+            (str, bytes, bytearray),
+        ):
+            raise ValueError("cluster candidate resample objectives are invalid")
+        resample_objectives = tuple(
+            _finite_float(
+                item,
+                "cluster.candidate.resampleObjectives",
+            )
+            for item in raw_resample_objectives
+        )
+        stability_requested_runs = int(value.get("stabilityRequestedRuns"))
+        stability_effective_unique_runs = int(
+            value.get("stabilityEffectiveUniqueRuns")
+        )
+        if (
+            stability_requested_runs < 1
+            or stability_effective_unique_runs < 1
+            or stability_effective_unique_runs > stability_requested_runs
+            or len(resample_objectives) != stability_requested_runs
+        ):
+            raise ValueError("cluster candidate stability run audit is invalid")
         compactness = _probability(
             value.get("compactness"), "cluster.candidate.compactness"
         )
@@ -1310,6 +1374,10 @@ class _ClusterCandidateScore:
             correction_reasons=correction_reasons,
             prior_distance=prior_distance,
             work_items=work_items,
+            stability_components=stability_components,
+            resample_objectives=resample_objectives,
+            stability_requested_runs=stability_requested_runs,
+            stability_effective_unique_runs=stability_effective_unique_runs,
         )
 
 
@@ -1321,6 +1389,17 @@ class _KMeansFit:
     centroids: tuple[tuple[float, ...], ...]
     iterations: int
     work_items: int
+
+
+@dataclass(frozen=True)
+class _StabilityProfile:
+    stability: float
+    coverage: float
+    components: Mapping[str, float]
+    resample_compactness: tuple[float, ...]
+    resample_stability: tuple[float, ...]
+    requested_runs: int
+    effective_unique_runs: int
 
 
 @dataclass(frozen=True)
@@ -1353,8 +1432,34 @@ class _ClusterResult:
     under_split_detected: bool = False
     over_split_detected: bool = False
     low_confidence_fail_closed: bool = False
+    legal_min: int | None = None
+    legal_max: int | None = None
+    evaluated_counts: tuple[int, ...] = ()
+    planned_counts: tuple[int, ...] = ()
+    search_truncation_reason: str | None = None
+    resample_objective_winner_frequency: Mapping[int, float] = field(
+        default_factory=dict
+    )
+    resample_objective_winner_support: float = 0.0
+    requested_resample_runs: int = 0
+    effective_unique_resample_runs: int = 0
+    search_exhaustive: bool = False
+    decision_locally_bracketed: bool = False
+    adaptive_budget_limited: bool = False
+    resource_truncated: bool = False
+    resource_skipped_counts: tuple[int, ...] = ()
+    minimum_required_work_items: int = 0
+    resource_affordable_max_count: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        legal_min = self.candidate_min if self.legal_min is None else self.legal_min
+        legal_max = self.candidate_max if self.legal_max is None else self.legal_max
+        evaluated_counts = (
+            self.evaluated_counts
+            or tuple(candidate.count for candidate in self.count_candidates)
+            or (self.count,)
+        )
+        planned_counts = self.planned_counts or evaluated_counts
         return {
             "count": self.count,
             "confidence": self.confidence,
@@ -1372,10 +1477,45 @@ class _ClusterResult:
             "leaderCountWorkItems": self.leader_count_work_items,
             "totalWorkItems": self.total_work_items,
             "selectionMethod": self.selection_method,
+            "confidenceKind": "bounded-decision-score-uncalibrated-v1",
             "confidenceInterval": {
                 "min": self.candidate_min,
                 "max": self.candidate_max,
             },
+            "confidenceIntervalKind": (
+                "plausible-count-range-not-calibrated-credible-interval"
+            ),
+            "legalRange": {
+                "min": legal_min,
+                "max": legal_max,
+            },
+            "evaluatedCounts": list(evaluated_counts),
+            "evaluatedRange": {
+                "min": min(evaluated_counts),
+                "max": max(evaluated_counts),
+            },
+            "plannedCounts": list(planned_counts),
+            "searchTruncationReason": self.search_truncation_reason,
+            "resampleObjectiveWinnerFrequency": {
+                str(count): support
+                for count, support in sorted(
+                    self.resample_objective_winner_frequency.items()
+                )
+            },
+            "resampleObjectiveWinnerSupport": (
+                self.resample_objective_winner_support
+            ),
+            "requestedResampleRuns": self.requested_resample_runs,
+            "effectiveUniqueResampleRuns": (
+                self.effective_unique_resample_runs
+            ),
+            "searchExhaustive": self.search_exhaustive,
+            "decisionLocallyBracketed": self.decision_locally_bracketed,
+            "adaptiveBudgetLimited": self.adaptive_budget_limited,
+            "resourceTruncated": self.resource_truncated,
+            "resourceSkippedCounts": list(self.resource_skipped_counts),
+            "minimumRequiredWorkItems": self.minimum_required_work_items,
+            "resourceAffordableMaxCount": self.resource_affordable_max_count,
             "confidenceReasons": list(self.confidence_reasons),
             "correctionPath": list(self.correction_path),
             "underSplitDetected": self.under_split_detected,
@@ -1387,6 +1527,17 @@ class _ClusterResult:
     def from_mapping(cls, value: Any, *, expected_rows: int) -> "_ClusterResult":
         if not isinstance(value, Mapping):
             raise ValueError("cluster cache entry must be an object")
+        if value.get("selectionMethod") != _CLUSTER_SELECTION_METHOD:
+            raise ValueError("cluster cache selection method is incompatible")
+
+        def required_bool(field_name: str) -> bool:
+            parsed = value.get(field_name)
+            if not isinstance(parsed, bool):
+                raise ValueError(
+                    f"cluster cache {field_name} must be a boolean"
+                )
+            return parsed
+
         count = int(value.get("count"))
         assignments = tuple(int(item) for item in value.get("assignments", []))
         scores = tuple(
@@ -1409,18 +1560,20 @@ class _ClusterResult:
             or not candidate_min <= count <= candidate_max
         ):
             raise ValueError("cluster cache candidate range is invalid")
-        raw_candidates = value.get("countCandidates", [])
+        raw_candidates = value.get("countCandidates")
         if not isinstance(raw_candidates, Sequence) or isinstance(
             raw_candidates, (str, bytes, bytearray)
-        ):
+        ) or not raw_candidates:
             raise ValueError("cluster count candidates must be an array")
         count_candidates = tuple(
             _ClusterCandidateScore.from_mapping(item)
             for item in raw_candidates
         )
-        if count_candidates and count not in {
-            item.count for item in count_candidates
-        }:
+        candidate_counts = tuple(item.count for item in count_candidates)
+        if (
+            len(set(candidate_counts)) != len(candidate_counts)
+            or count not in candidate_counts
+        ):
             raise ValueError("selected count is absent from count candidates")
         leader_estimate_value = value.get("leaderEstimate")
         leader_estimate = (
@@ -1452,6 +1605,205 @@ class _ClusterResult:
             or isinstance(raw_correction_path, (str, bytes, bytearray))
         ):
             raise ValueError("cluster confidence audit is invalid")
+        raw_legal_range = value.get("legalRange")
+        if not isinstance(raw_legal_range, Mapping):
+            raise ValueError("cluster legal range is invalid")
+        legal_min = int(raw_legal_range.get("min"))
+        legal_max = int(raw_legal_range.get("max"))
+        if (
+            legal_min < 1
+            or legal_max < legal_min
+            or not legal_min <= count <= legal_max
+            or not legal_min <= candidate_min <= candidate_max <= legal_max
+        ):
+            raise ValueError("cluster legal range is invalid")
+        raw_evaluated_counts = value.get("evaluatedCounts")
+        if not isinstance(raw_evaluated_counts, Sequence) or isinstance(
+            raw_evaluated_counts,
+            (str, bytes, bytearray),
+        ):
+            raise ValueError("cluster evaluated counts are invalid")
+        evaluated_counts = tuple(int(item) for item in raw_evaluated_counts)
+        if (
+            not evaluated_counts
+            or len(set(evaluated_counts)) != len(evaluated_counts)
+            or any(item < legal_min or item > legal_max for item in evaluated_counts)
+            or count not in evaluated_counts
+            or set(evaluated_counts) != set(candidate_counts)
+        ):
+            raise ValueError("cluster evaluated counts are invalid")
+        raw_planned_counts = value.get("plannedCounts")
+        if not isinstance(raw_planned_counts, Sequence) or isinstance(
+            raw_planned_counts,
+            (str, bytes, bytearray),
+        ):
+            raise ValueError("cluster planned counts are invalid")
+        planned_counts = tuple(int(item) for item in raw_planned_counts)
+        if (
+            len(set(planned_counts)) != len(planned_counts)
+            or any(item < legal_min or item > legal_max for item in planned_counts)
+            or any(item not in planned_counts for item in evaluated_counts)
+        ):
+            raise ValueError("cluster planned counts are invalid")
+        raw_resample_frequency = value.get(
+            "resampleObjectiveWinnerFrequency"
+        )
+        if not isinstance(raw_resample_frequency, Mapping):
+            raise ValueError(
+                "cluster resample objective winner frequency is invalid"
+            )
+        resample_objective_winner_frequency = {
+            int(key): _probability(
+                item,
+                f"cluster.resampleObjectiveWinnerFrequency.{key}",
+            )
+            for key, item in raw_resample_frequency.items()
+        }
+        requested_resample_runs = int(value.get("requestedResampleRuns"))
+        effective_unique_resample_runs = int(
+            value.get("effectiveUniqueResampleRuns")
+        )
+        candidate_requested_runs = {
+            item.stability_requested_runs for item in count_candidates
+        }
+        candidate_effective_runs = {
+            item.stability_effective_unique_runs for item in count_candidates
+        }
+        if (
+            requested_resample_runs < 1
+            or effective_unique_resample_runs < 1
+            or effective_unique_resample_runs > requested_resample_runs
+            or candidate_requested_runs != {requested_resample_runs}
+            or effective_unique_resample_runs != min(candidate_effective_runs)
+            or any(
+                item not in evaluated_counts
+                for item in resample_objective_winner_frequency
+            )
+            or not resample_objective_winner_frequency
+            or not math.isclose(
+                sum(resample_objective_winner_frequency.values()),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError(
+                "cluster resample objective winner audit is invalid"
+            )
+        resample_objective_winner_support = _probability(
+            value.get("resampleObjectiveWinnerSupport"),
+            "cluster.resampleObjectiveWinnerSupport",
+        )
+        if not math.isclose(
+            resample_objective_winner_support,
+            resample_objective_winner_frequency.get(count, 0.0),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "cluster resample objective winner support is inconsistent"
+            )
+
+        search_exhaustive = required_bool("searchExhaustive")
+        decision_locally_bracketed = required_bool(
+            "decisionLocallyBracketed"
+        )
+        adaptive_budget_limited = required_bool("adaptiveBudgetLimited")
+        resource_truncated = required_bool("resourceTruncated")
+        count_search_truncated = required_bool("countSearchTruncated")
+        under_split_detected = required_bool("underSplitDetected")
+        over_split_detected = required_bool("overSplitDetected")
+        low_confidence_fail_closed = required_bool(
+            "lowConfidenceFailClosed"
+        )
+        expected_exhaustive = set(evaluated_counts) == set(
+            range(legal_min, legal_max + 1)
+        )
+        expected_local_bracket = (
+            (count == legal_min or count - 1 in evaluated_counts)
+            and (count == legal_max or count + 1 in evaluated_counts)
+        )
+        raw_resource_skipped_counts = value.get("resourceSkippedCounts")
+        if not isinstance(
+            raw_resource_skipped_counts,
+            Sequence,
+        ) or isinstance(raw_resource_skipped_counts, (str, bytes, bytearray)):
+            raise ValueError("cluster resource skipped counts are invalid")
+        resource_skipped_counts = tuple(
+            int(item) for item in raw_resource_skipped_counts
+        )
+        required_neighbor_counts = {
+            neighbor
+            for neighbor in (count - 1, count + 1)
+            if legal_min <= neighbor <= legal_max
+        }
+        expected_resource_truncated = bool(
+            required_neighbor_counts.intersection(resource_skipped_counts)
+        )
+        if (
+            len(set(resource_skipped_counts)) != len(resource_skipped_counts)
+            or any(
+                item < legal_min
+                or item > legal_max
+                or item in evaluated_counts
+                or item not in planned_counts
+                for item in resource_skipped_counts
+            )
+            or resource_truncated != expected_resource_truncated
+            or search_exhaustive != expected_exhaustive
+            or decision_locally_bracketed != expected_local_bracket
+            or count_search_truncated
+            != (resource_truncated or adaptive_budget_limited)
+            or (
+                search_exhaustive
+                and (adaptive_budget_limited or resource_truncated)
+            )
+        ):
+            raise ValueError("cluster search audit is inconsistent")
+        minimum_required_work_items = int(
+            value.get("minimumRequiredWorkItems")
+        )
+        affordable_value = value.get("resourceAffordableMaxCount")
+        resource_affordable_max_count = (
+            None if affordable_value is None else int(affordable_value)
+        )
+        if (
+            minimum_required_work_items < 0
+            or (
+                resource_affordable_max_count is not None
+                and not legal_min
+                <= resource_affordable_max_count
+                <= legal_max
+            )
+        ):
+            raise ValueError("cluster resource affordability audit is invalid")
+        search_truncation_reason_value = value.get("searchTruncationReason")
+        search_truncation_reason = (
+            None
+            if search_truncation_reason_value is None
+            else str(search_truncation_reason_value)
+        )
+        if (
+            (
+                count_search_truncated
+                and search_truncation_reason not in _SEARCH_TRUNCATION_REASONS
+            )
+            or (
+                not count_search_truncated
+                and search_truncation_reason is not None
+            )
+            or (
+                resource_truncated
+                and search_truncation_reason != "resource-limit"
+            )
+            or (
+                adaptive_budget_limited
+                and not resource_truncated
+                and search_truncation_reason
+                != "adaptive-budget-unresolved-local-bracket"
+            )
+        ):
+            raise ValueError("cluster search truncation reason is inconsistent")
         return cls(
             count=count,
             confidence=_probability(
@@ -1462,9 +1814,7 @@ class _ClusterResult:
             assignments=assignments,
             scores=scores,
             count_candidates=count_candidates,
-            count_search_truncated=bool(
-                value.get("countSearchTruncated", False)
-            ),
+            count_search_truncated=count_search_truncated,
             leader_estimate=leader_estimate,
             spectral_estimate=spectral_estimate,
             eigengap_method=str(
@@ -1472,25 +1822,34 @@ class _ClusterResult:
             ),
             leader_count_work_items=leader_count_work_items,
             total_work_items=total_work_items,
-            selection_method=str(
-                value.get(
-                    "selectionMethod",
-                    _CLUSTER_SELECTION_METHOD,
-                )
-            ),
+            selection_method=_CLUSTER_SELECTION_METHOD,
             confidence_reasons=tuple(
                 str(item) for item in raw_confidence_reasons
             ),
             correction_path=tuple(str(item) for item in raw_correction_path),
-            under_split_detected=bool(
-                value.get("underSplitDetected", False)
+            under_split_detected=under_split_detected,
+            over_split_detected=over_split_detected,
+            low_confidence_fail_closed=low_confidence_fail_closed,
+            legal_min=legal_min,
+            legal_max=legal_max,
+            evaluated_counts=evaluated_counts,
+            planned_counts=planned_counts,
+            search_truncation_reason=search_truncation_reason,
+            resample_objective_winner_frequency=(
+                resample_objective_winner_frequency
             ),
-            over_split_detected=bool(
-                value.get("overSplitDetected", False)
+            resample_objective_winner_support=(
+                resample_objective_winner_support
             ),
-            low_confidence_fail_closed=bool(
-                value.get("lowConfidenceFailClosed", False)
-            ),
+            requested_resample_runs=requested_resample_runs,
+            effective_unique_resample_runs=effective_unique_resample_runs,
+            search_exhaustive=search_exhaustive,
+            decision_locally_bracketed=decision_locally_bracketed,
+            adaptive_budget_limited=adaptive_budget_limited,
+            resource_truncated=resource_truncated,
+            resource_skipped_counts=resource_skipped_counts,
+            minimum_required_work_items=minimum_required_work_items,
+            resource_affordable_max_count=resource_affordable_max_count,
         )
 
 
@@ -1690,34 +2049,190 @@ def _candidate_count_order(
     spectral_estimate: int | None = None,
 ) -> tuple[int, ...]:
     limit = min(maximum_candidates, upper - lower + 1)
+    if limit < 1:
+        return ()
     anchors = [
         value
         for value in (leader_estimate, spectral_estimate, prior)
         if value is not None and lower <= value <= upper
     ]
-    complete: list[int] = list(dict.fromkeys(anchors))
-    offset = 1
-    while len(complete) < upper - lower + 1:
-        for anchor in tuple(complete[: max(1, len(anchors))]):
-            left = anchor - offset
-            right = anchor + offset
-            if left >= lower and left not in complete:
-                complete.append(left)
-            if right <= upper and right not in complete:
-                complete.append(right)
-        if len(complete) >= upper - lower + 1:
-            break
-        offset += 1
+    if upper == lower:
+        return (lower,)
+    if upper - lower + 1 <= limit:
+        complete = list(dict.fromkeys((*anchors, lower, upper)))
+        complete.extend(
+            count
+            for count in range(lower, upper + 1)
+            if count not in complete
+        )
+        return tuple(complete)
+    if limit == 1:
+        # A one-probe budget must preserve the primary acoustic estimate.
+        return (leader_estimate,)
+    if limit == 2:
+        # Two probes are too scarce to spend exclusively on legal boundaries:
+        # preserve the acoustic leader and use the second slot for an
+        # independent spectral/prior anchor or, failing that, a local neighbor.
+        second = next(
+            (
+                value
+                for value in (spectral_estimate, prior)
+                if value is not None
+                and lower <= value <= upper
+                and value != leader_estimate
+            ),
+            None,
+        )
+        if second is None:
+            local_neighbors = tuple(
+                value
+                for value in (leader_estimate - 1, leader_estimate + 1)
+                if lower <= value <= upper
+            )
+            second = (
+                local_neighbors[0]
+                if local_neighbors
+                else (lower if leader_estimate != lower else upper)
+            )
+        return (leader_estimate, second)
 
-    selected = complete[:limit]
-    if (
-        prior is not None
-        and lower <= prior <= upper
-        and prior not in selected
-        and limit > 1
-    ):
-        selected[-1] = prior
-    return tuple(dict.fromkeys(selected))
+    # Reserve roughly one third of the evaluation budget for adaptive
+    # refinement after the coarse pass.  Acoustic anchors, their local
+    # neighbours, and coarse quantiles come before legal boundaries.  A large
+    # legal upper bound is a constraint, not evidence that the most expensive K
+    # should be materialized before the acoustic neighbourhood is bracketed.
+    seed_limit = min(
+        limit,
+        max(3, math.ceil(limit * 2.0 / 3.0)),
+    )
+    span = upper - lower
+    quantiles = tuple(
+        lower + round(span * fraction)
+        for fraction in (0.5, 0.25, 0.75, 0.125, 0.875)
+    )
+    logarithmic: list[int] = []
+    offset = 1
+    while lower + offset < upper:
+        logarithmic.extend((lower + offset, upper - offset))
+        offset *= 2
+    anchor_neighbors = tuple(
+        neighbor
+        for anchor in anchors
+        for neighbor in (anchor - 1, anchor + 1)
+        if lower <= neighbor <= upper
+    )
+    scheduled = list(
+        dict.fromkeys(
+            (
+                *anchors,
+                *anchor_neighbors,
+                quantiles[0],
+                *quantiles,
+                *logarithmic,
+                lower,
+                upper,
+            )
+        )
+    )
+    return tuple(scheduled[:seed_limit])
+
+
+def _adaptive_refinement_order(
+    *,
+    lower: int,
+    upper: int,
+    candidates: Sequence[_ClusterCandidateScore],
+    attempted: set[int],
+) -> tuple[int, ...]:
+    if not candidates:
+        return ()
+    ordered = sorted(candidates, key=lambda item: item.count)
+    best = max(ordered, key=lambda item: (item.objective, -item.count))
+    best_index = ordered.index(best)
+    proposals: list[int] = []
+
+    adjacent_intervals: list[tuple[float, int, int, int]] = []
+    for neighbor_index in (best_index - 1, best_index + 1):
+        if not 0 <= neighbor_index < len(ordered):
+            continue
+        neighbor = ordered[neighbor_index]
+        direction = -1 if neighbor.count < best.count else 1
+        adjacent_intervals.append(
+            (
+                neighbor.objective,
+                abs(neighbor.count - best.count),
+                direction,
+                neighbor.count,
+            )
+        )
+
+    # First take one-count hill-climbing steps toward the adjacent interval
+    # whose evaluated endpoint has the stronger objective.  This lets a coarse
+    # probe that lands near a narrow optimum reach it within a small remaining
+    # budget instead of repeatedly bisecting the opposite, weaker side.
+    adjacent_intervals.sort(
+        key=lambda item: (-item[0], -item[1], -item[2])
+    )
+    proposals.extend(
+        best.count + direction
+        for _, _, direction, _ in adjacent_intervals
+    )
+
+    # Then bisect the same intervals.  Bisection remains the fast fallback for
+    # a distant missed optimum when neither immediate neighbour improves.
+    for _, _, _, neighbor_count in adjacent_intervals:
+        neighbor = next(
+            item for item in ordered if item.count == neighbor_count
+        )
+        midpoint = (best.count + neighbor.count) // 2
+        if midpoint in {best.count, neighbor.count}:
+            continue
+        proposals.append(midpoint)
+
+    if best_index == 0 and best.count > lower:
+        proposals.append((lower + best.count) // 2)
+    if best_index == len(ordered) - 1 and best.count < upper:
+        proposals.append((best.count + upper + 1) // 2)
+    proposals.extend((best.count - 1, best.count + 1))
+
+    # If the local intervals are exhausted, split the largest remaining
+    # unevaluated gaps.  Endpoint objective is a deterministic priority signal
+    # and gap width is the tie-breaker.
+    gap_proposals: list[tuple[float, int, int]] = []
+    objective_by_count = {
+        item.count: item.objective
+        for item in ordered
+    }
+    sorted_counts = sorted({lower, upper, *objective_by_count})
+    for left_count, right_count in zip(sorted_counts, sorted_counts[1:]):
+        if right_count - left_count <= 1:
+            continue
+        midpoint = (left_count + right_count) // 2
+        endpoint_score = max(
+            objective_by_count.get(left_count, -math.inf),
+            objective_by_count.get(right_count, -math.inf),
+        )
+        gap_proposals.append(
+            (
+                endpoint_score,
+                right_count - left_count,
+                midpoint,
+            )
+        )
+    proposals.extend(
+        midpoint
+        for _, _, midpoint in sorted(
+            gap_proposals,
+            key=lambda item: (-item[0], -item[1], item[2]),
+        )
+    )
+    return tuple(
+        dict.fromkeys(
+            count
+            for count in proposals
+            if lower <= count <= upper and count not in attempted
+        )
+    )
 
 
 def _candidate_work_items(
@@ -1727,18 +2242,42 @@ def _candidate_work_items(
     iterations: int,
     stability_runs: int = 3,
 ) -> int:
-    return (
-        sample_count * count * iterations
-        + sample_count * count
+    fit_work = sample_count * count * iterations
+    score_work = (
+        sample_count * count
         + count * (count - 1) // 2
         + min(sample_count, count) * count
-        + stability_runs * sample_count * count
-        + stability_runs * sample_count
+    )
+    # Each stability replicate performs a new spherical-k-means fit on a
+    # deterministic subsample, scores every full-set observation, aligns labels
+    # through a cubic assignment solver, and computes pairwise partition
+    # agreement.  This is a conservative upper bound used before any work is
+    # started, so the runtime never silently exceeds its configured budget.
+    replicate_work = stability_runs * (
+        sample_count * count * iterations
+        + sample_count * count
+        + count**3
+        + sample_count
+        + count * count
+    )
+    return (
+        fit_work
+        + score_work
+        + replicate_work
     )
 
 
 def _clamp_probability(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
+
+
+def _eigengap_work_items(
+    *,
+    sample_count: int,
+    landmark_limit: int,
+) -> int:
+    landmark_count = min(sample_count, landmark_limit)
+    return landmark_count * (landmark_count - 1) // 2
 
 
 def _graph_eigengap_profile(
@@ -1838,7 +2377,10 @@ def _graph_eigengap_profile(
             else "normalized-laplacian-landmark-connectivity-persistence-v1"
         ),
         landmark_count=landmark_count,
-        work_items=landmark_count * (landmark_count - 1) // 2,
+        work_items=_eigengap_work_items(
+            sample_count=sample_count,
+            landmark_limit=landmark_limit,
+        ),
     )
 
 
@@ -2010,6 +2552,339 @@ def _fit_spherical_kmeans(
     )
 
 
+def _maximum_weight_label_map(
+    reference_centroids: Sequence[tuple[float, ...]],
+    replicate_centroids: Sequence[tuple[float, ...]],
+) -> dict[int, int]:
+    """Align replicate labels to reference labels with deterministic Hungarian.
+
+    Cluster labels are arbitrary.  Comparing integer labels directly therefore
+    overstates instability whenever a resample merely permutes labels.  This
+    solver maximizes total centroid cosine similarity and returns
+    ``replicate_label -> reference_label``.
+    """
+
+    count = len(reference_centroids)
+    if count != len(replicate_centroids) or count < 1:
+        raise ValueError("centroid sets must have the same positive size")
+    maximum_weight = 1.0
+    costs = [
+        [
+            maximum_weight
+            - _dot(reference_centroids[row], replicate_centroids[column])
+            + (row * count + column) * 1e-12
+            for column in range(count)
+        ]
+        for row in range(count)
+    ]
+
+    # Standard O(K^3) Hungarian minimization, using one-based working arrays.
+    potentials_left = [0.0] * (count + 1)
+    potentials_right = [0.0] * (count + 1)
+    matched_left = [0] * (count + 1)
+    previous = [0] * (count + 1)
+    for left in range(1, count + 1):
+        matched_left[0] = left
+        column = 0
+        minimum = [math.inf] * (count + 1)
+        used = [False] * (count + 1)
+        while True:
+            used[column] = True
+            active_left = matched_left[column]
+            delta = math.inf
+            next_column = 0
+            for candidate_column in range(1, count + 1):
+                if used[candidate_column]:
+                    continue
+                reduced = (
+                    costs[active_left - 1][candidate_column - 1]
+                    - potentials_left[active_left]
+                    - potentials_right[candidate_column]
+                )
+                if reduced < minimum[candidate_column]:
+                    minimum[candidate_column] = reduced
+                    previous[candidate_column] = column
+                if (
+                    minimum[candidate_column] < delta
+                    or (
+                        abs(minimum[candidate_column] - delta) <= 1e-15
+                        and candidate_column < next_column
+                    )
+                ):
+                    delta = minimum[candidate_column]
+                    next_column = candidate_column
+            for candidate_column in range(count + 1):
+                if used[candidate_column]:
+                    potentials_left[matched_left[candidate_column]] += delta
+                    potentials_right[candidate_column] -= delta
+                else:
+                    minimum[candidate_column] -= delta
+            column = next_column
+            if matched_left[column] == 0:
+                break
+        while True:
+            prior_column = previous[column]
+            matched_left[column] = matched_left[prior_column]
+            column = prior_column
+            if column == 0:
+                break
+
+    reference_to_replicate = {
+        matched_left[column] - 1: column - 1
+        for column in range(1, count + 1)
+    }
+    return {
+        replicate: reference
+        for reference, replicate in reference_to_replicate.items()
+    }
+
+
+def _partition_agreement(
+    reference: Sequence[int],
+    replicate: Sequence[int],
+    *,
+    label_map: Mapping[int, int],
+) -> dict[str, float]:
+    if len(reference) != len(replicate) or not reference:
+        raise ValueError("partition vectors must have the same positive size")
+    contingency: dict[tuple[int, int], int] = {}
+    reference_sizes: dict[int, int] = {}
+    replicate_sizes: dict[int, int] = {}
+    aligned_matches = 0
+    for reference_label, replicate_label in zip(reference, replicate):
+        contingency[(reference_label, replicate_label)] = (
+            contingency.get((reference_label, replicate_label), 0) + 1
+        )
+        reference_sizes[reference_label] = (
+            reference_sizes.get(reference_label, 0) + 1
+        )
+        replicate_sizes[replicate_label] = (
+            replicate_sizes.get(replicate_label, 0) + 1
+        )
+        aligned_matches += label_map.get(replicate_label) == reference_label
+
+    def choose_two(value: int) -> int:
+        return value * (value - 1) // 2
+
+    same_both = sum(choose_two(value) for value in contingency.values())
+    same_reference = sum(
+        choose_two(value) for value in reference_sizes.values()
+    )
+    same_replicate = sum(
+        choose_two(value) for value in replicate_sizes.values()
+    )
+    total_pairs = choose_two(len(reference))
+    if total_pairs == 0:
+        adjusted_rand = 1.0
+        pairwise_jaccard = 1.0
+        coassociation = 1.0
+    else:
+        expected = same_reference * same_replicate / total_pairs
+        maximum = 0.5 * (same_reference + same_replicate)
+        denominator = maximum - expected
+        adjusted_rand = (
+            1.0
+            if abs(denominator) <= 1e-12
+            and same_both == same_reference == same_replicate
+            else (
+                0.0
+                if abs(denominator) <= 1e-12
+                else _clamp_probability((same_both - expected) / denominator)
+            )
+        )
+        union = same_reference + same_replicate - same_both
+        pairwise_jaccard = 1.0 if union == 0 else same_both / union
+        disagreements = (
+            (same_reference - same_both)
+            + (same_replicate - same_both)
+        )
+        coassociation = _clamp_probability(
+            1.0 - disagreements / total_pairs
+        )
+    aligned_accuracy = aligned_matches / len(reference)
+    return {
+        "adjustedRand": _clamp_probability(adjusted_rand),
+        "pairwiseJaccard": _clamp_probability(pairwise_jaccard),
+        "coassociationAgreement": _clamp_probability(coassociation),
+        "alignedAccuracy": _clamp_probability(aligned_accuracy),
+    }
+
+
+def _stability_retained_indices(
+    *,
+    windows: Sequence[SpeechWindow],
+    count: int,
+    locks: Mapping[int, int],
+    run_index: int,
+) -> tuple[int, ...]:
+    sample_count = len(windows)
+    if sample_count <= count:
+        return tuple(range(sample_count))
+    target = min(
+        sample_count,
+        max(count, math.ceil(sample_count * 0.80), len(locks)),
+    )
+    locked = set(locks)
+    ranked = sorted(
+        (
+            (
+                hashlib.sha256(
+                    json.dumps(
+                        {
+                            "algorithm": _STABILITY_MASK_ALGORITHM,
+                            "runIndex": run_index,
+                            "sampleCount": sample_count,
+                            "candidateCount": count,
+                            "windowId": window.window_id,
+                            "startMs": window.start_ms,
+                            "endMs": window.end_ms,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).digest(),
+                window.window_id,
+                window.start_ms,
+                window.end_ms,
+                index,
+            )
+            for index, window in enumerate(windows)
+            if index not in locked
+        )
+    )
+    retained = locked | {
+        item[-1] for item in ranked[: max(0, target - len(locked))]
+    }
+    return tuple(sorted(retained))
+
+
+def _recluster_stability_profile(
+    fit: _KMeansFit,
+    windows: Sequence[SpeechWindow],
+    *,
+    vectors: Sequence[tuple[float, ...]],
+    locks: Mapping[int, int],
+    stability_runs: int,
+    iterations: int,
+) -> _StabilityProfile:
+    component_rows: list[Mapping[str, float]] = []
+    coverage_rows: list[float] = []
+    compactness_rows: list[float] = []
+    stability_rows: list[float] = []
+    retained_masks: set[tuple[str, ...]] = set()
+    for run_index in range(stability_runs):
+        retained = _stability_retained_indices(
+            windows=windows,
+            count=fit.count,
+            locks=locks,
+            run_index=run_index,
+        )
+        retained_masks.add(
+            tuple(sorted(windows[index].window_id for index in retained))
+        )
+        index_map = {
+            original_index: subset_index
+            for subset_index, original_index in enumerate(retained)
+        }
+        subset_locks = {
+            index_map[index]: target
+            for index, target in locks.items()
+            if index in index_map
+        }
+        subset_vectors = [vectors[index] for index in retained]
+        subset_windows = [windows[index] for index in retained]
+        represented = len(
+            {
+                fit.assignments[index]
+                for index in retained
+            }
+        )
+        coverage_rows.append(represented / fit.count)
+        try:
+            replicate_fit = _fit_spherical_kmeans(
+                subset_vectors,
+                subset_windows,
+                count=fit.count,
+                locks=subset_locks,
+                iterations=iterations,
+                work_items=0,
+            )
+        except WorkerError:
+            component_rows.append(
+                {
+                    "adjustedRand": 0.0,
+                    "pairwiseJaccard": 0.0,
+                    "coassociationAgreement": 0.0,
+                    "alignedAccuracy": 0.0,
+                }
+            )
+            compactness_rows.append(0.0)
+            stability_rows.append(0.0)
+            continue
+
+        replicate_assignments: list[int] = []
+        replicate_compactness: list[float] = []
+        for index, vector in enumerate(vectors):
+            target = locks.get(index)
+            if target is None:
+                target = max(
+                    range(fit.count),
+                    key=lambda cluster_index: (
+                        _dot(vector, replicate_fit.centroids[cluster_index]),
+                        -cluster_index,
+                    ),
+                )
+            replicate_assignments.append(target)
+            replicate_compactness.append(
+                max(
+                    0.0,
+                    _dot(vector, replicate_fit.centroids[target]),
+                )
+            )
+        label_map = _maximum_weight_label_map(
+            fit.centroids,
+            replicate_fit.centroids,
+        )
+        components = _partition_agreement(
+            fit.assignments,
+            replicate_assignments,
+            label_map=label_map,
+        )
+        run_stability = (
+            0.35 * components["adjustedRand"]
+            + 0.25 * components["pairwiseJaccard"]
+            + 0.20 * components["coassociationAgreement"]
+            + 0.20 * components["alignedAccuracy"]
+        )
+        component_rows.append(components)
+        compactness_rows.append(
+            sum(replicate_compactness) / len(replicate_compactness)
+        )
+        stability_rows.append(_clamp_probability(run_stability))
+
+    averaged_components = {
+        key: sum(row[key] for row in component_rows) / len(component_rows)
+        for key in (
+            "adjustedRand",
+            "pairwiseJaccard",
+            "coassociationAgreement",
+            "alignedAccuracy",
+        )
+    }
+    averaged_components["coverage"] = (
+        sum(coverage_rows) / len(coverage_rows)
+    )
+    return _StabilityProfile(
+        stability=sum(stability_rows) / len(stability_rows),
+        coverage=averaged_components["coverage"],
+        components=averaged_components,
+        resample_compactness=tuple(compactness_rows),
+        resample_stability=tuple(stability_rows),
+        requested_runs=stability_runs,
+        effective_unique_runs=len(retained_masks),
+    )
+
+
 def _score_cluster_candidate(
     fit: _KMeansFit,
     windows: Sequence[SpeechWindow],
@@ -2017,6 +2892,7 @@ def _score_cluster_candidate(
     vectors: Sequence[tuple[float, ...]],
     locks: Mapping[int, int],
     stability_runs: int,
+    iterations: int,
     eigengap: float,
     prior: int | None,
 ) -> _ClusterCandidateScore:
@@ -2169,45 +3045,16 @@ def _score_cluster_candidate(
             1.0 / (1.0 + davies_bouldin)
         )
 
-    stability_agreements: list[float] = []
-    represented_fractions: list[float] = []
-    for run_index in range(stability_runs):
-        retained = {
-            index
-            for index in range(sample_count)
-            if ((index * 17 + run_index * 7) % 5) != 0 or index in locks
-        }
-        perturbed_centroids: list[tuple[float, ...]] = []
-        represented = 0
-        for cluster_index in range(fit.count):
-            members = [
-                vectors[index]
-                for index in retained
-                if fit.assignments[index] == cluster_index
-            ]
-            if members:
-                represented += 1
-                perturbed_centroids.append(_mean_vector(members, dimension))
-            else:
-                perturbed_centroids.append(fit.centroids[cluster_index])
-        matches = 0
-        for index, vector in enumerate(vectors):
-            reassigned = locks.get(index)
-            if reassigned is None:
-                reassigned = max(
-                    range(fit.count),
-                    key=lambda cluster_index: (
-                        _dot(vector, perturbed_centroids[cluster_index]),
-                        -cluster_index,
-                    ),
-                )
-            matches += reassigned == fit.assignments[index]
-        stability_agreements.append(matches / sample_count)
-        represented_fractions.append(represented / fit.count)
-    stability = sum(stability_agreements) / len(stability_agreements)
-    bootstrap_support = sum(represented_fractions) / len(
-        represented_fractions
+    stability_profile = _recluster_stability_profile(
+        fit,
+        windows,
+        vectors=vectors,
+        locks=locks,
+        stability_runs=stability_runs,
+        iterations=iterations,
     )
+    stability = stability_profile.stability
+    bootstrap_support = stability_profile.coverage
 
     close_centroid_risk = (
         0.0
@@ -2268,8 +3115,15 @@ def _score_cluster_candidate(
         "imbalancePenalty": -imbalance_penalty,
         "fragmentationPenalty": -0.003 * fragmentation,
     }
-    objective = (
-        sum(weighted_contributions.values())
+    objective = sum(weighted_contributions.values())
+    resample_objectives = tuple(
+        objective
+        + 0.22 * (replicate_compactness - compactness)
+        + 0.12 * (replicate_stability - stability)
+        for replicate_compactness, replicate_stability in zip(
+            stability_profile.resample_compactness,
+            stability_profile.resample_stability,
+        )
     )
     correction_reasons: list[str] = []
     if under_split_risk >= 0.30:
@@ -2312,6 +3166,12 @@ def _score_cluster_candidate(
         correction_reasons=tuple(correction_reasons),
         prior_distance=None if prior is None else abs(prior - fit.count),
         work_items=fit.work_items,
+        stability_components=stability_profile.components,
+        resample_objectives=resample_objectives,
+        stability_requested_runs=stability_profile.requested_runs,
+        stability_effective_unique_runs=(
+            stability_profile.effective_unique_runs
+        ),
     )
 
 
@@ -2353,6 +3213,10 @@ def _finalize_cluster_candidate_scores(
                 consensus_support=consensus,
                 metric_votes=votes,
                 weighted_contributions=contributions,
+                resample_objectives=tuple(
+                    value + 0.06 * consensus
+                    for value in candidate.resample_objectives
+                ),
             )
         )
     return finalized
@@ -2503,6 +3367,25 @@ def _cluster(
             work_items=0,
         )
     else:
+        eigengap_work_items = _eigengap_work_items(
+            sample_count=len(vectors),
+            landmark_limit=config.eigengap_landmark_limit,
+        )
+        if (
+            leader_work_items + eigengap_work_items
+            > config.max_clustering_work_items
+        ):
+            raise WorkerError(
+                "CLUSTERING_RESOURCE_LIMIT_EXCEEDED",
+                "speaker eigengap analysis exceeds the configured work limit",
+                details={
+                    "phase": "eigengap-precheck",
+                    "leaderCountWorkItems": leader_work_items,
+                    "eigengapWorkItems": eigengap_work_items,
+                    "workItems": leader_work_items + eigengap_work_items,
+                    "maxWorkItems": config.max_clustering_work_items,
+                },
+            )
         eigengap_profile = _graph_eigengap_profile(
             vectors,
             landmark_limit=config.eigengap_landmark_limit,
@@ -2529,9 +3412,38 @@ def _cluster(
         if eigengap_profile.estimate is None
         else max(lower, min(upper, eigengap_profile.estimate))
     )
+    base_work_items = leader_work_items + eigengap_profile.work_items
+    minimum_required_work_items = base_work_items + _candidate_work_items(
+        sample_count=len(vectors),
+        count=lower,
+        iterations=config.kmeans_iterations,
+        stability_runs=config.count_stability_runs,
+    )
+    affordable_counts = tuple(
+        count
+        for count in range(lower, upper + 1)
+        if (
+            base_work_items
+            + _candidate_work_items(
+                sample_count=len(vectors),
+                count=count,
+                iterations=config.kmeans_iterations,
+                stability_runs=config.count_stability_runs,
+            )
+            <= config.max_clustering_work_items
+        )
+    )
+    resource_affordable_max_count = (
+        max(affordable_counts) if affordable_counts else None
+    )
+    planning_upper = (
+        upper
+        if resource_affordable_max_count is None
+        else resource_affordable_max_count
+    )
     candidate_counts = _candidate_count_order(
         lower=lower,
-        upper=upper,
+        upper=planning_upper,
         leader_estimate=leader_estimate,
         spectral_estimate=spectral_estimate,
         prior=prior,
@@ -2551,9 +3463,52 @@ def _cluster(
 
     fits: dict[int, _KMeansFit] = {}
     candidate_scores: list[_ClusterCandidateScore] = []
-    total_work_items = leader_work_items + eigengap_profile.work_items
-    count_search_truncated = False
-    for candidate_index, count in enumerate(candidate_counts):
+    total_work_items = base_work_items
+    evaluation_limit = (
+        1
+        if policy.mode is SpeakerCountMode.MANUAL
+        else min(
+            config.max_count_uncertainty_candidates,
+            planning_upper - lower + 1,
+        )
+    )
+    attempt_limit = min(
+        planning_upper - lower + 1,
+        max(evaluation_limit * 3, evaluation_limit + 4),
+    )
+    queue = list(candidate_counts)
+    planned_counts = list(candidate_counts)
+    attempted_counts: set[int] = set()
+    resource_skipped_counts: list[int] = []
+    minimum_resource_failure: tuple[int, int] | None = None
+    while (
+        len(candidate_scores) < evaluation_limit
+        and len(attempted_counts) < attempt_limit
+    ):
+        if not queue:
+            refinements = _adaptive_refinement_order(
+                lower=lower,
+                upper=planning_upper,
+                candidates=_finalize_cluster_candidate_scores(
+                    candidate_scores
+                ),
+                attempted=attempted_counts,
+            )
+            if not refinements:
+                break
+            # Evaluate one refinement at a time, then recompute the next
+            # proposal from the newly observed objective surface.  Enqueuing
+            # the whole stale proposal list would make the "adaptive" phase a
+            # second static sweep and could spend the remaining budget far
+            # away from the updated optimum.
+            count = refinements[0]
+            if count not in planned_counts:
+                planned_counts.append(count)
+            queue.append(count)
+        count = queue.pop(0)
+        if count in attempted_counts:
+            continue
+        attempted_counts.add(count)
         candidate_work_items = _candidate_work_items(
             sample_count=len(vectors),
             count=count,
@@ -2562,21 +3517,14 @@ def _cluster(
         )
         required_work_items = total_work_items + candidate_work_items
         if required_work_items > config.max_clustering_work_items:
-            if candidate_index == 0:
-                raise WorkerError(
-                    "CLUSTERING_RESOURCE_LIMIT_EXCEEDED",
-                    "speaker clustering exceeds the configured work limit",
-                    details={
-                        "phase": "multi-k-candidate",
-                        "candidateCount": count,
-                        "leaderCountWorkItems": leader_work_items,
-                        "candidateWorkItems": candidate_work_items,
-                        "workItems": required_work_items,
-                        "maxWorkItems": config.max_clustering_work_items,
-                    },
-                )
-            count_search_truncated = True
-            break
+            resource_skipped_counts.append(count)
+            resource_failure = (required_work_items, count)
+            if (
+                minimum_resource_failure is None
+                or resource_failure < minimum_resource_failure
+            ):
+                minimum_resource_failure = resource_failure
+            continue
         fit = _fit_spherical_kmeans(
             vectors,
             ordered_windows,
@@ -2593,6 +3541,7 @@ def _cluster(
                 vectors=vectors,
                 locks=ordered_locks,
                 stability_runs=config.count_stability_runs,
+                iterations=config.kmeans_iterations,
                 eigengap=_clamp_probability(
                     eigengap_profile.scores.get(count, 0.0)
                 ),
@@ -2602,6 +3551,23 @@ def _cluster(
         total_work_items = required_work_items
 
     if not candidate_scores:
+        if minimum_resource_failure is not None:
+            required_work_items, failed_count = minimum_resource_failure
+            raise WorkerError(
+                "CLUSTERING_RESOURCE_LIMIT_EXCEEDED",
+                "speaker clustering exceeds the configured work limit",
+                details={
+                    "phase": "multi-k-candidate",
+                    "candidateCount": failed_count,
+                    "leaderCountWorkItems": leader_work_items,
+                    "candidateWorkItems": (
+                        required_work_items - total_work_items
+                    ),
+                    "workItems": required_work_items,
+                    "maxWorkItems": config.max_clustering_work_items,
+                    "attemptedCounts": sorted(attempted_counts),
+                },
+            )
         raise WorkerError(
             "CLUSTERING_FAILED",
             "speaker clustering did not evaluate a legal count candidate",
@@ -2733,6 +3699,72 @@ def _cluster(
                 )
             selected_score = prior_score
 
+    requested_resample_runs = config.count_stability_runs
+    effective_unique_resample_runs = min(
+        candidate.stability_effective_unique_runs
+        for candidate in candidate_scores
+    )
+    resample_objective_winner_counts: dict[int, int] = {}
+    for run_index in range(requested_resample_runs):
+        winner = max(
+            candidate_scores,
+            key=lambda item: (
+                item.resample_objectives[run_index],
+                -item.count,
+            ),
+        )
+        resample_objective_winner_counts[winner.count] = (
+            resample_objective_winner_counts.get(winner.count, 0) + 1
+        )
+    resample_objective_winner_frequency = {
+        count: selected_runs / requested_resample_runs
+        for count, selected_runs in resample_objective_winner_counts.items()
+    }
+    resample_objective_winner_support = (
+        resample_objective_winner_frequency.get(selected_score.count, 0.0)
+    )
+
+    evaluated_counts = tuple(sorted(fits))
+    search_exhaustive = set(evaluated_counts) == set(
+        range(lower, upper + 1)
+    )
+    has_direct_lower_bracket = (
+        selected_score.count == lower
+        or selected_score.count - 1 in evaluated_counts
+    )
+    has_direct_upper_bracket = (
+        selected_score.count == upper
+        or selected_score.count + 1 in evaluated_counts
+    )
+    decision_locally_bracketed = (
+        has_direct_lower_bracket and has_direct_upper_bracket
+    )
+    required_neighbor_counts = {
+        neighbor
+        for neighbor in (selected_score.count - 1, selected_score.count + 1)
+        if lower <= neighbor <= upper
+    }
+    resource_truncated = bool(
+        required_neighbor_counts.intersection(resource_skipped_counts)
+    )
+    adaptive_budget_limited = (
+        policy.mode is not SpeakerCountMode.MANUAL
+        and not search_exhaustive
+        and not decision_locally_bracketed
+        and not resource_truncated
+    )
+    count_search_truncated = bool(
+        resource_truncated or adaptive_budget_limited
+    )
+    if resource_truncated:
+        search_truncation_reason = "resource-limit"
+    elif adaptive_budget_limited:
+        search_truncation_reason = (
+            "adaptive-budget-unresolved-local-bracket"
+        )
+    else:
+        search_truncation_reason = None
+
     selected_fit = fits[selected_score.count]
     acoustic_tie_tolerance = (
         0.12
@@ -2819,6 +3851,13 @@ def _cluster(
         confidence = min(confidence, 0.70)
         confidence_reasons.append("LOW_BOOTSTRAP_SUPPORT")
     if (
+        resample_objective_winner_support < 2.0 / 3.0
+    ):
+        confidence = min(confidence, 0.69)
+        confidence_reasons.append(
+            "LOW_RESAMPLE_OBJECTIVE_WINNER_SUPPORT"
+        )
+    if (
         spectral_estimate is not None
         and spectral_estimate != leader_estimate
     ):
@@ -2879,6 +3918,26 @@ def _cluster(
         under_split_detected=under_split_detected,
         over_split_detected=over_split_detected,
         low_confidence_fail_closed=low_confidence_fail_closed,
+        legal_min=lower,
+        legal_max=upper,
+        evaluated_counts=evaluated_counts,
+        planned_counts=tuple(dict.fromkeys(planned_counts)),
+        search_truncation_reason=search_truncation_reason,
+        resample_objective_winner_frequency=(
+            resample_objective_winner_frequency
+        ),
+        resample_objective_winner_support=(
+            resample_objective_winner_support
+        ),
+        requested_resample_runs=requested_resample_runs,
+        effective_unique_resample_runs=effective_unique_resample_runs,
+        search_exhaustive=search_exhaustive,
+        decision_locally_bracketed=decision_locally_bracketed,
+        adaptive_budget_limited=adaptive_budget_limited,
+        resource_truncated=resource_truncated,
+        resource_skipped_counts=tuple(sorted(set(resource_skipped_counts))),
+        minimum_required_work_items=minimum_required_work_items,
+        resource_affordable_max_count=resource_affordable_max_count,
     )
 
 
@@ -4861,33 +5920,41 @@ class SpeakerPipeline:
         secondary_invoked = False
         unresolved: list[ReviewCandidate] = []
         if self.secondary_adapter is not None and eligible:
-            (
-                proposals,
-                keys,
-                cache_hits,
-                latencies,
-                identity,
-            ) = self._run_review_adapter(
-                stage="secondary-review",
-                adapter=self.secondary_adapter,
-                candidates=eligible,
-                segments=output,
-                metrics=metrics,
-                context=context,
-            )
-            secondary_proposals = proposals
-            secondary_identity = identity
-            secondary_invoked = True
-            output, unresolved = self._apply_secondary_review(
-                segments=output,
-                candidates=eligible,
-                proposals=proposals,
-                keys=keys,
-                cache_hits=cache_hits,
-                latencies=latencies,
-                identity=identity,
-                metrics=metrics,
-            )
+            try:
+                (
+                    proposals,
+                    keys,
+                    cache_hits,
+                    latencies,
+                    identity,
+                ) = self._run_review_adapter(
+                    stage="secondary-review",
+                    adapter=self.secondary_adapter,
+                    candidates=eligible,
+                    segments=output,
+                    metrics=metrics,
+                    context=context,
+                )
+                secondary_proposals = proposals
+                secondary_identity = identity
+                secondary_invoked = True
+                output, unresolved = self._apply_secondary_review(
+                    segments=output,
+                    candidates=eligible,
+                    proposals=proposals,
+                    keys=keys,
+                    cache_hits=cache_hits,
+                    latencies=latencies,
+                    identity=identity,
+                    metrics=metrics,
+                )
+            except Exception:
+                _release_adapter_resources(
+                    self.secondary_adapter,
+                    suppress_errors=True,
+                )
+                raise
+            _release_adapter_resources(self.secondary_adapter)
         elif eligible:
             output = self._attach_unresolved_review_evidence(
                 output,
@@ -5013,35 +6080,43 @@ class SpeakerPipeline:
             and self.pyannote_adapter is not None
             and pyannote_stage
         ):
-            (
-                proposals,
-                keys,
-                cache_hits,
-                latencies,
-                identity,
-            ) = self._run_review_adapter(
-                stage=pyannote_stage,
-                adapter=self.pyannote_adapter,
-                candidates=pyannote_candidates,
-                segments=output,
-                metrics=metrics,
-                context=context,
-            )
-            pyannote_proposals = proposals
-            pyannote_identity = identity
-            pyannote_invoked = True
-            output = self._attach_pyannote_review(
-                stage=pyannote_stage,
-                segments=output,
-                candidates=pyannote_candidates,
-                proposals=proposals,
-                keys=keys,
-                cache_hits=cache_hits,
-                latencies=latencies,
-                identity=identity,
-                metrics=metrics,
-            )
-            pyannote_exit = "COMPLETED"
+            try:
+                (
+                    proposals,
+                    keys,
+                    cache_hits,
+                    latencies,
+                    identity,
+                ) = self._run_review_adapter(
+                    stage=pyannote_stage,
+                    adapter=self.pyannote_adapter,
+                    candidates=pyannote_candidates,
+                    segments=output,
+                    metrics=metrics,
+                    context=context,
+                )
+                pyannote_proposals = proposals
+                pyannote_identity = identity
+                pyannote_invoked = True
+                output = self._attach_pyannote_review(
+                    stage=pyannote_stage,
+                    segments=output,
+                    candidates=pyannote_candidates,
+                    proposals=proposals,
+                    keys=keys,
+                    cache_hits=cache_hits,
+                    latencies=latencies,
+                    identity=identity,
+                    metrics=metrics,
+                )
+                pyannote_exit = "COMPLETED"
+            except Exception:
+                _release_adapter_resources(
+                    self.pyannote_adapter,
+                    suppress_errors=True,
+                )
+                raise
+            _release_adapter_resources(self.pyannote_adapter)
         elif pyannote_candidates and self.pyannote_adapter is None:
             pyannote_exit = "ADAPTER_DISABLED"
         pyannote_elapsed = (
@@ -5232,19 +6307,27 @@ class SpeakerPipeline:
             )
             asr = [hypothesis for _, hypothesis in lexical_pairs]
         campp_started = time.perf_counter()
-        embeddings = self._window_stage(
-            stage="campp-embedding",
-            prepared=prepared,
-            windows=prepared.windows,
-            adapter=self.embedding_adapter,
-            invoke=lambda windows: self.embedding_adapter.embed_batch(
-                prepared, windows, context
-            ),
-            converter=EmbeddingRecord.from_mapping,
-            accepted_type=EmbeddingRecord,
-            context=context,
-            metrics=metrics,
-        )
+        try:
+            embeddings = self._window_stage(
+                stage="campp-embedding",
+                prepared=prepared,
+                windows=prepared.windows,
+                adapter=self.embedding_adapter,
+                invoke=lambda windows: self.embedding_adapter.embed_batch(
+                    prepared, windows, context
+                ),
+                converter=EmbeddingRecord.from_mapping,
+                accepted_type=EmbeddingRecord,
+                context=context,
+                metrics=metrics,
+            )
+        except Exception:
+            _release_adapter_resources(
+                self.embedding_adapter,
+                suppress_errors=True,
+            )
+            raise
+        _release_adapter_resources(self.embedding_adapter)
         campp_elapsed = (time.perf_counter() - campp_started) * 1000.0
         campp_candidate_ids = [
             window.window_id for window in prepared.windows

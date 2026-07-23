@@ -196,3 +196,21 @@
 - [ ] 对每个独立通过的产品切片小步 commit 并 push。
 - [ ] 所有旧业务迁移且最终门禁通过后覆盖 `main`。
 - [ ] 最终成品通过验收后结束 `/goal`。
+
+### 7.8 当前本地执行清单（逐项验证、逐项勾选）
+
+> 本节是本轮工作的本地 Markdown 看板。每一项必须有直接测试或产物证据；任何后续回归都要取消对应勾选。
+
+- [x] Dynamic-N v7 使用 SHA-256 精确保留掩码；覆盖精确目标大小、human lock 全保留、10 次运行超过 5 个唯一掩码、输入置换不变和重复调用确定性。
+- [x] Dynamic-N v7 恢复近声纹严格校正门槛，并验证 `N=8` 的稳定性、覆盖率、目标差和 `CLOSE_VOICE_RESIDUAL_COLLAPSE` 路径。
+- [x] Dynamic-N v7 低预算搜索保留声学 leader/anchor，错误锚点场景直接形成 `12/13/14` 局部括号，资源不足场景区分自适应预算受限与真实资源截断。
+- [x] Dynamic-N v7 缓存解析器拒绝旧版本、缺失字段、非有限数、频率/支持冲突和搜索审计冲突；正确缓存键上的畸形条目会重算而不是复用。
+- [x] Dynamic-N v7 聚焦门禁：`91 passed`（两个 Dynamic-N 模块加生产流水线畸形聚类缓存重算测试）。
+- [x] 独立复核 production CAM++/ERes2NetV2/pyannote 生命周期、OOM 和配置迁移切片；相关 Dynamic-N/production 门禁共 `193 passed, 48 subtests passed`，`compileall` 与定向 `git diff --check` 通过。
+- [ ] 独立复核并提交 Ultimate parity 原始字节、Git attributes/filter 和 RFC3339 授权时间顺序加固切片。
+- [ ] 本地通过 TypeScript 多任务 UI 的 lint、typecheck、unit/component 和 production build。
+- [ ] 通过 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
+- [ ] 未知人数真实 `20260723_123047(1).m4a` 完成自动人数、角色分离、人工作证和分域性能验收。
+- [ ] 真实 MOV 完成 auto 与 manual=5，对比人数稳定性、speaker confusion、审查量、RTF、RAM/VRAM 和缓存指标。
+- [ ] 完成 Java-only PDF、SRT/WebVTT/ASS、soft-mux、burn-in 和代表帧视觉 QA。
+- [ ] 原业务全部迁移、旧 Python UI/PDF/业务入口删除、最终 parity 通过后覆盖 `main` 并结束 `/goal`。

@@ -448,12 +448,136 @@ def test_embedded_close_voice_pair_uses_residual_collapse_correction(
     result = _cluster(case, request)
 
     assert result.count == speaker_count
-    assert result.selection_method == "dynamic-n-multimetric-stability-v5"
+    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v7"
     assert result.under_split_detected
     assert "CLOSE_VOICE_RESIDUAL_COLLAPSE" in result.correction_path
     assert result.candidate_min <= speaker_count - 1
     assert result.candidate_max >= speaker_count
     _assert_exact_truth_partition(case, result.assignments)
+
+
+def test_close_voice_residual_collapse_uses_strict_stability_guard() -> None:
+    near = _cluster(
+        generate_scenario(
+            "near-voices",
+            speaker_count=8,
+            samples_per_speaker=3,
+        ),
+        _request("auto"),
+    )
+
+    merged_score = next(
+        candidate
+        for candidate in near.count_candidates
+        if candidate.count == 7
+    )
+    separated_score = next(
+        candidate
+        for candidate in near.count_candidates
+        if candidate.count == 8
+    )
+
+    assert near.count == 8
+    assert "CLOSE_VOICE_RESIDUAL_COLLAPSE" in near.correction_path
+    assert separated_score.stability >= 0.90
+    assert separated_score.stability >= merged_score.stability - 0.08
+    assert separated_score.objective >= merged_score.objective - 0.23
+    assert separated_score.bootstrap_support == pytest.approx(1.0)
+    assert separated_score.stability_components["coverage"] == pytest.approx(
+        1.0
+    )
+    assert separated_score.stability_effective_unique_runs >= 2
+
+
+def test_stability_masks_have_exact_size_preserve_locks_and_are_diverse() -> None:
+    case = _basis_case((3,) * 8)
+    locks = {0: 0, 7: 1, 23: 7}
+    target = max(8, math.ceil(len(case.windows) * 0.80), len(locks))
+
+    masks = [
+        speaker_pipeline._stability_retained_indices(
+            windows=case.windows,
+            count=8,
+            locks=locks,
+            run_index=run_index,
+        )
+        for run_index in range(10)
+    ]
+
+    assert all(len(mask) == target for mask in masks)
+    assert all(set(locks) <= set(mask) for mask in masks)
+    assert len(set(masks)) > 5
+
+
+def test_stability_masks_are_deterministic_and_permutation_invariant() -> None:
+    case = _basis_case((3,) * 8)
+    locked_ids = {
+        case.windows[0].window_id: 0,
+        case.windows[7].window_id: 1,
+    }
+    original_locks = {
+        index: locked_ids[window.window_id]
+        for index, window in enumerate(case.windows)
+        if window.window_id in locked_ids
+    }
+    permuted_windows = tuple(reversed(case.windows))
+    permuted_locks = {
+        index: locked_ids[window.window_id]
+        for index, window in enumerate(permuted_windows)
+        if window.window_id in locked_ids
+    }
+
+    for run_index in range(10):
+        original = speaker_pipeline._stability_retained_indices(
+            windows=case.windows,
+            count=8,
+            locks=original_locks,
+            run_index=run_index,
+        )
+        repeated = speaker_pipeline._stability_retained_indices(
+            windows=case.windows,
+            count=8,
+            locks=original_locks,
+            run_index=run_index,
+        )
+        permuted = speaker_pipeline._stability_retained_indices(
+            windows=permuted_windows,
+            count=8,
+            locks=permuted_locks,
+            run_index=run_index,
+        )
+
+        assert original == repeated
+        assert {
+            case.windows[index].window_id for index in original
+        } == {
+            permuted_windows[index].window_id for index in permuted
+        }
+
+
+def test_partition_stability_is_invariant_to_label_permutation() -> None:
+    reference_centroids = ((1.0, 0.0), (0.0, 1.0))
+    replicate_centroids = tuple(reversed(reference_centroids))
+    label_map = speaker_pipeline._maximum_weight_label_map(
+        reference_centroids,
+        replicate_centroids,
+    )
+
+    agreement = speaker_pipeline._partition_agreement(
+        (0, 0, 1, 1),
+        (1, 1, 0, 0),
+        label_map=label_map,
+    )
+
+    assert label_map == {0: 1, 1: 0}
+    assert agreement == pytest.approx(
+        {
+            "adjustedRand": 1.0,
+            "pairwiseJaccard": 1.0,
+            "coassociationAgreement": 1.0,
+            "alignedAccuracy": 1.0,
+        }
+    )
 
 
 @pytest.mark.parametrize("mode", ("auto", "hybrid"))

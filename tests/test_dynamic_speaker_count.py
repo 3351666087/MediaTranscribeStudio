@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Mapping, Sequence
 import pytest
 
 from backend import speaker_pipeline
+from backend.errors import WorkerError
 from backend.models import SpeakerCountPolicy, StartJobRequest
 from backend.speaker_pipeline import (
     EmbeddingRecord,
@@ -338,6 +340,210 @@ def test_score_decomposition_is_finite_auditable_and_cache_safe() -> None:
         expected_rows=len(case.windows),
     )
     assert restored.as_dict() == result.as_dict()
+    serialized = result.as_dict()
+    assert serialized["confidenceKind"] == (
+        "bounded-decision-score-uncalibrated-v1"
+    )
+    assert serialized["confidenceIntervalKind"] == (
+        "plausible-count-range-not-calibrated-credible-interval"
+    )
+    assert serialized["legalRange"] == {
+        "min": result.legal_min,
+        "max": result.legal_max,
+    }
+    assert serialized["evaluatedCounts"] == list(result.evaluated_counts)
+    assert serialized["plannedCounts"] == list(result.planned_counts)
+
+
+@pytest.fixture(scope="module")
+def valid_v7_cluster_cache_payload() -> tuple[int, dict[str, object]]:
+    case = _basis_case((3,) * 5)
+    result = _cluster(case, _request("auto"))
+    return len(case.windows), result.as_dict()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-stability-component",
+        "unequal-resample-objective-lengths",
+        "frequency-sum-mismatch",
+        "support-mismatch",
+        "truncation-flag-reason-conflict",
+        "unknown-truncation-reason",
+        "candidate-evaluated-planned-conflict",
+        "non-finite-number",
+        "missing-v7-field",
+        "old-v6-method",
+    ),
+)
+def test_v7_cluster_cache_rejects_malformed_audit_payloads(
+    valid_v7_cluster_cache_payload: tuple[int, dict[str, object]],
+    mutation: str,
+) -> None:
+    expected_rows, source = valid_v7_cluster_cache_payload
+    payload = copy.deepcopy(source)
+    candidates = payload["countCandidates"]
+    assert isinstance(candidates, list)
+    first_candidate = candidates[0]
+    assert isinstance(first_candidate, dict)
+
+    if mutation == "missing-stability-component":
+        components = first_candidate["stabilityComponents"]
+        assert isinstance(components, dict)
+        components.pop("coverage")
+    elif mutation == "unequal-resample-objective-lengths":
+        objectives = first_candidate["resampleObjectives"]
+        assert isinstance(objectives, list)
+        objectives.pop()
+    elif mutation == "frequency-sum-mismatch":
+        frequency = payload["resampleObjectiveWinnerFrequency"]
+        assert isinstance(frequency, dict)
+        for count in tuple(frequency):
+            frequency[count] = float(frequency[count]) * 0.5
+    elif mutation == "support-mismatch":
+        current = float(payload["resampleObjectiveWinnerSupport"])
+        payload["resampleObjectiveWinnerSupport"] = (
+            0.0 if current > 0.0 else 1.0
+        )
+    elif mutation == "truncation-flag-reason-conflict":
+        payload["countSearchTruncated"] = True
+        payload["searchTruncationReason"] = "resource-limit"
+    elif mutation == "unknown-truncation-reason":
+        payload["countSearchTruncated"] = True
+        payload["adaptiveBudgetLimited"] = True
+        payload["searchTruncationReason"] = "unknown-reason"
+    elif mutation == "candidate-evaluated-planned-conflict":
+        selected = int(payload["count"])
+        planned = payload["plannedCounts"]
+        assert isinstance(planned, list)
+        payload["plannedCounts"] = [
+            count for count in planned if int(count) != selected
+        ]
+    elif mutation == "non-finite-number":
+        first_candidate["objective"] = float("nan")
+    elif mutation == "missing-v7-field":
+        payload.pop("searchExhaustive")
+    elif mutation == "old-v6-method":
+        payload["selectionMethod"] = (
+            "dynamic-n-adaptive-resample-stability-v6"
+        )
+    else:  # pragma: no cover - protects the parameter table itself.
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    with pytest.raises((TypeError, ValueError, WorkerError)):
+        _ClusterResult.from_mapping(payload, expected_rows=expected_rows)
+
+
+def test_resample_objective_winner_frequency_is_auditable() -> None:
+    stability_runs = 4
+    result = _cluster(
+        _basis_case((3,) * 5),
+        _request("auto"),
+        _config(count_stability_runs=stability_runs),
+    )
+
+    assert all(
+        len(candidate.resample_objectives) == stability_runs
+        for candidate in result.count_candidates
+    )
+    assert sum(
+        result.resample_objective_winner_frequency.values()
+    ) == pytest.approx(1.0)
+    assert set(result.resample_objective_winner_frequency) <= set(
+        result.evaluated_counts
+    )
+    assert result.resample_objective_winner_support == pytest.approx(
+        result.resample_objective_winner_frequency.get(result.count, 0.0)
+    )
+    serialized_frequency = result.as_dict()[
+        "resampleObjectiveWinnerFrequency"
+    ]
+    assert serialized_frequency == {
+        str(count): support
+        for count, support in sorted(
+            result.resample_objective_winner_frequency.items()
+        )
+    }
+    assert result.as_dict()["resampleObjectiveWinnerSupport"] == pytest.approx(
+        result.resample_objective_winner_support
+    )
+    # This is deliberately the winner of each pre-correction resample
+    # objective.  A deterministic residual-collapse correction may select a
+    # final K that won no pre-correction replicate.
+    if result.count not in result.resample_objective_winner_frequency:
+        assert result.resample_objective_winner_support == 0.0
+
+
+@pytest.mark.parametrize(
+    ("maximum_candidates", "expected"),
+    (
+        (1, (12,)),
+        (2, (12, 13)),
+        (3, (12, 13, 14)),
+    ),
+)
+def test_low_budget_search_preserves_acoustic_anchors(
+    maximum_candidates: int,
+    expected: tuple[int, ...],
+) -> None:
+    order = speaker_pipeline._candidate_count_order(
+        lower=4,
+        upper=40,
+        leader_estimate=12,
+        spectral_estimate=13,
+        prior=14,
+        maximum_candidates=maximum_candidates,
+    )
+
+    assert order == expected
+
+
+def test_adaptive_search_finds_hidden_optimum_with_wrong_anchors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _basis_case((3,) * 13)
+    monkeypatch.setattr(
+        speaker_pipeline,
+        "_leader_count",
+        lambda vectors, threshold, maximum, work_item_limit: (1, 0),
+    )
+    monkeypatch.setattr(
+        speaker_pipeline,
+        "_graph_eigengap_profile",
+        lambda vectors, landmark_limit: speaker_pipeline._EigengapProfile(
+            scores={2: 1.0},
+            estimate=2,
+            method="forced-wrong-anchor-test",
+            landmark_count=0,
+            work_items=0,
+        ),
+    )
+
+    result = _cluster(
+        case,
+        _request("auto"),
+        _config(max_count_uncertainty_candidates=9),
+    )
+
+    assert result.leader_estimate == 1
+    assert result.spectral_estimate == 2
+    assert result.count == 13
+    assert {12, 13, 14} <= set(result.evaluated_counts)
+    assert result.planned_counts[:5] == (
+        1,
+        2,
+        3,
+        20,
+        11,
+    )
+    assert tuple(
+        count
+        for count in result.planned_counts
+        if 12 <= count <= 14
+    ) == (12, 13, 14)
+    assert result.decision_locally_bracketed
+    assert not result.count_search_truncated
 
 
 def test_input_permutation_is_deterministic() -> None:
@@ -378,3 +584,30 @@ def test_resource_bounded_search_is_auditable_and_fail_closed() -> None:
     assert result.candidate_min == 1
     assert result.candidate_max == 9
     assert "RESOURCE_BOUNDED_SEARCH_TRUNCATED" in result.confidence_reasons
+    assert (
+        result.search_truncation_reason
+        == "adaptive-budget-unresolved-local-bracket"
+    )
+    assert not result.search_exhaustive
+    assert not result.decision_locally_bracketed
+    assert result.adaptive_budget_limited
+    assert not result.resource_truncated
+    assert result.resource_skipped_counts == ()
+    assert result.minimum_required_work_items == 193
+    assert result.resource_affordable_max_count == 1
+    serialized = result.as_dict()
+    assert serialized["legalRange"] == {"min": 1, "max": 9}
+    assert serialized["evaluatedCounts"] == [1]
+    assert serialized["evaluatedRange"] == {"min": 1, "max": 1}
+    assert serialized["searchTruncationReason"] == (
+        "adaptive-budget-unresolved-local-bracket"
+    )
+    assert serialized["searchExhaustive"] is False
+    assert serialized["decisionLocallyBracketed"] is False
+    assert serialized["adaptiveBudgetLimited"] is True
+    assert serialized["resourceTruncated"] is False
+    assert serialized["resourceSkippedCounts"] == []
+    assert serialized["minimumRequiredWorkItems"] == 193
+    assert serialized["resourceAffordableMaxCount"] == 1
+    assert serialized["countSearchTruncated"] is True
+    assert serialized["lowConfidenceFailClosed"] is True

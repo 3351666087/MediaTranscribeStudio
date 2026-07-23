@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import tempfile
 import threading
@@ -1440,23 +1441,172 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         pipeline.transcribe(request, self.context("resource-order"))
 
         self.assertEqual(
-            events[:4],
+            events[:5],
             [
                 "cam-release",
                 "asr-inference",
                 "asr-release",
                 "cam-inference",
+                "cam-release",
             ],
         )
         self.assertEqual(asr.release_calls, 1)
-        self.assertEqual(cam.release_calls, 1)
+        self.assertEqual(cam.release_calls, 2)
 
         pipeline.transcribe(request, self.context("resource-order"))
 
         self.assertEqual(asr.release_calls, 2)
-        self.assertEqual(cam.release_calls, 2)
+        self.assertEqual(cam.release_calls, 4)
         self.assertEqual(events.count("asr-inference"), 1)
         self.assertEqual(events.count("cam-inference"), 1)
+
+    def test_cam_eres_and_pyannote_release_in_strict_cascade_order(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class LifecycleAsr(FakeAsrAdapter):
+            def transcribe_batch(self, *args, **kwargs):
+                events.append("asr-inference")
+                return super().transcribe_batch(*args, **kwargs)
+
+            def release_resources(self) -> None:
+                events.append("asr-release")
+
+        class LifecycleCam(FakeCamPlusAdapter):
+            def release_resources(self) -> None:
+                events.append("cam-release")
+
+            def embed_batch(self, *args, **kwargs):
+                events.append("cam-inference")
+                return super().embed_batch(*args, **kwargs)
+
+        class LifecycleSecondary(FakeSecondaryVerifier):
+            def review_batch(self, *args, **kwargs):
+                events.append("eres-inference")
+                return super().review_batch(*args, **kwargs)
+
+            def release_resources(self) -> None:
+                events.append("eres-release")
+
+        class LifecyclePyannote(FakePyannoteAudit):
+            def review_batch(self, *args, **kwargs):
+                events.append("pyannote-inference")
+                return super().review_batch(*args, **kwargs)
+
+            def release_resources(self) -> None:
+                events.append("pyannote-release")
+
+        secondary = LifecycleSecondary(
+            exit_reasons={
+                f"window-{index}": "LOW_MARGIN_UNRESOLVED"
+                for index in range(1, 5)
+            }
+        )
+        pyannote = LifecyclePyannote()
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            windows=8,
+            preparation=FakePreparationAdapter(
+                8,
+                boundary_conflict_ids={
+                    f"window-{index}" for index in range(1, 9)
+                },
+            ),
+            asr=LifecycleAsr(),
+            cam=LifecycleCam(
+                2,
+                vectors_by_window_id={
+                    "window-1": (1.0, 0.0),
+                    "window-2": (1.0, 0.0),
+                    "window-3": (0.0, 1.0),
+                    "window-4": (0.0, 1.0),
+                    "window-5": (1.0, 0.0),
+                    "window-6": (1.0, 0.0),
+                    "window-7": (0.0, 1.0),
+                    "window-8": (0.0, 1.0),
+                },
+            ),
+            secondary=secondary,
+            pyannote=pyannote,
+            config=SpeakerPipelineConfig(
+                high_margin_threshold=3.0,
+                max_secondary_fraction=0.5,
+                pyannote_mode="fallback",
+            ),
+        )
+
+        pipeline.transcribe(
+            self.request(2, "manual", job_id="strict-cascade-release"),
+            self.context("strict-cascade-release"),
+        )
+
+        self.assertEqual(
+            events,
+            [
+                "cam-release",
+                "asr-inference",
+                "asr-release",
+                "cam-inference",
+                "cam-release",
+                "eres-inference",
+                "eres-release",
+                "pyannote-inference",
+                "pyannote-release",
+            ],
+        )
+
+    def test_secondary_resources_release_on_error_and_cancellation(
+        self,
+    ) -> None:
+        class FailingSecondary(FakeSecondaryVerifier):
+            def __init__(self, *, cancel: bool) -> None:
+                super().__init__()
+                self.cancel = cancel
+                self.release_calls = 0
+
+            def review_batch(self, candidates, segments, context):
+                if self.cancel:
+                    context.cancellation.set()
+                    context.raise_if_cancelled()
+                raise WorkerError(
+                    "ERES2NETV2_INFERENCE_FAILED",
+                    "synthetic verifier failure",
+                )
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                secondary = FailingSecondary(cancel=cancel)
+                pipeline, _, _, _, _ = self.pipeline(
+                    2,
+                    windows=4,
+                    preparation=FakePreparationAdapter(
+                        4,
+                        boundary_conflict_ids={
+                            f"window-{index}" for index in range(1, 5)
+                        },
+                    ),
+                    secondary=secondary,
+                    config=SpeakerPipelineConfig(
+                        high_margin_threshold=3.0,
+                        max_secondary_fraction=0.5,
+                    ),
+                )
+                with self.assertRaises(
+                    JobCancelled if cancel else WorkerError
+                ):
+                    pipeline.transcribe(
+                        self.request(
+                            2,
+                            "manual",
+                            job_id=f"secondary-release-{cancel}",
+                        ),
+                        self.context(f"secondary-release-{cancel}"),
+                    )
+                self.assertEqual(secondary.release_calls, 1)
 
     def test_asr_resources_release_before_all_non_lexical_failure(
         self,
@@ -1708,6 +1858,51 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         asr_cache = second.pipeline_metrics["cache"]["byStage"]["asr"]
         self.assertEqual(asr_cache["hits"], 4)
         self.assertEqual(asr_cache["recomputations"], 1)
+
+    def test_malformed_v7_clustering_cache_recomputes_at_the_same_key(
+        self,
+    ) -> None:
+        cache = InMemoryStageCache()
+        pipeline, preparation, asr, cam, _ = self.pipeline(5, cache=cache)
+        request = self.request(5, "manual", job_id="malformed-cluster-cache")
+        first = pipeline.transcribe(
+            request,
+            self.context("malformed-cluster-cache"),
+        )
+
+        cluster_key = cache.keys("clustering")[0][1]
+        cached = cache.read("clustering", cluster_key)
+        self.assertTrue(cached.hit)
+        malformed = copy.deepcopy(cached.value)
+        malformed["selectionMethod"] = (
+            "dynamic-n-adaptive-resample-stability-v6"
+        )
+        cache.set_raw("clustering", cluster_key, malformed)
+
+        second = pipeline.transcribe(
+            request,
+            self.context("malformed-cluster-cache"),
+        )
+
+        self.assertEqual(
+            second.speaker_count_estimate.estimated_count,
+            first.speaker_count_estimate.estimated_count,
+        )
+        self.assertEqual(preparation.calls, 1)
+        self.assertEqual(sum(len(batch) for batch in asr.calls), 5)
+        self.assertEqual(sum(len(batch) for batch in cam.calls), 5)
+        clustering_cache = second.pipeline_metrics["cache"]["byStage"][
+            "clustering"
+        ]
+        self.assertEqual(clustering_cache["hits"], 0)
+        self.assertEqual(clustering_cache["misses"], 1)
+        self.assertEqual(clustering_cache["recomputations"], 1)
+        repaired = cache.read("clustering", cluster_key)
+        self.assertTrue(repaired.hit)
+        self.assertEqual(
+            repaired.value["selectionMethod"],
+            "dynamic-n-adaptive-resample-stability-v7",
+        )
 
     def test_asr_language_isolated_cache_reuses_acoustic_stages(self) -> None:
         cache = InMemoryStageCache()

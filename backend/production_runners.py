@@ -318,6 +318,49 @@ def _campp_resource_error(
     )
 
 
+def _eres2netv2_resource_error(
+    error: BaseException,
+    *,
+    phase: str,
+    requested_device: str,
+    clip_count: int,
+) -> WorkerError | None:
+    memory_error = isinstance(error, MemoryError)
+    accelerator_error = _is_accelerator_out_of_memory(error)
+    if not (memory_error or accelerator_error):
+        return None
+    normalized_device = requested_device.strip().casefold()
+    if normalized_device in {"cpu", "cpu:0"}:
+        return WorkerError(
+            "ERES2NETV2_HOST_MEMORY_EXHAUSTED",
+            "ERes2NetV2 exceeded the bounded host-memory budget",
+            details={
+                "phase": phase,
+                "requestedDevice": requested_device,
+                "clipCount": clip_count,
+                "modelQualityChanged": False,
+                "remediation": (
+                    "REDUCE_CLIP_BATCH_SIZE_OR_CLOSE_MEMORY_INTENSIVE_PROCESSES"
+                ),
+            },
+            retryable=False,
+        )
+    return WorkerError(
+        "ERES2NETV2_ACCELERATOR_MEMORY_EXHAUSTED",
+        "ERes2NetV2 exceeded the bounded accelerator memory budget",
+        details={
+            "phase": phase,
+            "requestedDevice": requested_device,
+            "clipCount": clip_count,
+            "modelQualityChanged": False,
+            "remediation": (
+                "RELEASE_PREVIOUS_GPU_STAGE_OR_REDUCE_CONCURRENT_GPU_WORK"
+            ),
+        },
+        retryable=True,
+    )
+
+
 def _release_accelerator_memory() -> None:
     gc.collect()
     try:
@@ -1903,7 +1946,7 @@ class LocalERes2NetV2Verifier:
     """Selective ERes2NetV2 verifier using top-2 speaker exemplars only."""
 
     adapter_id = "ERes2NetV2"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(
         self,
@@ -1921,6 +1964,7 @@ class LocalERes2NetV2Verifier:
         self._pipeline_factory = pipeline_factory
         self._pipeline_instance: Any = None
         self._load_lock = threading.Lock()
+        self._inference_lock = threading.RLock()
 
     def _pipeline(self) -> Any:
         with self._load_lock:
@@ -1939,11 +1983,34 @@ class LocalERes2NetV2Verifier:
                     def factory(**kwargs: Any) -> Any:
                         return pipeline(task=Tasks.speaker_verification, **kwargs)
 
-                self._pipeline_instance = factory(
-                    model=str(self.model_path),
-                    device=self.device,
-                )
+                try:
+                    self._pipeline_instance = factory(
+                        model=str(self.model_path),
+                        device=self.device,
+                    )
+                except Exception as exc:
+                    resource_error = _eres2netv2_resource_error(
+                        exc,
+                        phase="model-load",
+                        requested_device=self.device,
+                        clip_count=0,
+                    )
+                    if resource_error is None:
+                        raise
+                    _release_accelerator_memory()
+                    raise resource_error from exc
             return self._pipeline_instance
+
+    def release_resources(self) -> None:
+        """Idempotently unload the shared verifier between GPU stages."""
+
+        with self._inference_lock:
+            with self._load_lock:
+                pipeline = self._pipeline_instance
+                self._pipeline_instance = None
+                if pipeline is not None:
+                    del pipeline
+                _release_accelerator_memory()
 
     @staticmethod
     def _ranked_speakers(segment: TranscriptSegment) -> tuple[str, ...]:
@@ -2088,7 +2155,30 @@ class LocalERes2NetV2Verifier:
         return numerator / (left_norm * right_norm)
 
     def _embeddings(self, audio: Sequence[Any]) -> list[tuple[float, ...]]:
-        result = self._pipeline()(list(audio), output_emb=True)
+        resource_error: WorkerError | None = None
+        with self._inference_lock:
+            pipeline = self._pipeline()
+            try:
+                result = pipeline(list(audio), output_emb=True)
+            except Exception as exc:
+                resource_error = _eres2netv2_resource_error(
+                    exc,
+                    phase="embedding-inference",
+                    requested_device=self.device,
+                    clip_count=len(audio),
+                )
+                if resource_error is None:
+                    raise
+            if resource_error is not None:
+                with self._load_lock:
+                    resident = self._pipeline_instance
+                    self._pipeline_instance = None
+                    del pipeline
+                    if resident is not None:
+                        del resident
+                    _release_accelerator_memory()
+        if resource_error is not None:
+            raise resource_error from None
         raw = result.get("embs") if isinstance(result, Mapping) else None
         if hasattr(raw, "tolist"):
             raw = raw.tolist()
@@ -2320,6 +2410,7 @@ class LocalPyannoteAuditAdapter:
         self._pipeline_factory = pipeline_factory
         self._pipeline_instance: Any = None
         self._load_lock = threading.Lock()
+        self._inference_lock = threading.RLock()
         os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 
     def _pipeline(self) -> Any:
@@ -2360,6 +2451,17 @@ class LocalPyannoteAuditAdapter:
                         },
                     ) from exc
             return self._pipeline_instance
+
+    def release_resources(self) -> None:
+        """Idempotently unload pyannote before leaving its cascade stage."""
+
+        with self._inference_lock:
+            with self._load_lock:
+                pipeline = self._pipeline_instance
+                self._pipeline_instance = None
+                if pipeline is not None:
+                    del pipeline
+                _release_accelerator_memory()
 
     @staticmethod
     def _annotation_from_result(result: Any) -> Any:
@@ -2540,9 +2642,11 @@ class LocalPyannoteAuditAdapter:
                 ) from exc
             waveform = torch.from_numpy(clip).unsqueeze(0)
             try:
-                result = self._pipeline()(
-                    {"waveform": waveform, "sample_rate": sample_rate}
-                )
+                with self._inference_lock:
+                    pipeline = self._pipeline()
+                    result = pipeline(
+                        {"waveform": waveform, "sample_rate": sample_rate}
+                    )
             except WorkerError:
                 raise
             except Exception as exc:

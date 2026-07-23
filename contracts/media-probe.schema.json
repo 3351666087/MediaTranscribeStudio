@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/media-probe.schema.json",
+  "title": "MediaTranscribeStudio trusted local-media probe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sourcePath",
+    "sourceSizeBytes",
+    "formatNames",
+    "formatLongName",
+    "durationMs",
+    "bitRate",
+    "programs",
+    "chapters",
+    "streams",
+    "audioStreamIndexes",
+    "videoStreamIndexes",
+    "subtitleStreamIndexes",
+    "existingSubtitleCodecs",
+    "hasHdrVideo",
+    "hasRotationMetadata",
+    "decodeSmokeTested",
+    "decodeSmokeTestPassed",
+    "warnings",
+    "toolchain",
+    "probeFingerprintSha256"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "sourcePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceSizeBytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "formatNames": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "formatLongName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "durationMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "bitRate": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "programs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "chapters": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "streams": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/stream"
+      }
+    },
+    "audioStreamIndexes": {
+      "$ref": "#/$defs/indexes"
+    },
+    "videoStreamIndexes": {
+      "$ref": "#/$defs/indexes"
+    },
+    "subtitleStreamIndexes": {
+      "$ref": "#/$defs/indexes"
+    },
+    "existingSubtitleCodecs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "hasHdrVideo": {
+      "type": "boolean"
+    },
+    "hasRotationMetadata": {
+      "type": "boolean"
+    },
+    "decodeSmokeTested": {
+      "type": "boolean"
+    },
+    "decodeSmokeTestPassed": {
+      "type": "boolean"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ffprobe",
+        "ffmpeg"
+      ],
+      "properties": {
+        "ffprobe": {
+          "$ref": "#/$defs/tool"
+        },
+        "ffmpeg": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/tool"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "probeFingerprintSha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "indexes": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "uniqueItems": true
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "versionLine",
+        "configuration",
+        "fingerprintSha256"
+      ],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "versionLine": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configuration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprintSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "type",
+        "codecName",
+        "codecLongName",
+        "codecTag",
+        "profile",
+        "durationMs",
+        "bitRate",
+        "language",
+        "title",
+        "default",
+        "forced",
+        "attachedPicture",
+        "width",
+        "height",
+        "pixelFormat",
+        "frameRate",
+        "rotationDegrees",
+        "colorPrimaries",
+        "colorTransfer",
+        "colorSpace",
+        "colorRange",
+        "hdr",
+        "sampleRate",
+        "channels",
+        "channelLayout"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "codecName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "codecLongName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "codecTag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "durationMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "bitRate": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "language": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default": {
+          "type": "boolean"
+        },
+        "forced": {
+          "type": "boolean"
+        },
+        "attachedPicture": {
+          "type": "boolean"
+        },
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "height": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "pixelFormat": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frameRate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rotationDegrees": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "colorPrimaries": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "colorTransfer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "colorSpace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "colorRange": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hdr": {
+          "type": "boolean"
+        },
+        "sampleRate": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "channels": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "channelLayout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -27,6 +27,7 @@ PRODUCTION_CONFIG_SCHEMA_VERSION = "1.0.0"
 PRODUCTION_MODE = "offline-production"
 _MAX_CONFIG_BYTES = 1024 * 1024
 _URI_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_RUNTIME_IMPORT_TIMEOUT_SECONDS = 120.0
 
 
 class ProductionConfigError(WorkerError):
@@ -951,7 +952,7 @@ def _probe_runtime_import(module: str) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
-            timeout=30.0,
+            timeout=_RUNTIME_IMPORT_TIMEOUT_SECONDS,
             env=offline_environment(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -1137,6 +1138,7 @@ def run_production_preflight(
         ("runtime-funasr", "funasr", True),
         ("runtime-qwen-asr", "qwen_asr", True),
         ("runtime-modelscope", "modelscope.pipelines", True),
+        ("runtime-simplejson", "simplejson", True),
         ("runtime-soundfile", "soundfile", True),
         ("runtime-numpy", "numpy", True),
     ]

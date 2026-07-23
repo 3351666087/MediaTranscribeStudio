@@ -209,6 +209,7 @@ sentry-sdk
 shellingham
 shiboken6
 silero-vad
+simplejson
 six
 smmap
 sniffio

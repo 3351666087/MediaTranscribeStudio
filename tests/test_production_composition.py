@@ -5,8 +5,10 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from subprocess import CompletedProcess
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from backend.composition import (
     ProductionFactories,
@@ -15,6 +17,7 @@ from backend.composition import (
 from backend.production_config import (
     ProductionConfig,
     ProductionConfigError,
+    _probe_runtime_import,
     production_diagnostics,
     run_production_preflight,
 )
@@ -167,10 +170,27 @@ class ProductionCompositionTests(unittest.TestCase):
         serialized = json.dumps(diagnostics, ensure_ascii=False)
         self.assertNotIn(str(self.root), serialized)
         self.assertIn("runtime-pyannote", serialized)
+        self.assertIn("runtime-simplejson", serialized)
         self.assertIn("difficult-segments-only", serialized)
         self.assertFalse(
             diagnostics["speakerCardinality"]["fixedFivePersonLimit"]
         )
+
+    def test_runtime_import_probe_allows_slow_cold_start(self) -> None:
+        completed = CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=b"ok\n",
+            stderr=b"",
+        )
+
+        with patch(
+            "backend.production_config.subprocess.run",
+            return_value=completed,
+        ) as run:
+            self.assertTrue(_probe_runtime_import("funasr"))
+
+        self.assertEqual(run.call_args.kwargs["timeout"], 120.0)
 
     def test_composition_never_uses_unavailable_adapters(self) -> None:
         config = self.load()

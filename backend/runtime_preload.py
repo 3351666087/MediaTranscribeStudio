@@ -33,6 +33,7 @@ _BASE_MODULES = (
     "qwen_asr",
     "modelscope",
     "modelscope.pipelines",
+    "simplejson",
 )
 _PYANNOTE_MODULE = "pyannote.audio"
 

@@ -15,6 +15,7 @@ create that fails if the destination appears concurrently.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -24,7 +25,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
@@ -91,10 +92,12 @@ class SubtitleDeliveryError(RuntimeError):
         message: str,
         *,
         detail: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.detail = detail
+        self.evidence = dict(evidence or {})
 
 
 @dataclass(frozen=True)
@@ -477,6 +480,97 @@ class SubtitleDeliveryReceipt:
 
 
 @dataclass(frozen=True)
+class StagedSubtitleMediaDelivery:
+    """Validated media held outside the customer-visible output name."""
+
+    customer_output_path: Path
+    quarantine_path: Path
+    quarantine_evidence: FileEvidence
+    receipt: SubtitleDeliveryReceipt
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "quarantined",
+            "mode": self.receipt.mode.value,
+            "customerOutputPath": str(self.customer_output_path),
+            "customerOutputAbsent": not os.path.lexists(
+                self.customer_output_path
+            ),
+            "quarantine": {
+                "path": str(self.quarantine_path),
+                "privateName": True,
+                "artifact": self.quarantine_evidence.to_dict(),
+            },
+            "sourceIntegrity": {
+                "unchanged": (
+                    self.receipt.source_before == self.receipt.source_after
+                ),
+                "before": self.receipt.source_before.to_dict(),
+                "after": self.receipt.source_after.to_dict(),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class SubtitleMediaPublication:
+    """Evidence for QA-gated, atomic no-replace media publication."""
+
+    receipt: SubtitleDeliveryReceipt
+    quarantine_path: Path
+    quarantine_evidence: FileEvidence
+    published_evidence: FileEvidence
+    visual_qa_evidence_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "published",
+            "customerOutputPath": self.receipt.output_path,
+            "quarantinePath": str(self.quarantine_path),
+            "quarantineArtifact": self.quarantine_evidence.to_dict(),
+            "publishedArtifact": self.published_evidence.to_dict(),
+            "visualQaEvidenceSha256": self.visual_qa_evidence_sha256,
+            "strategy": "same-directory-hard-link-no-replace",
+            "atomic": True,
+            "noReplace": True,
+            "quarantineRemoved": not os.path.lexists(
+                self.quarantine_path
+            ),
+            "sourceMediaImmutable": (
+                self.receipt.source_before == self.receipt.source_after
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class SubtitleMediaRollback:
+    """Best-effort cleanup and preservation evidence after a failed gate."""
+
+    reason: str
+    customer_output_path: Path
+    quarantine_path: Path
+    quarantine_evidence: FileEvidence
+    customer_output_state: str
+    quarantine_state: str
+    source_unchanged: bool
+    cleanup_error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "rolled-back",
+            "reason": self.reason,
+            "customerOutputPath": str(self.customer_output_path),
+            "customerOutputState": self.customer_output_state,
+            "quarantine": {
+                "path": str(self.quarantine_path),
+                "state": self.quarantine_state,
+                "artifact": self.quarantine_evidence.to_dict(),
+            },
+            "sourceMediaImmutable": self.source_unchanged,
+            "cleanupError": self.cleanup_error,
+        }
+
+
+@dataclass(frozen=True)
 class _ContainerProfile:
     name: str
     muxer: str
@@ -823,6 +917,297 @@ class SubtitleDeliveryExecutor:
             command_builder=command,
             karaoke_detected=karaoke_detected,
             karaoke_verified=karaoke_verified,
+        )
+
+    def stage_media_delivery(
+        self,
+        plan: SubtitleOutputPlan,
+        *,
+        subtitle_language: str = "und",
+        subtitle_title: str = "MediaTranscribeStudio",
+        make_subtitle_default: bool = False,
+        burn_in_strategy: BurnInVideoStrategy | str | None = None,
+        karaoke_timing_evidence: KaraokeTimingEvidence | None = None,
+    ) -> StagedSubtitleMediaDelivery:
+        """Render and validate media under a private quarantine name.
+
+        The customer output path is validated before expensive work starts,
+        but is never created by this method.  The returned artifact remains
+        quarantined until :meth:`publish_staged_media` receives passing visual
+        QA evidence.
+        """
+
+        _validate_plan(plan)
+        if plan.mode is SubtitleOutputMode.SIDECAR:
+            raise SubtitleDeliveryError(
+                SubtitleDeliveryErrorCode.INVALID_PLAN,
+                "Only soft-mux and burn-in media can be quarantined.",
+            )
+        source = canonical_local_media_file(plan.source_path)
+        customer_output = _canonical_new_output_path(
+            plan.output_path,
+            source=source,
+        )
+        quarantine = _new_quarantine_output(customer_output)
+        staged_plan = replace(plan, output_path=str(quarantine))
+        try:
+            receipt = self.deliver(
+                staged_plan,
+                subtitle_language=subtitle_language,
+                subtitle_title=subtitle_title,
+                make_subtitle_default=make_subtitle_default,
+                burn_in_strategy=burn_in_strategy,
+                karaoke_timing_evidence=karaoke_timing_evidence,
+            )
+            quarantine_evidence = _capture_file_evidence(
+                quarantine,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            if not _same_artifact(
+                quarantine_evidence,
+                receipt.output_evidence,
+            ):
+                raise SubtitleDeliveryError(
+                    SubtitleDeliveryErrorCode.QA_FAILED,
+                    "Quarantined media changed after delivery validation.",
+                )
+            staged = StagedSubtitleMediaDelivery(
+                customer_output_path=customer_output,
+                quarantine_path=quarantine,
+                quarantine_evidence=quarantine_evidence,
+                receipt=receipt,
+            )
+            if os.path.lexists(customer_output):
+                rollback = self.rollback_staged_media(
+                    staged,
+                    reason="customer-output-appeared-during-staging",
+                )
+                raise SubtitleDeliveryError(
+                    SubtitleDeliveryErrorCode.OUTPUT_EXISTS,
+                    "Customer output appeared while media was quarantined.",
+                    evidence={"rollback": rollback.to_dict()},
+                )
+            return staged
+        except Exception:
+            if os.path.lexists(quarantine):
+                try:
+                    quarantine.unlink()
+                except OSError:
+                    pass
+            raise
+
+    def publish_staged_media(
+        self,
+        staged: StagedSubtitleMediaDelivery,
+        *,
+        visual_qa_evidence: Mapping[str, Any],
+    ) -> SubtitleMediaPublication:
+        """Atomically publish a quarantined media artifact after visual QA."""
+
+        if not isinstance(staged, StagedSubtitleMediaDelivery):
+            raise SubtitleDeliveryError(
+                SubtitleDeliveryErrorCode.INVALID_PLAN,
+                "Publication requires a staged subtitle media delivery.",
+            )
+        try:
+            qa_payload = _validated_passing_visual_qa(visual_qa_evidence)
+        except SubtitleDeliveryError as exc:
+            rollback = self.rollback_staged_media(
+                staged,
+                reason="visual-qa-not-passed",
+            )
+            raise _with_rollback_evidence(exc, rollback) from exc
+
+        source = canonical_local_media_file(staged.receipt.source_path)
+        output = staged.customer_output_path
+        quarantine = staged.quarantine_path
+        published_evidence: FileEvidence | None = None
+        try:
+            resolved_output = _canonical_new_output_path(
+                output,
+                source=source,
+            )
+            if resolved_output != output:
+                raise SubtitleDeliveryError(
+                    SubtitleDeliveryErrorCode.INVALID_PATH,
+                    "The staged customer output path changed before publication.",
+                )
+            if quarantine.parent != output.parent:
+                raise SubtitleDeliveryError(
+                    SubtitleDeliveryErrorCode.INVALID_PATH,
+                    "Quarantine and customer output must share a directory.",
+                )
+            current_quarantine = _capture_file_evidence(
+                quarantine,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            if not _same_file_evidence(
+                current_quarantine,
+                staged.quarantine_evidence,
+            ):
+                raise SubtitleDeliveryError(
+                    SubtitleDeliveryErrorCode.QA_FAILED,
+                    "Quarantined media changed after visual QA.",
+                )
+            source_before_publication = _capture_file_evidence(
+                source,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            _require_unchanged_source(
+                staged.receipt.source_before,
+                source_before_publication,
+            )
+
+            _atomic_publish_no_replace(quarantine, output)
+            published_evidence = _capture_file_evidence(
+                output,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            if not _same_artifact(
+                published_evidence,
+                staged.quarantine_evidence,
+            ):
+                raise SubtitleDeliveryError(
+                    SubtitleDeliveryErrorCode.PUBLISH_FAILED,
+                    "Published media differs from the QA-approved quarantine artifact.",
+                )
+
+            source_probe = self.probe.probe(source)
+            _assert_probe_matches_file(
+                source_probe,
+                source,
+                source_before_publication,
+            )
+            final_probe = self.probe.probe(output)
+            _assert_probe_matches_file(
+                final_probe,
+                output,
+                published_evidence,
+            )
+            qa = _validate_media_qa(
+                mode=staged.receipt.mode,
+                source=source_probe,
+                output=final_probe,
+                expected_subtitle_codec=(
+                    staged.receipt.selected_subtitle_codec
+                ),
+                policy=self.policy,
+            )
+            source_after = _capture_file_evidence(
+                source,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            _require_unchanged_source(
+                staged.receipt.source_before,
+                source_after,
+            )
+            receipt = replace(
+                staged.receipt,
+                output_path=str(output),
+                source_after=source_after,
+                output_evidence=published_evidence,
+                qa=qa,
+                source_probe_fingerprint_sha256=(
+                    source_probe.probe_fingerprint_sha256
+                ),
+                output_probe_fingerprint_sha256=(
+                    final_probe.probe_fingerprint_sha256
+                ),
+            )
+            return SubtitleMediaPublication(
+                receipt=receipt,
+                quarantine_path=quarantine,
+                quarantine_evidence=staged.quarantine_evidence,
+                published_evidence=published_evidence,
+                visual_qa_evidence_sha256=_canonical_mapping_sha256(
+                    qa_payload
+                ),
+            )
+        except SubtitleDeliveryError as exc:
+            rollback = self.rollback_staged_media(
+                staged,
+                reason=f"publication-{exc.code.value}",
+                published_evidence=published_evidence,
+            )
+            raise _with_rollback_evidence(exc, rollback) from exc
+        except Exception as exc:
+            rollback = self.rollback_staged_media(
+                staged,
+                reason="publication-unexpected-failure",
+                published_evidence=published_evidence,
+            )
+            raise SubtitleDeliveryError(
+                SubtitleDeliveryErrorCode.PUBLISH_FAILED,
+                "QA-approved media could not be atomically published.",
+                detail=str(exc),
+                evidence={"rollback": rollback.to_dict()},
+            ) from exc
+
+    def rollback_staged_media(
+        self,
+        staged: StagedSubtitleMediaDelivery,
+        *,
+        reason: str,
+        published_evidence: FileEvidence | None = None,
+    ) -> SubtitleMediaRollback:
+        """Remove only transaction-owned artifacts and describe the result."""
+
+        if not isinstance(staged, StagedSubtitleMediaDelivery):
+            raise SubtitleDeliveryError(
+                SubtitleDeliveryErrorCode.INVALID_PLAN,
+                "Rollback requires a staged subtitle media delivery.",
+            )
+        cleanup_errors: list[str] = []
+        customer_state = "absent"
+        output = staged.customer_output_path
+        if os.path.lexists(output):
+            if published_evidence is None:
+                customer_state = "existing-preserved"
+            else:
+                state, error = _remove_matching_artifact(
+                    output,
+                    published_evidence,
+                )
+                customer_state = (
+                    "rolled-back" if state == "removed" else state
+                )
+                if error is not None:
+                    cleanup_errors.append(error)
+
+        quarantine_state = "absent"
+        quarantine = staged.quarantine_path
+        if os.path.lexists(quarantine):
+            state, error = _remove_matching_artifact(
+                quarantine,
+                staged.quarantine_evidence,
+            )
+            quarantine_state = state
+            if error is not None:
+                cleanup_errors.append(error)
+
+        source_unchanged = False
+        try:
+            source_after = _capture_file_evidence(
+                Path(staged.receipt.source_path),
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            source_unchanged = (
+                source_after == staged.receipt.source_before
+            )
+        except SubtitleDeliveryError as exc:
+            cleanup_errors.append(str(exc))
+
+        return SubtitleMediaRollback(
+            reason=str(reason),
+            customer_output_path=output,
+            quarantine_path=quarantine,
+            quarantine_evidence=staged.quarantine_evidence,
+            customer_output_state=customer_state,
+            quarantine_state=quarantine_state,
+            source_unchanged=source_unchanged,
+            cleanup_error=(
+                "; ".join(cleanup_errors) if cleanup_errors else None
+            ),
         )
 
     def _deliver_sidecar(
@@ -1803,6 +2188,105 @@ def _require_unchanged_source(
         )
 
 
+def _validated_passing_visual_qa(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(evidence, Mapping):
+        raise SubtitleDeliveryError(
+            SubtitleDeliveryErrorCode.QA_FAILED,
+            "Atomic publication requires structured visual-QA evidence.",
+        )
+    try:
+        payload = json.loads(
+            json.dumps(
+                dict(evidence),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise SubtitleDeliveryError(
+            SubtitleDeliveryErrorCode.QA_FAILED,
+            "Visual-QA evidence must be finite canonical JSON.",
+            detail=str(exc),
+        ) from exc
+    if payload.get("passed") is not True:
+        raise SubtitleDeliveryError(
+            SubtitleDeliveryErrorCode.QA_FAILED,
+            "Visual-QA evidence did not explicitly pass.",
+        )
+    return payload
+
+
+def _canonical_mapping_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(payload),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _with_rollback_evidence(
+    error: SubtitleDeliveryError,
+    rollback: SubtitleMediaRollback,
+) -> SubtitleDeliveryError:
+    evidence = dict(error.evidence)
+    evidence["rollback"] = rollback.to_dict()
+    return SubtitleDeliveryError(
+        error.code,
+        str(error),
+        detail=error.detail,
+        evidence=evidence,
+    )
+
+
+def _same_artifact(left: FileEvidence, right: FileEvidence) -> bool:
+    return (
+        left.size_bytes == right.size_bytes
+        and left.sha256 == right.sha256
+    )
+
+
+def _same_file_evidence(left: FileEvidence, right: FileEvidence) -> bool:
+    return left == right
+
+
+def _remove_matching_artifact(
+    path: Path,
+    evidence: FileEvidence,
+) -> tuple[str, str | None]:
+    try:
+        current = _capture_file_evidence(path, chunk_bytes=1024 * 1024)
+    except SubtitleDeliveryError as exc:
+        return "inspection-failed-retained", str(exc)
+    if not _same_file_evidence(current, evidence):
+        return "changed-retained", None
+    try:
+        path.unlink()
+    except OSError as exc:
+        return "removal-failed-retained", str(exc)
+    return "removed", None
+
+
+def _new_quarantine_output(output: Path) -> Path:
+    for _ in range(16):
+        candidate = output.parent / (
+            f".{output.stem}.mts-quarantine-{uuid.uuid4().hex}"
+            f"{output.suffix}"
+        )
+        if not os.path.lexists(candidate):
+            return candidate
+    raise SubtitleDeliveryError(
+        SubtitleDeliveryErrorCode.PUBLISH_FAILED,
+        "Could not allocate a unique private quarantine output.",
+    )
+
+
 def _new_temporary_output(output: Path) -> Path:
     for _ in range(16):
         candidate = output.parent / (
@@ -1928,4 +2412,7 @@ __all__ = [
     "SubtitleDeliveryExecutor",
     "SubtitleDeliveryPolicy",
     "SubtitleDeliveryReceipt",
+    "StagedSubtitleMediaDelivery",
+    "SubtitleMediaPublication",
+    "SubtitleMediaRollback",
 ]

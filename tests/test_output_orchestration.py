@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -175,6 +176,39 @@ def _artifact(
         output_directory=output,
     )
     return source, output, probe, artifact
+
+
+def _prepared_soft_mux(
+    tmp_path: Path,
+) -> tuple[Path, Path, Any]:
+    source, output, probe, artifact = _artifact(tmp_path)
+    customer_output = output / "rendered.mp4"
+    customization = resolve_output_customization(
+        {
+            "delivery": {
+                "mode": "soft-mux",
+                "outputTarget": {
+                    "binding": "bound",
+                    "sourcePath": str(source.resolve()),
+                    "outputPath": str(customer_output.resolve()),
+                },
+            }
+        }
+    )
+    plan = compile_output_execution_plan(
+        customization,
+        source_path=source,
+        output_directory=output,
+        media_probe=probe,
+        media_probe_artifact=artifact,
+        language="en",
+        speaker_count=2,
+        generated_date="2026-07-23",
+    )
+    return source, customer_output, prepare_subtitle_outputs(
+        plan,
+        _transcript(),
+    )
 
 
 def test_probe_artifact_is_exact_hash_bound_and_never_replaced(
@@ -537,3 +571,153 @@ def test_burn_in_requires_visual_qa_hook_before_any_delivery(
 
     assert raised.value.code == "SUBTITLE_VISUAL_QA_REQUIRED"
     assert executor.calls == 0
+
+
+def test_media_is_quarantined_until_visual_qa_passes_then_published(
+    tmp_path: Path,
+) -> None:
+    source, customer_output, prepared = _prepared_soft_mux(tmp_path)
+    events: list[str] = []
+
+    class Staged:
+        def __init__(self, quarantine_path: Path) -> None:
+            self.quarantine_path = quarantine_path
+            self.receipt = {"status": "quarantined"}
+
+    class Publication:
+        receipt = {"status": "delivered"}
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "status": "published",
+                "atomic": True,
+                "noReplace": True,
+            }
+
+    class Executor:
+        def deliver(self, *_: Any, **__: Any) -> dict[str, Any]:
+            return {"status": "sidecar-delivered"}
+
+        def stage_media_delivery(
+            self,
+            *_: Any,
+            **__: Any,
+        ) -> Staged:
+            events.append("stage")
+            assert not customer_output.exists()
+            quarantine = (
+                customer_output.parent
+                / ".rendered.mts-quarantine-fixture.mp4"
+            )
+            quarantine.write_bytes(b"qa-candidate")
+            return Staged(quarantine)
+
+        def publish_staged_media(
+            self,
+            staged: Staged,
+            *,
+            visual_qa_evidence: dict[str, Any],
+        ) -> Publication:
+            events.append("publish")
+            assert visual_qa_evidence["passed"] is True
+            assert staged.quarantine_path.exists()
+            assert not customer_output.exists()
+            os.link(staged.quarantine_path, customer_output)
+            staged.quarantine_path.unlink()
+            return Publication()
+
+    def visual_qa(**kwargs: Any) -> dict[str, Any]:
+        events.append("visual-qa")
+        assert kwargs["source_path"] == source.resolve()
+        assert kwargs["rendered_path"].name.startswith(
+            ".rendered.mts-quarantine-"
+        )
+        assert kwargs["rendered_path"].exists()
+        assert not customer_output.exists()
+        return {"passed": True, "analysisId": "qa-success"}
+
+    result = execute_prepared_subtitle_outputs(
+        prepared,
+        executor=Executor(),
+        subtitle_language="en",
+        subtitle_title="Captions",
+        visual_qa_hook=visual_qa,
+    )
+
+    assert events == ["stage", "visual-qa", "publish"]
+    assert customer_output.read_bytes() == b"qa-candidate"
+    assert result["mediaReceipt"] == {"status": "delivered"}
+    assert result["mediaPublication"]["atomic"] is True
+    assert result["visualQa"]["passed"] is True
+
+
+def test_failed_visual_qa_rolls_back_quarantine_without_customer_output(
+    tmp_path: Path,
+) -> None:
+    _, customer_output, prepared = _prepared_soft_mux(tmp_path)
+    events: list[str] = []
+
+    class Staged:
+        def __init__(self, quarantine_path: Path) -> None:
+            self.quarantine_path = quarantine_path
+            self.receipt = {"status": "quarantined"}
+
+    class Executor:
+        def deliver(self, *_: Any, **__: Any) -> dict[str, Any]:
+            return {"status": "sidecar-delivered"}
+
+        def stage_media_delivery(
+            self,
+            *_: Any,
+            **__: Any,
+        ) -> Staged:
+            events.append("stage")
+            quarantine = (
+                customer_output.parent
+                / ".rendered.mts-quarantine-failed.mp4"
+            )
+            quarantine.write_bytes(b"failed-qa-candidate")
+            return Staged(quarantine)
+
+        def publish_staged_media(self, *_: Any, **__: Any) -> None:
+            events.append("publish")
+            raise AssertionError("failed QA must never publish")
+
+        def rollback_staged_media(
+            self,
+            staged: Staged,
+            *,
+            reason: str,
+        ) -> dict[str, Any]:
+            events.append("rollback")
+            staged.quarantine_path.unlink()
+            return {
+                "status": "rolled-back",
+                "reason": reason,
+                "customerOutputState": "absent",
+                "quarantine": {"state": "removed"},
+            }
+
+    with pytest.raises(WorkerError) as raised:
+        execute_prepared_subtitle_outputs(
+            prepared,
+            executor=Executor(),
+            subtitle_language="en",
+            subtitle_title="Captions",
+            visual_qa_hook=lambda **_: {
+                "passed": False,
+                "failureCodes": ["subtitle-clipped"],
+            },
+        )
+
+    assert raised.value.code == "SUBTITLE_VISUAL_QA_FAILED"
+    assert events == ["stage", "rollback"]
+    assert raised.value.details["rollback"]["status"] == "rolled-back"
+    assert (
+        raised.value.details["rollback"]["customerOutputState"]
+        == "absent"
+    )
+    assert not customer_output.exists()
+    assert not list(
+        customer_output.parent.glob("*.mts-quarantine-failed.mp4")
+    )

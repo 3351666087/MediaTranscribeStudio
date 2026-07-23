@@ -556,6 +556,201 @@ def test_soft_mux_mp4_selects_only_the_new_mov_text_stream(
     Draft202012Validator(_schema()).validate(receipt.to_dict())
 
 
+def test_media_staging_keeps_customer_output_absent_until_atomic_publish(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"immutable-source")
+    subtitle = _write_subtitle(tmp_path / "captions.srt", SRT_TEXT)
+    output = tmp_path / "delivered.mp4"
+    executor = SubtitleDeliveryExecutor(
+        runner=RunnerFixture(),
+        probe=ProbeFixture(source, output_subtitles=("mov_text",)),
+    )
+
+    staged = executor.stage_media_delivery(
+        _soft_plan(source, output, subtitle)
+    )
+
+    assert not output.exists()
+    assert staged.quarantine_path.exists()
+    assert staged.quarantine_path.parent == output.parent
+    assert ".mts-quarantine-" in staged.quarantine_path.name
+    assert staged.receipt.output_path == str(staged.quarantine_path)
+    assert staged.to_dict()["customerOutputAbsent"] is True
+
+    publication = executor.publish_staged_media(
+        staged,
+        visual_qa_evidence={
+            "passed": True,
+            "analysisId": "qa-passed",
+        },
+    )
+
+    assert output.read_bytes() == b"derived-media-fixture"
+    assert not staged.quarantine_path.exists()
+    assert publication.receipt.output_path == str(output.resolve())
+    assert publication.receipt.source_before == publication.receipt.source_after
+    assert publication.to_dict()["atomic"] is True
+    assert publication.to_dict()["noReplace"] is True
+    assert publication.to_dict()["quarantineRemoved"] is True
+    assert len(publication.to_dict()["visualQaEvidenceSha256"]) == 64
+
+
+def test_burn_in_uses_the_same_qa_gated_quarantine_publication(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"immutable-source")
+    subtitle = _write_subtitle(tmp_path / "captions.ass", ASS_TEXT)
+    output = tmp_path / "delivered.mp4"
+    executor = SubtitleDeliveryExecutor(
+        runner=RunnerFixture(),
+        probe=ProbeFixture(source),
+    )
+
+    staged = executor.stage_media_delivery(
+        _burn_plan(source, output, subtitle),
+        burn_in_strategy=BurnInVideoStrategy.H264_HIGH_QUALITY,
+    )
+
+    assert staged.receipt.mode.value == "burn-in"
+    assert not output.exists()
+    assert staged.quarantine_path.exists()
+
+    publication = executor.publish_staged_media(
+        staged,
+        visual_qa_evidence={"passed": True, "analysisId": "burn-in-qa"},
+    )
+
+    assert publication.receipt.output_path == str(output.resolve())
+    assert output.exists()
+    assert not staged.quarantine_path.exists()
+    assert source.read_bytes() == b"immutable-source"
+
+
+def test_non_passing_visual_qa_cannot_publish_and_records_rollback(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"immutable-source")
+    subtitle = _write_subtitle(tmp_path / "captions.srt", SRT_TEXT)
+    output = tmp_path / "delivered.mp4"
+    executor = SubtitleDeliveryExecutor(
+        runner=RunnerFixture(),
+        probe=ProbeFixture(source, output_subtitles=("mov_text",)),
+    )
+    staged = executor.stage_media_delivery(
+        _soft_plan(source, output, subtitle)
+    )
+
+    with pytest.raises(SubtitleDeliveryError) as raised:
+        executor.publish_staged_media(
+            staged,
+            visual_qa_evidence={
+                "passed": False,
+                "failureCodes": ["subtitle-clipped"],
+            },
+        )
+
+    assert raised.value.code is SubtitleDeliveryErrorCode.QA_FAILED
+    rollback = raised.value.evidence["rollback"]
+    assert rollback["customerOutputState"] == "absent"
+    assert rollback["quarantine"]["state"] == "removed"
+    assert not output.exists()
+    assert not staged.quarantine_path.exists()
+
+
+def test_publication_failure_removes_quarantine_and_records_rollback(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"immutable-source")
+    subtitle = _write_subtitle(tmp_path / "captions.srt", SRT_TEXT)
+    output = tmp_path / "delivered.mp4"
+    executor = SubtitleDeliveryExecutor(
+        runner=RunnerFixture(),
+        probe=ProbeFixture(source, output_subtitles=("mov_text",)),
+    )
+    staged = executor.stage_media_delivery(
+        _soft_plan(source, output, subtitle)
+    )
+
+    with (
+        patch(
+            "backend.subtitle_delivery.os.link",
+            side_effect=OSError("publication unavailable"),
+        ),
+        pytest.raises(SubtitleDeliveryError) as raised,
+    ):
+        executor.publish_staged_media(
+            staged,
+            visual_qa_evidence={"passed": True},
+        )
+
+    assert raised.value.code is SubtitleDeliveryErrorCode.PUBLISH_FAILED
+    rollback = raised.value.evidence["rollback"]
+    assert rollback["status"] == "rolled-back"
+    assert rollback["customerOutputState"] == "absent"
+    assert rollback["quarantine"]["state"] == "removed"
+    assert rollback["sourceMediaImmutable"] is True
+    assert not output.exists()
+    assert not staged.quarantine_path.exists()
+    assert source.read_bytes() == b"immutable-source"
+
+
+def test_existing_customer_output_conflict_is_preserved_and_never_rendered(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"immutable-source")
+    subtitle = _write_subtitle(tmp_path / "captions.srt", SRT_TEXT)
+    output = tmp_path / "delivered.mp4"
+    output.write_bytes(b"existing-customer-output")
+    runner = RunnerFixture()
+
+    with pytest.raises(SubtitleDeliveryError) as raised:
+        SubtitleDeliveryExecutor(
+            runner=runner,
+            probe=ProbeFixture(source, output_subtitles=("mov_text",)),
+        ).stage_media_delivery(_soft_plan(source, output, subtitle))
+
+    assert raised.value.code is SubtitleDeliveryErrorCode.OUTPUT_EXISTS
+    assert output.read_bytes() == b"existing-customer-output"
+    assert runner.commands == []
+    assert not list(tmp_path.glob("*.mts-quarantine-*"))
+
+
+def test_concurrent_customer_output_conflict_rolls_back_quarantine(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"immutable-source")
+    subtitle = _write_subtitle(tmp_path / "captions.srt", SRT_TEXT)
+    output = tmp_path / "delivered.mp4"
+    executor = SubtitleDeliveryExecutor(
+        runner=RunnerFixture(),
+        probe=ProbeFixture(source, output_subtitles=("mov_text",)),
+    )
+    staged = executor.stage_media_delivery(
+        _soft_plan(source, output, subtitle)
+    )
+    output.write_bytes(b"competing-customer-output")
+
+    with pytest.raises(SubtitleDeliveryError) as raised:
+        executor.publish_staged_media(
+            staged,
+            visual_qa_evidence={"passed": True},
+        )
+
+    assert raised.value.code is SubtitleDeliveryErrorCode.OUTPUT_EXISTS
+    rollback = raised.value.evidence["rollback"]
+    assert rollback["customerOutputState"] == "existing-preserved"
+    assert rollback["quarantine"]["state"] == "removed"
+    assert output.read_bytes() == b"competing-customer-output"
+    assert not staged.quarantine_path.exists()
+
+
 @pytest.mark.parametrize(
     ("subtitle_format", "text", "expected_codec"),
     [

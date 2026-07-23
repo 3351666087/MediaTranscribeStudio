@@ -37,7 +37,10 @@ from .persistence import (
     read_json_strict,
     sha256_file,
 )
-from .subtitle_delivery import BurnInVideoStrategy
+from .subtitle_delivery import (
+    BurnInVideoStrategy,
+    SubtitleDeliveryError,
+)
 from .subtitles import (
     CuePolicy,
     SubtitleArrangement,
@@ -707,10 +710,7 @@ def prepare_subtitle_outputs(
         arrangement=arrangement,
         sidecars=tuple(sidecars),
         media_delivery_plan=media_delivery_plan,
-        visual_qa_required=bool(
-            plan.delivery_mode is SubtitleOutputMode.BURN_IN
-            and plan.visual_qa_required
-        ),
+        visual_qa_required=media_delivery_plan is not None,
     )
 
 
@@ -724,15 +724,16 @@ def execute_prepared_subtitle_outputs(
     burn_in_strategy: BurnInVideoStrategy | str | None = None,
     visual_qa_hook: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
-    """Execute existing delivery plans and fail before burn-in without visual QA."""
+    """Publish media only after QA passes against a quarantined render."""
 
     if prepared.visual_qa_required and visual_qa_hook is None:
         raise WorkerError(
             "SUBTITLE_VISUAL_QA_REQUIRED",
-            "burn-in execution requires a representative-frame visual-QA hook",
+            "media subtitle delivery requires a representative-frame visual-QA hook",
         )
     language = _validated_language(subtitle_language)
     sidecar_receipts: list[Any] = []
+    staged_media: Any = None
     try:
         for artifact in prepared.sidecars:
             sidecar_receipts.append(
@@ -745,41 +746,148 @@ def execute_prepared_subtitle_outputs(
                 )
             )
         media_receipt = None
+        media_publication = None
         visual_qa_result = None
         if prepared.media_delivery_plan is not None:
-            media_receipt = executor.deliver(
+            staged_media = executor.stage_media_delivery(
                 prepared.media_delivery_plan,
                 subtitle_language=language,
                 subtitle_title=subtitle_title,
                 make_subtitle_default=make_subtitle_default,
                 burn_in_strategy=burn_in_strategy,
             )
-            if prepared.visual_qa_required:
-                assert visual_qa_hook is not None
+            assert visual_qa_hook is not None
+            try:
                 visual_qa_result = visual_qa_hook(
                     source_path=Path(prepared.media_delivery_plan.source_path),
-                    rendered_path=Path(prepared.media_delivery_plan.output_path),
+                    rendered_path=Path(staged_media.quarantine_path),
                     arrangement=prepared.arrangement,
-                    delivery_receipt=media_receipt,
+                    delivery_receipt=staged_media.receipt,
                 )
-                if visual_qa_result is None:
+                visual_qa_result = _passing_visual_qa_evidence(
+                    visual_qa_result
+                )
+            except Exception as exc:
+                rollback = _rollback_staged_media(
+                    executor,
+                    staged_media,
+                    reason="visual-qa-failed",
+                )
+                if isinstance(exc, WorkerError):
+                    details = dict(exc.details)
+                    details["rollback"] = rollback
                     raise WorkerError(
-                        "SUBTITLE_VISUAL_QA_FAILED",
-                        "the representative-frame visual-QA hook returned no evidence",
-                    )
+                        exc.code,
+                        exc.message,
+                        details=details,
+                        retryable=exc.retryable,
+                    ) from exc
+                raise WorkerError(
+                    "SUBTITLE_VISUAL_QA_FAILED",
+                    "representative-frame subtitle visual QA failed closed",
+                    details={
+                        "reason": str(exc),
+                        "exceptionType": type(exc).__name__,
+                        "rollback": rollback,
+                    },
+                ) from exc
+            publication = executor.publish_staged_media(
+                staged_media,
+                visual_qa_evidence=visual_qa_result,
+            )
+            media_receipt = publication.receipt
+            media_publication = publication.to_dict()
     except WorkerError:
         raise
+    except SubtitleDeliveryError as exc:
+        details: dict[str, Any] = {
+            "reason": str(exc),
+            "deliveryErrorCode": exc.code.value,
+        }
+        if exc.detail:
+            details["deliveryErrorDetail"] = exc.detail
+        if exc.evidence:
+            details.update(exc.evidence)
+        elif staged_media is not None:
+            details["rollback"] = _rollback_staged_media(
+                executor,
+                staged_media,
+                reason=f"delivery-{exc.code.value}",
+            )
+        raise WorkerError(
+            "SUBTITLE_DELIVERY_FAILED",
+            "subtitle delivery failed closed",
+            details=details,
+        ) from exc
     except Exception as exc:
+        details: dict[str, Any] = {
+            "reason": str(exc),
+            "exceptionType": type(exc).__name__,
+        }
+        if staged_media is not None:
+            details["rollback"] = _rollback_staged_media(
+                executor,
+                staged_media,
+                reason="delivery-unexpected-failure",
+            )
         raise WorkerError(
             "SUBTITLE_DELIVERY_FAILED",
             "subtitle delivery or visual QA failed closed",
-            details={"reason": str(exc), "exceptionType": type(exc).__name__},
+            details=details,
         ) from exc
     return {
         "sidecarReceipts": tuple(sidecar_receipts),
         "mediaReceipt": media_receipt,
+        "mediaPublication": media_publication,
         "visualQa": visual_qa_result,
     }
+
+
+def _passing_visual_qa_evidence(result: Any) -> dict[str, Any]:
+    if isinstance(result, Mapping):
+        payload = dict(result)
+    else:
+        to_dict = getattr(result, "to_dict", None)
+        if not callable(to_dict):
+            raise WorkerError(
+                "SUBTITLE_VISUAL_QA_FAILED",
+                "the visual-QA hook returned no structured evidence",
+            )
+        payload = to_dict()
+    if not isinstance(payload, Mapping) or payload.get("passed") is not True:
+        raise WorkerError(
+            "SUBTITLE_VISUAL_QA_FAILED",
+            "the visual-QA evidence did not explicitly pass",
+        )
+    return dict(payload)
+
+
+def _rollback_staged_media(
+    executor: Any,
+    staged_media: Any,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    try:
+        evidence = executor.rollback_staged_media(
+            staged_media,
+            reason=reason,
+        )
+        to_dict = getattr(evidence, "to_dict", None)
+        if callable(to_dict):
+            payload = to_dict()
+        elif isinstance(evidence, Mapping):
+            payload = dict(evidence)
+        else:
+            raise TypeError("rollback returned no structured evidence")
+        return dict(payload)
+    except Exception as exc:
+        return {
+            "status": "rollback-evidence-unavailable",
+            "reason": reason,
+            "cleanupError": str(exc),
+            "exceptionType": type(exc).__name__,
+        }
 
 
 def render_planned_report(

@@ -21,6 +21,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from .adapters import AdapterContext
 from .errors import WorkerError
+from .language import reconcile_detected_languages
 from .models import (
     Revision,
     SpeakerCountEstimate,
@@ -71,6 +72,8 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
     }
 )
+_CLUSTER_SELECTION_METHOD = "dynamic-n-multimetric-stability-v5"
+_SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v4"
 
 
 def _normalized_overlap_evidence(
@@ -666,6 +669,8 @@ class BatchAsrAdapter(Protocol):
         prepared: PreparedAudio,
         windows: Sequence[SpeechWindow],
         context: AdapterContext,
+        *,
+        requested_language: str,
     ) -> Sequence[AsrHypothesis | Mapping[str, Any]]:
         """Transcribe all cache misses in one model batch."""
 
@@ -730,9 +735,21 @@ class _InjectedRunner:
 class Qwen3AsrAdapter(_InjectedRunner):
     """Thin adapter for an explicitly supplied local Qwen3-ASR runner."""
 
-    def transcribe_batch(self, prepared, windows, context):
+    def transcribe_batch(
+        self,
+        prepared,
+        windows,
+        context,
+        *,
+        requested_language,
+    ):
         context.raise_if_cancelled()
-        return self.runner(prepared, tuple(windows), context)
+        return self.runner(
+            prepared,
+            tuple(windows),
+            context,
+            requested_language=requested_language,
+        )
 
 
 class CamPlusEmbeddingAdapter(_InjectedRunner):
@@ -1003,8 +1020,12 @@ class _ClusterCandidateScore:
     eigengap_utility: float
     stability: float
     bootstrap_support: float
+    residual_dispersion: float
+    singleton_count: int
     singleton_fraction: float
+    tiny_cluster_count: int
     tiny_cluster_fraction: float
+    minimum_cluster_size: int
     fragmentation: float
     complexity_penalty: float
     under_split_risk: float
@@ -1034,8 +1055,12 @@ class _ClusterCandidateScore:
             "eigengapUtility": self.eigengap_utility,
             "stability": self.stability,
             "bootstrapSupport": self.bootstrap_support,
+            "residualDispersion": self.residual_dispersion,
+            "singletonCount": self.singleton_count,
             "singletonFraction": self.singleton_fraction,
+            "tinyClusterCount": self.tiny_cluster_count,
             "tinyClusterFraction": self.tiny_cluster_fraction,
+            "minimumClusterSize": self.minimum_cluster_size,
             "fragmentation": self.fragmentation,
             "complexityPenalty": self.complexity_penalty,
             "underSplitRisk": self.under_split_risk,
@@ -1086,14 +1111,44 @@ class _ClusterCandidateScore:
         metric_votes = int(value.get("metricVotes", 0))
         if metric_votes < 0:
             raise ValueError("cluster candidate metric votes are invalid")
+        compactness = _probability(
+            value.get("compactness"), "cluster.candidate.compactness"
+        )
+        singleton_fraction = _probability(
+            value.get("singletonFraction"),
+            "cluster.candidate.singletonFraction",
+        )
+        tiny_cluster_fraction = _probability(
+            value.get("tinyClusterFraction"),
+            "cluster.candidate.tinyClusterFraction",
+        )
+        singleton_count = int(
+            value.get(
+                "singletonCount",
+                round(singleton_fraction * count),
+            )
+        )
+        tiny_cluster_count = int(
+            value.get(
+                "tinyClusterCount",
+                round(tiny_cluster_fraction * count),
+            )
+        )
+        minimum_cluster_size = int(value.get("minimumClusterSize", 0))
+        if (
+            singleton_count < 0
+            or singleton_count > count
+            or tiny_cluster_count < singleton_count
+            or tiny_cluster_count > count
+            or minimum_cluster_size < 0
+        ):
+            raise ValueError("cluster candidate cardinality audit is invalid")
         return cls(
             count=count,
             objective=_finite_float(
                 value.get("objective"), "cluster.candidate.objective"
             ),
-            compactness=_probability(
-                value.get("compactness"), "cluster.candidate.compactness"
-            ),
+            compactness=compactness,
             separation=_probability(
                 value.get("separation"), "cluster.candidate.separation"
             ),
@@ -1142,14 +1197,21 @@ class _ClusterCandidateScore:
                 value.get("bootstrapSupport", 0.0),
                 "cluster.candidate.bootstrapSupport",
             ),
-            singleton_fraction=_probability(
-                value.get("singletonFraction"),
-                "cluster.candidate.singletonFraction",
+            residual_dispersion=max(
+                0.0,
+                _finite_float(
+                    value.get(
+                        "residualDispersion",
+                        max(0.0, 1.0 - compactness),
+                    ),
+                    "cluster.candidate.residualDispersion",
+                ),
             ),
-            tiny_cluster_fraction=_probability(
-                value.get("tinyClusterFraction"),
-                "cluster.candidate.tinyClusterFraction",
-            ),
+            singleton_count=singleton_count,
+            singleton_fraction=singleton_fraction,
+            tiny_cluster_count=tiny_cluster_count,
+            tiny_cluster_fraction=tiny_cluster_fraction,
+            minimum_cluster_size=minimum_cluster_size,
             fragmentation=_probability(
                 value.get("fragmentation"),
                 "cluster.candidate.fragmentation",
@@ -1226,7 +1288,7 @@ class _ClusterResult:
     eigengap_method: str = "not-evaluated"
     leader_count_work_items: int = 0
     total_work_items: int = 0
-    selection_method: str = "dynamic-n-multimetric-stability-v4"
+    selection_method: str = _CLUSTER_SELECTION_METHOD
     confidence_reasons: tuple[str, ...] = ()
     correction_path: tuple[str, ...] = ()
     under_split_detected: bool = False
@@ -1354,7 +1416,7 @@ class _ClusterResult:
             selection_method=str(
                 value.get(
                     "selectionMethod",
-                    "dynamic-n-multimetric-stability-v4",
+                    _CLUSTER_SELECTION_METHOD,
                 )
             ),
             confidence_reasons=tuple(
@@ -1946,10 +2008,13 @@ def _score_cluster_candidate(
             )
         approximate_silhouette = sum(silhouette_rows) / sample_count
 
-    singleton_fraction = sum(size == 1 for size in sizes) / fit.count
+    singleton_count = sum(size == 1 for size in sizes)
+    singleton_fraction = singleton_count / fit.count
     expected_cluster_size = sample_count / fit.count
     tiny_limit = max(1, math.floor(expected_cluster_size * 0.25))
-    tiny_cluster_fraction = sum(size <= tiny_limit for size in sizes) / fit.count
+    tiny_cluster_count = sum(size <= tiny_limit for size in sizes)
+    tiny_cluster_fraction = tiny_cluster_count / fit.count
+    minimum_cluster_size = min(sizes)
 
     chronological = sorted(
         range(sample_count),
@@ -1980,6 +2045,7 @@ def _score_cluster_candidate(
         max(0.0, 1.0 - fit.scores[index][assignment])
         for index, assignment in enumerate(fit.assignments)
     )
+    residual_dispersion = within_dispersion / sample_count
     if fit.count == 1:
         calinski_harabasz = 0.0
         calinski_harabasz_utility = 0.0
@@ -2169,8 +2235,12 @@ def _score_cluster_candidate(
         eigengap_utility=eigengap,
         stability=stability,
         bootstrap_support=bootstrap_support,
+        residual_dispersion=residual_dispersion,
+        singleton_count=singleton_count,
         singleton_fraction=singleton_fraction,
+        tiny_cluster_count=tiny_cluster_count,
         tiny_cluster_fraction=tiny_cluster_fraction,
+        minimum_cluster_size=minimum_cluster_size,
         fragmentation=fragmentation,
         complexity_penalty=complexity_penalty,
         under_split_risk=under_split_risk,
@@ -2227,6 +2297,81 @@ def _finalize_cluster_candidate_scores(
             )
         )
     return finalized
+
+
+def _is_persistent_singleton_outlier_step(
+    persistent: _ClusterCandidateScore,
+    with_singleton: _ClusterCandidateScore,
+) -> bool:
+    """Recognize one uncorroborated cluster without hiding the ambiguity.
+
+    A single speech window is not enough evidence to silently promote a new
+    persistent speaker.  We therefore prefer the adjacent persistent count
+    only when the lower-count fit remains coherent and both counts stay in the
+    reported confidence interval for mandatory human review.
+    """
+
+    return (
+        with_singleton.count == persistent.count + 1
+        and with_singleton.singleton_count == 1
+        and with_singleton.tiny_cluster_count == 1
+        and with_singleton.minimum_cluster_size == 1
+        and persistent.singleton_count == 0
+        and persistent.tiny_cluster_count == 0
+        and persistent.minimum_cluster_size >= 2
+        and persistent.compactness >= 0.75
+        and persistent.residual_dispersion <= 0.25
+        and persistent.stability >= 0.90
+        and persistent.bootstrap_support >= 0.90
+        and with_singleton.stability >= persistent.stability - 0.10
+        and with_singleton.bootstrap_support >= 0.80
+        and with_singleton.bootstrap_support
+        >= persistent.bootstrap_support - 0.20
+        and with_singleton.objective - persistent.objective <= 0.52
+    )
+
+
+def _is_resolvable_close_voice_step(
+    merged: _ClusterCandidateScore,
+    separated: _ClusterCandidateScore,
+) -> bool:
+    """Detect a stable adjacent split whose residual collapses dramatically.
+
+    Raw centroid separation is intentionally not treated as a veto here:
+    closely related voices can have low inter-centroid distance even when
+    repeated observations form two exceptionally compact, stable clusters.
+    Singleton/tiny-cluster guards keep this correction from rewarding ordinary
+    overfitting.
+    """
+
+    residual_before = max(1e-12, merged.residual_dispersion)
+    residual_after = max(0.0, separated.residual_dispersion)
+    residual_reduction = (residual_before - residual_after) / residual_before
+    return (
+        separated.count == merged.count + 1
+        and merged.singleton_count == 0
+        and merged.tiny_cluster_count == 0
+        and separated.singleton_count == 0
+        and separated.tiny_cluster_count == 0
+        and separated.minimum_cluster_size >= 2
+        and residual_before >= 1e-5
+        and residual_reduction >= 0.80
+        and residual_after <= residual_before * 0.20
+        and separated.compactness > merged.compactness
+        and separated.approximate_silhouette
+        >= merged.approximate_silhouette
+        and separated.calinski_harabasz_utility
+        >= merged.calinski_harabasz_utility + 0.02
+        and separated.davies_bouldin_utility
+        >= merged.davies_bouldin_utility - 0.02
+        and separated.stability >= 0.90
+        and separated.stability >= merged.stability - 0.08
+        and separated.bootstrap_support >= 0.88
+        and separated.bootstrap_support
+        >= merged.bootstrap_support - 0.10
+        and separated.separation <= 0.12
+        and separated.objective >= merged.objective - 0.23
+    )
 
 
 def _cluster(
@@ -2417,6 +2562,24 @@ def _cluster(
     lower_score = scores_by_count.get(selected_score.count - 1)
     if (
         lower_score is not None
+        and _is_persistent_singleton_outlier_step(
+            lower_score,
+            selected_score,
+        )
+    ):
+        correction_path.extend(
+            (
+                (
+                    f"OVER_SPLIT_CORRECTION:"
+                    f"{selected_score.count}->{lower_score.count}"
+                ),
+                "ABSOLUTE_SINGLETON_OUTLIER_AMBIGUITY",
+            )
+        )
+        over_split_detected = True
+        selected_score = lower_score
+    elif (
+        lower_score is not None
         and (
             selected_score.over_split_risk >= 0.22
             or selected_score.outlier_risk >= 0.15
@@ -2432,25 +2595,43 @@ def _cluster(
 
     upper_score = scores_by_count.get(selected_score.count + 1)
     if upper_score is not None and not over_split_detected:
-        improvements = sum(
-            (
-                upper_score.approximate_silhouette
-                > selected_score.approximate_silhouette + 0.03,
-                upper_score.calinski_harabasz_utility
-                > selected_score.calinski_harabasz_utility + 0.03,
-                upper_score.davies_bouldin_utility
-                > selected_score.davies_bouldin_utility + 0.03,
-                upper_score.compactness > selected_score.compactness + 0.015,
-                upper_score.eigengap_utility
-                > selected_score.eigengap_utility + 0.05,
+        generic_under_split = False
+        if _is_resolvable_close_voice_step(selected_score, upper_score):
+            correction_path.extend(
+                (
+                    (
+                        f"UNDER_SPLIT_CORRECTION:"
+                        f"{selected_score.count}->{upper_score.count}"
+                    ),
+                    "CLOSE_VOICE_RESIDUAL_COLLAPSE",
+                )
             )
-        )
-        if (
-            improvements >= 3
-            and upper_score.objective >= selected_score.objective - 0.03
-            and upper_score.stability >= selected_score.stability - 0.08
-            and upper_score.over_split_risk < 0.38
-        ):
+            under_split_detected = True
+            selected_score = upper_score
+        else:
+            improvements = sum(
+                (
+                    upper_score.approximate_silhouette
+                    > selected_score.approximate_silhouette + 0.03,
+                    upper_score.calinski_harabasz_utility
+                    > selected_score.calinski_harabasz_utility + 0.03,
+                    upper_score.davies_bouldin_utility
+                    > selected_score.davies_bouldin_utility + 0.03,
+                    upper_score.compactness
+                    > selected_score.compactness + 0.015,
+                    upper_score.eigengap_utility
+                    > selected_score.eigengap_utility + 0.05,
+                )
+            )
+            generic_under_split = (
+                improvements >= 3
+                and upper_score.objective
+                >= selected_score.objective - 0.03
+                and upper_score.stability
+                >= selected_score.stability - 0.08
+                and upper_score.over_split_risk < 0.38
+            )
+        if not under_split_detected and generic_under_split:
             correction_path.append(
                 f"UNDER_SPLIT_CORRECTION:{selected_score.count}->{upper_score.count}"
             )
@@ -2567,6 +2748,14 @@ def _cluster(
     if any(item.singleton_fraction > 0.0 for item in plausible):
         confidence = min(confidence, 0.72)
         confidence_reasons.append("SINGLETON_OUTLIER_AMBIGUITY")
+    if "ABSOLUTE_SINGLETON_OUTLIER_AMBIGUITY" in correction_path:
+        confidence = min(confidence, 0.68)
+        confidence_reasons.append(
+            "PERSISTENT_COUNT_SELECTED_SINGLETON_REVIEW_REQUIRED"
+        )
+    if "CLOSE_VOICE_RESIDUAL_COLLAPSE" in correction_path:
+        confidence = min(confidence, 0.74)
+        confidence_reasons.append("CLOSE_VOICE_RESIDUAL_CORRECTION")
     if selected_score.bootstrap_support < 0.85:
         confidence = min(confidence, 0.70)
         confidence_reasons.append("LOW_BOOTSTRAP_SUPPORT")
@@ -2625,7 +2814,7 @@ def _cluster(
         eigengap_method=eigengap_profile.method,
         leader_count_work_items=leader_work_items,
         total_work_items=total_work_items,
-        selection_method="dynamic-n-multimetric-stability-v4",
+        selection_method=_CLUSTER_SELECTION_METHOD,
         confidence_reasons=tuple(dict.fromkeys(confidence_reasons)),
         correction_path=tuple(correction_path),
         under_split_detected=under_split_detected,
@@ -3290,6 +3479,7 @@ class SpeakerPipeline:
         accepted_type: type,
         context: AdapterContext,
         metrics: PipelineMetricsCollector,
+        cache_identity_material: Any = None,
     ) -> list[Any]:
         started = time.perf_counter()
         identity = _adapter_identity(adapter)
@@ -3298,18 +3488,21 @@ class SpeakerPipeline:
         keys: dict[str, str] = {}
         recomputations = 0
         for window in windows:
-            key = _digest(
-                {
-                    "source": prepared.source_fingerprint,
-                    "profile": prepared.normalization_profile,
-                    "adapter": identity,
-                    "window": {
-                        "id": window.window_id,
-                        "startMs": window.start_ms,
-                        "endMs": window.end_ms,
-                    },
-                }
-            )
+            key_material: dict[str, Any] = {
+                "source": prepared.source_fingerprint,
+                "profile": prepared.normalization_profile,
+                "adapter": identity,
+                "window": {
+                    "id": window.window_id,
+                    "startMs": window.start_ms,
+                    "endMs": window.end_ms,
+                },
+            }
+            if cache_identity_material is not None:
+                key_material["request"] = _cache_identity_value(
+                    cache_identity_material
+                )
+            key = _digest(key_material)
             keys[window.window_id] = key
             value, hit, corrupted = self._cache_item(stage, key, converter)
             if hit:
@@ -3354,6 +3547,7 @@ class SpeakerPipeline:
         started = time.perf_counter()
         key = _digest(
             {
+                "algorithm": _CLUSTER_SELECTION_METHOD,
                 "source": prepared.source_fingerprint,
                 "policy": request.speaker_policy.as_dict(),
                 "config": self.config.as_dict(),
@@ -3402,6 +3596,8 @@ class SpeakerPipeline:
         embeddings: Sequence[EmbeddingRecord],
         overlap: Sequence[OverlapDecision],
         clusters: _ClusterResult,
+        *,
+        requested_language: str,
     ) -> tuple[TranscriptSegment, ...]:
         segments: list[TranscriptSegment] = []
         for index, (window, hypothesis, embedding, overlap_item) in enumerate(
@@ -3410,6 +3606,21 @@ class SpeakerPipeline:
             raw_text = hypothesis.text
             normalized_text = hypothesis.normalized_text or raw_text
             display_text = hypothesis.display_text or normalized_text
+            segment_language = reconcile_detected_languages(
+                [
+                    {
+                        "languageCandidates": hypothesis.evidence.get(
+                            "languageCandidates",
+                            hypothesis.evidence.get(
+                                "language",
+                                hypothesis.evidence.get("rawLanguage"),
+                            ),
+                        ),
+                        "speechDurationMs": window.end_ms - window.start_ms,
+                    }
+                ],
+                requested_language=requested_language,
+            )
             scores = tuple(
                 SpeakerScore(f"speaker-{speaker + 1}", score)
                 for speaker, score in enumerate(clusters.scores[index])
@@ -3485,6 +3696,7 @@ class SpeakerPipeline:
                     overlapping=overlap_item.overlapping,
                     human_locked=window.locked_speaker_id is not None,
                     revisions=tuple(revisions),
+                    language=segment_language,
                     evidence={
                         "preparation": {
                             "provider": _adapter_identity(
@@ -3822,7 +4034,7 @@ class SpeakerPipeline:
                     evidence={
                         **dict(segment.evidence),
                         "speakerSequenceDecode": sequence_evidence,
-                    },
+                        },
                 )
             )
         return tuple(decoded)
@@ -4833,6 +5045,19 @@ class SpeakerPipeline:
             speakerCountMode=request.speaker_policy.mode.value,
         )
         context.raise_if_cancelled()
+        language_validator = getattr(
+            self.asr_adapter,
+            "validate_requested_language",
+            None,
+        )
+        if language_validator is not None:
+            if not callable(language_validator):
+                raise WorkerError(
+                    "ASR_LANGUAGE_VALIDATOR_INVALID",
+                    "ASR language validation capability must be callable",
+                )
+            language_validator(request.language)
+        context.raise_if_cancelled()
         hashing_started = time.perf_counter()
         source_fingerprint = _sha256_file(request.source_path, context)
         metrics.record_stage(
@@ -4863,12 +5088,18 @@ class SpeakerPipeline:
             windows=prepared.windows,
             adapter=self.asr_adapter,
             invoke=lambda windows: self.asr_adapter.transcribe_batch(
-                prepared, windows, context
+                prepared,
+                windows,
+                context,
+                requested_language=request.language,
             ),
             converter=AsrHypothesis.from_mapping,
             accepted_type=AsrHypothesis,
             context=context,
             metrics=metrics,
+            cache_identity_material={
+                "requestedLanguage": request.language,
+            },
         )
         campp_started = time.perf_counter()
         embeddings = self._window_stage(
@@ -4935,7 +5166,12 @@ class SpeakerPipeline:
         )
         metrics.set_policy(resolvedSpeakerCount=clusters.count)
         segments = self._initial_segments(
-            prepared, asr, embeddings, overlap, clusters
+            prepared,
+            asr,
+            embeddings,
+            overlap,
+            clusters,
+            requested_language=request.language,
         )
         baseline_speaker_ids = self._assert_speaker_cardinality(
             segments=segments,
@@ -4974,7 +5210,7 @@ class SpeakerPipeline:
             confidence=clusters.confidence,
             candidate_min=clusters.candidate_min,
             candidate_max=clusters.candidate_max,
-            method="constrained-spherical-multik-v3",
+            method=_SPEAKER_COUNT_ESTIMATE_METHOD,
         )
         models: list[Mapping[str, Any]] = [
             {
@@ -5033,9 +5269,26 @@ class SpeakerPipeline:
                 "offline": True,
             }
         )
+        resolved_language = reconcile_detected_languages(
+            (
+                {
+                    "languageCandidates": hypothesis.evidence.get(
+                        "languageCandidates",
+                        hypothesis.evidence.get(
+                            "language",
+                            hypothesis.evidence.get("rawLanguage"),
+                        ),
+                    ),
+                    "speechDurationMs": window.end_ms - window.start_ms,
+                }
+                for window, hypothesis in zip(prepared.windows, asr)
+            ),
+            requested_language=request.language,
+        )
         return TranscriptionResult(
             segments=segments,
             duration_ms=prepared.duration_ms,
+            language=resolved_language,
             speaker_count_estimate=estimate,
             models=tuple(models),
             pipeline_metrics=metrics.as_dict(),

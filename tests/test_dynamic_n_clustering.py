@@ -15,6 +15,7 @@ from backend.speaker_pipeline import (
     SpeakerPipelineConfig,
     SpeechWindow,
 )
+from benchmarks.speaker_scaling.synthetic import generate_scenario
 
 
 SPEAKER_COUNTS = (1, 2, 3, 5, 8, 13, 32, 129)
@@ -421,6 +422,81 @@ def test_repeated_nearby_voices_remain_distinct() -> None:
     assert result.candidate_min <= 1 <= result.candidate_max
     assert result.candidate_min <= 2 <= result.candidate_max
     _assert_exact_truth_partition(case, result.assignments)
+
+
+@pytest.mark.parametrize("mode", ("auto", "hybrid"))
+@pytest.mark.parametrize("speaker_count", (3, 5, 8, 13))
+def test_embedded_close_voice_pair_uses_residual_collapse_correction(
+    mode: str,
+    speaker_count: int,
+) -> None:
+    case = generate_scenario(
+        "near-voices",
+        speaker_count=speaker_count,
+        samples_per_speaker=3,
+    )
+    request = (
+        _request("auto")
+        if mode == "auto"
+        else _request(
+            "hybrid",
+            bounds=(max(1, speaker_count - 2), speaker_count + 2),
+            prior=speaker_count,
+        )
+    )
+
+    result = _cluster(case, request)
+
+    assert result.count == speaker_count
+    assert result.selection_method == "dynamic-n-multimetric-stability-v5"
+    assert result.under_split_detected
+    assert "CLOSE_VOICE_RESIDUAL_COLLAPSE" in result.correction_path
+    assert result.candidate_min <= speaker_count - 1
+    assert result.candidate_max >= speaker_count
+    _assert_exact_truth_partition(case, result.assignments)
+
+
+@pytest.mark.parametrize("mode", ("auto", "hybrid"))
+@pytest.mark.parametrize("speaker_count", (1, 3, 8, 13))
+def test_absolute_singleton_is_a_reviewable_count_not_a_persistent_speaker(
+    mode: str,
+    speaker_count: int,
+) -> None:
+    case = generate_scenario(
+        "singleton-outlier",
+        speaker_count=speaker_count,
+        samples_per_speaker=3,
+    )
+    request = (
+        _request("auto")
+        if mode == "auto"
+        else _request(
+            "hybrid",
+            bounds=(max(1, speaker_count - 2), speaker_count + 2),
+            prior=speaker_count,
+        )
+    )
+
+    result = _cluster(case, request)
+
+    assert result.count == speaker_count
+    assert result.over_split_detected
+    assert "ABSOLUTE_SINGLETON_OUTLIER_AMBIGUITY" in result.correction_path
+    assert (
+        "PERSISTENT_COUNT_SELECTED_SINGLETON_REVIEW_REQUIRED"
+        in result.confidence_reasons
+    )
+    assert result.candidate_min <= speaker_count
+    assert result.candidate_max >= speaker_count + 1
+    assert result.low_confidence_fail_closed
+    singleton_candidate = next(
+        candidate
+        for candidate in result.count_candidates
+        if candidate.count == speaker_count + 1
+    )
+    assert singleton_candidate.singleton_count == 1
+    assert singleton_candidate.tiny_cluster_count == 1
+    assert singleton_candidate.minimum_cluster_size == 1
 
 
 @pytest.mark.parametrize("mode", ("manual", "auto", "hybrid"))

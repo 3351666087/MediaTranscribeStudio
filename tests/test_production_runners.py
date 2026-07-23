@@ -93,7 +93,13 @@ class FailingVadModel:
 
 
 class FakeQwenModel:
-    def transcribe(self, *, audio, language, return_time_stamps):
+    def __init__(self) -> None:
+        self.language_requests: list[list[str] | None] = []
+
+    def transcribe(self, *, audio, return_time_stamps, language=None):
+        self.language_requests.append(
+            list(language) if language is not None else None
+        )
         return [
             SimpleNamespace(
                 text=f"中文窗口{index + 1}",
@@ -203,10 +209,11 @@ class ProductionRunnerTests(unittest.TestCase):
 
     def test_qwen3_runner_uses_local_only_model_and_preserves_raw_text(self) -> None:
         captured = {}
+        model = FakeQwenModel()
 
         def factory(**kwargs):
             captured.update(kwargs)
-            return FakeQwenModel()
+            return model
 
         adapter = LocalQwen3AsrAdapter(
             model_path=self.qwen_model,
@@ -218,14 +225,105 @@ class ProductionRunnerTests(unittest.TestCase):
             self.prepared(),
             self.prepared().windows,
             self.context,
+            requested_language="auto",
         )
         self.assertTrue(captured["local_files_only"])
         self.assertEqual(
             [item.text for item in results],
             ["中文窗口1", "中文窗口2"],
         )
+        self.assertEqual(model.language_requests, [None])
+        self.assertEqual(
+            [item.evidence["language"] for item in results],
+            ["zh", "zh"],
+        )
         self.assertTrue(
             all(item.evidence["confidenceAvailable"] is False for item in results)
+        )
+
+    def test_qwen3_runner_rejects_unsupported_language_before_model_load(self) -> None:
+        model_loads = 0
+
+        def factory(**kwargs):
+            nonlocal model_loads
+            model_loads += 1
+            return FakeQwenModel()
+
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=factory,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        with self.assertRaises(WorkerError) as captured:
+            adapter.validate_requested_language("he-IL")
+
+        self.assertEqual(
+            captured.exception.code,
+            "QWEN3_ASR_LANGUAGE_UNSUPPORTED",
+        )
+        self.assertEqual(model_loads, 0)
+        self.assertTrue(captured.exception.details["autoDetectionAvailable"])
+        self.assertIn(
+            "en",
+            captured.exception.details["supportedPrimaryLanguageTags"],
+        )
+
+    def test_qwen3_runner_normalizes_or_defaults_result_languages(self) -> None:
+        result_languages = ("pt_br", None, "not a valid tag")
+
+        class LanguageQwenModel:
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                return [
+                    SimpleNamespace(
+                        text=f"Source text {index + 1}",
+                        language=result_languages[index],
+                        time_stamps=None,
+                    )
+                    for index in range(len(audio))
+                ]
+
+        prepared = PreparedAudio(
+            duration_ms=4000,
+            source_fingerprint="b" * 64,
+            normalization_profile="mono-16khz-f32-v1",
+            windows=(
+                SpeechWindow("window-1", 0, 1000),
+                SpeechWindow("window-2", 1000, 2000),
+                SpeechWindow("window-3", 2000, 3000),
+            ),
+            stage_durations_ms={
+                "decode": 0.0,
+                "normalize": 0.0,
+                "vad": 0.0,
+                "boundary": 0.0,
+            },
+            audio_path=str(self.audio),
+        )
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: LanguageQwenModel(),
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        results = adapter.transcribe_batch(
+            prepared,
+            prepared.windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        self.assertEqual(
+            [item.evidence["language"] for item in results],
+            ["pt-BR", "und", "und"],
         )
 
     def test_qwen_and_cam_reuse_one_pcm_load_without_serializing_pcm(self) -> None:
@@ -235,7 +333,13 @@ class ProductionRunnerTests(unittest.TestCase):
         cam_slices: list[FakePcmSlice] = []
 
         class CapturingQwenModel:
-            def transcribe(self, *, audio, language, return_time_stamps):
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
                 qwen_slices.extend(item[0] for item in audio)
                 return [
                     SimpleNamespace(
@@ -275,6 +379,7 @@ class ProductionRunnerTests(unittest.TestCase):
                 prepared,
                 prepared.windows,
                 self.context,
+                requested_language="auto",
             )
             embedding_results = cam.embed_batch(
                 prepared,
@@ -384,7 +489,13 @@ class ProductionRunnerTests(unittest.TestCase):
 
     def test_qwen3_forced_alignment_uses_items_seconds_offset_and_clamp(self) -> None:
         class ForcedAlignmentModel:
-            def transcribe(self, *, audio, language, return_time_stamps):
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
                 self.return_time_stamps = return_time_stamps
                 return [
                     SimpleNamespace(
@@ -424,6 +535,7 @@ class ProductionRunnerTests(unittest.TestCase):
             self.prepared(),
             [SpeechWindow("window-offset", 1000, 2000)],
             self.context,
+            requested_language="auto",
         )
         self.assertTrue(model.return_time_stamps)
         self.assertEqual(
@@ -493,6 +605,7 @@ class ProductionRunnerTests(unittest.TestCase):
                         self.prepared(),
                         [SpeechWindow("window-offset", 1000, 2000)],
                         self.context,
+                        requested_language="auto",
                     )
                 self.assertEqual(
                     captured.exception.code,

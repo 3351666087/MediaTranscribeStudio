@@ -12,6 +12,7 @@ from typing import Any
 from backend import (
     AdapterContext,
     PathPolicy,
+    RenderArtifact,
     RenderResult,
     TranscriptionResult,
     WorkerService,
@@ -151,6 +152,11 @@ class FakeDynamicRenderer:
             quality_report_path=quality,
             render_manifest_path=manifest,
             artifact_paths=(pdf,),
+            artifacts=(
+                RenderArtifact("pdf-quality-report-v1", quality),
+                RenderArtifact("pdf-render-manifest-v1", manifest),
+                RenderArtifact("pdf", pdf),
+            ),
         )
 
 

@@ -224,11 +224,18 @@ def _resolve_method() -> tuple[str, str]:
     try:
         source = inspect.getsource(speaker_pipeline.SpeakerPipeline.transcribe)
     except (OSError, TypeError):
-        return ALGORITHM_ENTRY_POINT, "fallback-entry-point"
+        source = ""
     match = re.search(r'\bmethod\s*=\s*["\']([^"\']+)["\']', source)
-    if match is None:
-        return ALGORITHM_ENTRY_POINT, "fallback-entry-point"
-    return match.group(1), "SpeakerPipeline.transcribe declaration"
+    if match is not None:
+        return match.group(1), "SpeakerPipeline.transcribe declaration"
+    declared = getattr(
+        speaker_pipeline,
+        "_SPEAKER_COUNT_ESTIMATE_METHOD",
+        None,
+    )
+    if isinstance(declared, str) and declared.strip():
+        return declared, "speaker_pipeline algorithm constant"
+    return ALGORITHM_ENTRY_POINT, "fallback-entry-point"
 
 
 def _algorithm_report(config: SpeakerPipelineConfig) -> dict[str, object]:

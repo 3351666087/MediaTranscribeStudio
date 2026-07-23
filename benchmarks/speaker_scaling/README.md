@@ -1,4 +1,4 @@
-# Speaker-scaling synthetic benchmark
+# Synthetic Speaker-Scaling Benchmark
 
 This package benchmarks the repository's existing speaker-count selection and
 clustering entry point:
@@ -7,32 +7,53 @@ clustering entry point:
 backend.speaker_pipeline._cluster
 ```
 
-It does not copy or reimplement the clustering algorithm. It creates only
-deterministic synthetic `EmbeddingRecord` and `SpeechWindow` objects and calls
+It does not copy or reimplement the clustering algorithm. The harness creates
+deterministic synthetic `EmbeddingRecord` and `SpeechWindow` objects, then calls
 the same backend entry point used by the application.
 
-## Scope and metric
+## Purpose
 
-The benchmark covers four deterministic synthetic scenarios:
+The benchmark checks algorithmic behavior and runtime scaling across increasing
+speaker counts. Speaker count is language-neutral, and a five-person meeting is
+only one test case. The domain model supports:
 
-1. `orthogonal`: mutually orthogonal persistent speaker embeddings.
-2. `near-voices`: two speaker centers have cosine similarity `0.94`; remaining
-   centers are orthogonal.
+- `manual`, with a user-specified positive count;
+- `auto`, with count estimation from available evidence;
+- `hybrid`, with estimation constrained by configured bounds.
+
+There is no fixed five-speaker product ceiling. Practical limits depend on the
+selected models, media characteristics, memory, and compute resources.
+
+Speaker cardinality is language-neutral, but this synthetic benchmark does not
+establish transcription or derived-text language coverage. Those capabilities
+depend on the installed ASR and local-LLM model packs and require separate
+language-specific evaluation. No universal language support is claimed.
+
+## Synthetic scenarios
+
+The benchmark covers four deterministic scenarios:
+
+1. `orthogonal`: mutually orthogonal persistent speaker embeddings;
+2. `near-voices`: two speaker centers have cosine similarity `0.94`, while the
+   remaining centers are orthogonal;
 3. `singleton-outlier`: persistent orthogonal speakers plus one orthogonal
-   singleton that is excluded from persistent-speaker truth.
+   singleton excluded from persistent-speaker truth;
 4. `shuffled-orthogonal`: the orthogonal case supplied in reverse temporal
    order.
 
+## Metric limits
+
 `partitionCorrect` is an exact synthetic partition check that is invariant to
 cluster-label permutation. It is **not DER**, must not be presented as DER, and
-does not estimate performance on real speech. In the singleton case, the
-singleton's assignment is ignored, while the persistent speakers must remain
-one-to-one with the predicted clusters and the predicted count must equal the
-persistent-speaker count.
+does not estimate performance on real speech.
 
-No media is opened. No CAM++, ASR, VAD, diarization, or other model is loaded.
-The wall time covers only the current Python clustering entry point; it excludes
-audio decoding, model inference, media I/O, and PDF/report rendering.
+For `singleton-outlier`, the singleton's assignment is ignored. Persistent
+speakers must remain one-to-one with predicted clusters, and the predicted
+count must equal the persistent-speaker count.
+
+The benchmark does not open media or load CAM++, ASR, VAD, diarization, or PDF
+components. Reported wall time covers only the Python clustering entry point;
+it excludes decoding, model inference, media I/O, and report rendering.
 
 ## Run
 
@@ -42,8 +63,9 @@ From the repository root:
 conda run -n media-asr python -m benchmarks.speaker_scaling
 ```
 
-The defaults exercise speaker counts `1,2,3,5,8,13,32,64,129`, three samples per
-persistent speaker, all three count modes, all four scenarios, and one repeat.
+The default matrix uses speaker counts `1,2,3,5,8,13,32,64,129`, three samples
+per persistent speaker, all three count modes, all four scenarios, and one
+repeat.
 
 ```powershell
 conda run -n media-asr python -m benchmarks.speaker_scaling `
@@ -54,21 +76,34 @@ conda run -n media-asr python -m benchmarks.speaker_scaling `
   --output-json benchmarks/speaker_scaling/reports/local.benchmark.json
 ```
 
-Successful stdout is exactly one strict JSON document. When `--output-json` is
-used, the same bytes are written to the requested file. Use the ignored
-`reports/` directory or the ignored `*.benchmark.json` suffix for local
-artifacts.
+Successful standard output is exactly one strict JSON document. When
+`--output-json` is used, the same bytes are written to the requested file. Use
+the ignored `reports/` directory or the ignored `*.benchmark.json` suffix for
+local artifacts.
 
-The benchmark intentionally configures two spherical k-means refinement
-iterations so high-cardinality scaling runs remain practical. The complete
-configuration, backend module SHA-256, resolved algorithm method, Python
-runtime, platform, and CPU metadata are included in every report. Results are
-specific to the current machine, Python runtime, and backend source revision.
+The harness intentionally configures two spherical k-means refinement
+iterations so high-cardinality runs remain practical. Each report records the
+complete configuration, backend module SHA-256, resolved algorithm method,
+Python runtime, platform, and CPU metadata. Results are specific to the
+machine, runtime, and backend source revision that produced them.
 
 ## Self-tests
 
 ```powershell
-$env:PYTHONDONTWRITEBYTECODE = "1"
+$env:PYTHONDONTWRITEBYTECODE = '1'
 conda run -n media-asr python -m pytest -p no:cacheprovider -q `
   benchmarks/speaker_scaling/tests
 ```
+
+## Interpretation
+
+Use this benchmark to detect regressions in deterministic clustering behavior
+and high-cardinality runtime. Do not use it to claim:
+
+- real-media speaker-count accuracy;
+- DER, JER, overlap accuracy, or speaker-attribution quality;
+- robustness to noise, reverberation, code-switching, or similar voices;
+- a validated production resource ceiling.
+
+Those claims require representative multilingual media, human ground truth,
+model inference, and separately reported diarization metrics.

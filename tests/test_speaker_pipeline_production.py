@@ -115,31 +115,60 @@ class FakeAsrAdapter:
     adapter_id = "qwen3-asr-1.7b-fixture"
     version = "1"
 
-    def __init__(self, mode: str = "valid") -> None:
+    def __init__(
+        self,
+        mode: str = "valid",
+        *,
+        language_by_window_id: Mapping[str, str] | None = None,
+    ) -> None:
         self.mode = mode
+        self.language_by_window_id = dict(language_by_window_id or {})
         self.calls: list[tuple[str, ...]] = []
+        self.requested_languages: list[str] = []
 
-    def transcribe_batch(self, prepared, windows, context):
+    def transcribe_batch(
+        self,
+        prepared,
+        windows,
+        context,
+        *,
+        requested_language: str,
+    ):
         context.raise_if_cancelled()
         self.calls.append(tuple(window.window_id for window in windows))
+        self.requested_languages.append(requested_language)
         if self.mode == "string":
             return "not-an-array"
-        values = [
-            AsrHypothesis(
-                window_id=window.window_id,
-                text=f"中文原文{window.window_id}",
-                normalized_text=f"中文原文{window.window_id}",
-                display_text=f"中文原文{window.window_id}",
-                confidence=0.98,
-                evidence={"model": "Qwen3-ASR-1.7B"},
+        values = []
+        for window in windows:
+            evidence = {"model": "Qwen3-ASR-1.7B"}
+            language = self.language_by_window_id.get(window.window_id)
+            if language is not None:
+                evidence["language"] = language
+            values.append(
+                AsrHypothesis(
+                    window_id=window.window_id,
+                    text=f"中文原文{window.window_id}",
+                    normalized_text=f"中文原文{window.window_id}",
+                    display_text=f"中文原文{window.window_id}",
+                    confidence=0.98,
+                    evidence=evidence,
+                )
             )
-            for window in windows
-        ]
         if self.mode == "missing":
             return values[:-1]
         if self.mode == "duplicate" and values:
             return [*values, values[0]]
         return values
+
+
+class RejectingLanguageAsrAdapter(FakeAsrAdapter):
+    def validate_requested_language(self, requested_language: str) -> None:
+        raise WorkerError(
+            "ASR_LANGUAGE_UNSUPPORTED",
+            "synthetic unsupported language",
+            details={"requestedLanguage": requested_language},
+        )
 
 
 class FakeCamPlusAdapter:
@@ -276,6 +305,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         mode: str,
         *,
         job_id: str = "pipeline-job",
+        language: str = "auto",
     ) -> StartJobRequest:
         payload: dict[str, object] = {"speakerCountMode": mode}
         if mode == "manual":
@@ -288,6 +318,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             source_path=self.source,
             output_directory=self.output,
             speaker_policy=SpeakerCountPolicy.from_payload(payload),
+            language=language,
         )
 
     def context(self, job_id: str = "pipeline-job") -> AdapterContext:
@@ -1478,6 +1509,94 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertEqual(asr_cache["hits"], 4)
         self.assertEqual(asr_cache["recomputations"], 1)
 
+    def test_asr_language_isolated_cache_reuses_acoustic_stages(self) -> None:
+        cache = InMemoryStageCache()
+        pipeline, preparation, asr, cam, overlap = self.pipeline(5, cache=cache)
+
+        pipeline.transcribe(
+            self.request(5, "manual", language="auto"),
+            self.context(),
+        )
+        second = pipeline.transcribe(
+            self.request(5, "manual", language="en-US"),
+            self.context(),
+        )
+
+        self.assertEqual(preparation.calls, 1)
+        self.assertEqual(sum(len(batch) for batch in asr.calls), 10)
+        self.assertEqual(sum(len(batch) for batch in cam.calls), 5)
+        self.assertEqual(sum(len(batch) for batch in overlap.calls), 5)
+        self.assertEqual(asr.requested_languages, ["auto", "en-US"])
+
+        cache_by_stage = second.pipeline_metrics["cache"]["byStage"]
+        self.assertEqual(cache_by_stage["asr"]["misses"], 5)
+        for stage in (
+            "normalize",
+            "vad",
+            "boundary",
+            "campp-embedding",
+            "overlap",
+        ):
+            self.assertGreater(cache_by_stage[stage]["hits"], 0)
+
+    def test_auto_language_persists_detected_english_not_auto(self) -> None:
+        asr = FakeAsrAdapter(
+            language_by_window_id={
+                "window-1": "English",
+                "window-2": "English",
+            }
+        )
+        pipeline, _, _, _, _ = self.pipeline(2, asr=asr)
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", language="auto"),
+            self.context(),
+        )
+
+        self.assertEqual(result.language, "en")
+        self.assertEqual({segment.language for segment in result.segments}, {"en"})
+        self.assertNotEqual(result.language, "auto")
+
+    def test_explicit_language_persists_canonical_requested_tag(self) -> None:
+        asr = FakeAsrAdapter(
+            language_by_window_id={
+                "window-1": "Chinese",
+                "window-2": "Chinese",
+            }
+        )
+        pipeline, _, _, _, _ = self.pipeline(2, asr=asr)
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", language="en-US"),
+            self.context(),
+        )
+
+        self.assertEqual(result.language, "en-US")
+        self.assertEqual(
+            {segment.language for segment in result.segments},
+            {"en-US"},
+        )
+
+    def test_auto_language_persists_mul_for_mixed_content(self) -> None:
+        asr = FakeAsrAdapter(
+            language_by_window_id={
+                "window-1": "English",
+                "window-2": "Chinese",
+            }
+        )
+        pipeline, _, _, _, _ = self.pipeline(2, asr=asr)
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", language="auto"),
+            self.context(),
+        )
+
+        self.assertEqual(result.language, "mul")
+        self.assertEqual(
+            [segment.language for segment in result.segments],
+            ["en", "zh"],
+        )
+
     def test_secondary_verifier_is_selective_and_records_full_telemetry(self) -> None:
         secondary = FakeSecondaryVerifier()
         pipeline, _, _, cam, _ = self.pipeline(
@@ -2115,6 +2234,31 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 AdapterContext("pipeline-job", self.output, cancellation),
             )
         self.assertEqual(preparation.calls, 0)
+
+    def test_unsupported_asr_language_fails_before_hashing_and_preparation(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(2)
+        asr = RejectingLanguageAsrAdapter()
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            preparation=preparation,
+            asr=asr,
+        )
+
+        with patch(
+            "backend.speaker_pipeline._sha256_file",
+            side_effect=AssertionError("source hashing must not run"),
+        ):
+            with self.assertRaises(WorkerError) as captured:
+                pipeline.transcribe(
+                    self.request(2, "manual", job_id="language-preflight"),
+                    self.context("language-preflight"),
+                )
+
+        self.assertEqual(captured.exception.code, "ASR_LANGUAGE_UNSUPPORTED")
+        self.assertEqual(preparation.calls, 0)
+        self.assertEqual(asr.calls, [])
 
     def test_vad_failure_stops_before_asr_embedding_and_overlap(self) -> None:
         preparation = FailingPreparationAdapter()

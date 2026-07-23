@@ -26,6 +26,13 @@ from typing import Any, Callable
 
 from .adapters import AdapterContext
 from .errors import WorkerError
+from .language import (
+    normalize_language_tag,
+    normalize_qwen_language_candidates,
+    qwen_language_for_request,
+    qwen_supported_primary_language_tags,
+    reconcile_detected_languages,
+)
 from .models import TranscriptSegment
 from .speaker_change_detection import (
     EnergyValley,
@@ -693,13 +700,42 @@ class LocalQwen3AsrAdapter:
                 self._model_instance = factory(**kwargs)
             return self._model_instance
 
+    def validate_requested_language(self, requested_language: str) -> str:
+        """Fail before media preparation when an explicit prompt is unsupported."""
+
+        try:
+            normalized = normalize_language_tag(
+                requested_language,
+                allow_auto=True,
+            )
+            qwen_language_for_request(normalized)
+        except ValueError as exc:
+            raise WorkerError(
+                "QWEN3_ASR_LANGUAGE_UNSUPPORTED",
+                "The installed Qwen3-ASR model does not support the requested explicit language",
+                details={
+                    "requestedLanguage": str(requested_language),
+                    "supportedPrimaryLanguageTags": list(
+                        qwen_supported_primary_language_tags()
+                    ),
+                    "autoDetectionAvailable": True,
+                },
+            ) from exc
+        return normalized
+
     def transcribe_batch(
         self,
         prepared: PreparedAudio,
         windows: Sequence[SpeechWindow],
         context: AdapterContext,
+        *,
+        requested_language: str,
     ) -> list[AsrHypothesis]:
         context.raise_if_cancelled()
+        normalized_request_language = self.validate_requested_language(
+            requested_language
+        )
+        qwen_language = qwen_language_for_request(normalized_request_language)
         if not prepared.audio_path or not Path(prepared.audio_path).is_file():
             raise WorkerError(
                 "PREPARED_AUDIO_MISSING",
@@ -720,11 +756,13 @@ class LocalQwen3AsrAdapter:
             )
             for window in windows
         ]
-        results = self._model().transcribe(
-            audio=audio_batch,
-            language=["Chinese"] * len(audio_batch),
-            return_time_stamps=self.forced_aligner_path is not None,
-        )
+        transcribe_kwargs: dict[str, Any] = {
+            "audio": audio_batch,
+            "return_time_stamps": self.forced_aligner_path is not None,
+        }
+        if qwen_language is not None:
+            transcribe_kwargs["language"] = [qwen_language] * len(audio_batch)
+        results = self._model().transcribe(**transcribe_kwargs)
         context.raise_if_cancelled()
         if (
             not isinstance(results, Sequence)
@@ -803,6 +841,19 @@ class LocalQwen3AsrAdapter:
                             "endMs": end_ms,
                         }
                     )
+            raw_language = getattr(result, "language", None)
+            language_candidates = normalize_qwen_language_candidates(
+                raw_language
+            )
+            window_language = reconcile_detected_languages(
+                [
+                    {
+                        "languageCandidates": language_candidates,
+                        "speechDurationMs": window.end_ms - window.start_ms,
+                    }
+                ],
+                requested_language=normalized_request_language,
+            )
             output.append(
                 AsrHypothesis(
                     window_id=window.window_id,
@@ -812,9 +863,18 @@ class LocalQwen3AsrAdapter:
                         "model": "Qwen3-ASR-1.7B",
                         "pcmBufferId": pcm_buffer_id,
                         "confidenceAvailable": False,
-                        "language": str(
-                            getattr(result, "language", "Chinese") or "Chinese"
+                        "requestedLanguage": normalized_request_language,
+                        "qwenPromptLanguage": qwen_language,
+                        "rawLanguage": (
+                            raw_language
+                            if isinstance(
+                                raw_language,
+                                (str, int, float, bool, list, tuple, type(None)),
+                            )
+                            else str(raw_language)
                         ),
+                        "languageCandidates": list(language_candidates),
+                        "language": window_language,
                         "timestamps": timestamps,
                     },
                 )

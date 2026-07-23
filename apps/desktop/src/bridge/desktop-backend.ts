@@ -3,6 +3,7 @@ import type {
   CreateJobRequest,
   CreateJobResult,
   DesktopBackend,
+  JobRuntimeStatus,
   ReviewDecision,
   ReviewSegment,
   SpeakerProfile,
@@ -33,6 +34,11 @@ const cloneSnapshot = (source: StudioSnapshot = studioFixture): StudioSnapshot =
 const EVIDENCE_SPEAKER_COUNTS = new Set([13, 64, 129]);
 const EVIDENCE_LOAD_FAILURE =
   "Visual evidence mode: the local backend returned no workspace snapshot. The app stopped safely without modifying any data.";
+const CANCELLABLE_JOB_STATUSES = new Set([
+  "queued",
+  "running",
+  "review_required",
+]);
 
 interface MockEvidenceState {
   snapshot: StudioSnapshot;
@@ -98,6 +104,10 @@ function createSpeakerProfiles(
 
 export class MockDesktopBackend implements DesktopBackend {
   private snapshot: StudioSnapshot;
+  private readonly snapshots = new Map<string, StudioSnapshot>();
+  private readonly revisions = new Map<string, number>();
+  private selectedJobId: string;
+  private jobSequence = 0;
   private readonly initialLoadFailure: string | null;
 
   constructor(
@@ -105,7 +115,18 @@ export class MockDesktopBackend implements DesktopBackend {
   ) {
     const evidence = resolveMockEvidence(search);
     this.snapshot = evidence.snapshot;
+    this.selectedJobId = this.snapshot.job.id;
+    this.snapshots.set(this.selectedJobId, this.snapshot);
+    this.revisions.set(this.selectedJobId, 0);
     this.initialLoadFailure = evidence.initialLoadFailure;
+  }
+
+  private markSelectedSnapshotUpdated(): void {
+    this.snapshots.set(this.selectedJobId, this.snapshot);
+    this.revisions.set(
+      this.selectedJobId,
+      (this.revisions.get(this.selectedJobId) ?? 0) + 1,
+    );
   }
 
   async getSnapshot(): Promise<StudioSnapshot> {
@@ -116,8 +137,51 @@ export class MockDesktopBackend implements DesktopBackend {
     return structuredClone(this.snapshot);
   }
 
+  async listJobs(): Promise<JobRuntimeStatus[]> {
+    await pause(60);
+    return [...this.snapshots.entries()].map(([jobId, snapshot]) => {
+      const inFlight =
+        snapshot.job.status === "queued" ||
+        snapshot.job.status === "running";
+      return {
+        jobId,
+        status: snapshot.job.status,
+        revision: this.revisions.get(jobId) ?? 0,
+        acceptedByWorker: snapshot.job.status !== "draft",
+        projected: jobId === this.selectedJobId,
+        inFlight,
+        workerEventRouteRegistered: inFlight,
+        cancellable: CANCELLABLE_JOB_STATUSES.has(snapshot.job.status),
+        volatileOnly: true,
+      };
+    });
+  }
+
+  async selectJob(jobId: string): Promise<StudioSnapshot> {
+    if (
+      typeof jobId !== "string" ||
+      jobId.length === 0 ||
+      jobId.length > 128
+    ) {
+      throw new Error(
+        "jobId must be a non-empty string of 1–128 characters.",
+      );
+    }
+    await pause(90);
+    const next = this.snapshots.get(jobId);
+    if (!next) {
+      throw new Error("That task does not exist in the local workspace.");
+    }
+    this.selectedJobId = jobId;
+    this.snapshot = next;
+    return structuredClone(next);
+  }
+
   async createJob(request: CreateJobRequest): Promise<CreateJobResult> {
     assertCreateJobRequest(request);
+    const template = cloneSnapshot(this.snapshot);
+    this.jobSequence += 1;
+    const sequence = this.jobSequence;
     await pause(320);
     const speakerCount =
       request.speakerPolicy.mode === "manual"
@@ -128,9 +192,16 @@ export class MockDesktopBackend implements DesktopBackend {
       speakerCount === null
         ? []
         : createSpeakerProfiles(speakerCount, request.speakerLabels);
-    this.snapshot.job = {
-      ...this.snapshot.job,
-      id: `mock-${request.title.trim().replace(/\s+/g, "-") || "meeting"}`,
+    const slug =
+      request.title
+        .trim()
+        .replace(/[^\p{L}\p{N}]+/gu, "-")
+        .replace(/^-+|-+$/gu, "")
+        .slice(0, 64) || "meeting";
+    const next = cloneSnapshot(template);
+    next.job = {
+      ...next.job,
+      id: `mock-${sequence}-${slug}`,
       title: request.title.trim(),
       sourcePath: request.mediaPath.trim(),
       status: "queued",
@@ -141,10 +212,10 @@ export class MockDesktopBackend implements DesktopBackend {
       reviewOpenCount: 0,
       activeStrategyId: request.strategyId,
     };
-    this.snapshot.speakers = speakers;
-    this.snapshot.reviews = [];
-    this.snapshot.artifacts = [];
-    this.snapshot.diarizationQuality = {
+    next.speakers = speakers;
+    next.reviews = [];
+    next.artifacts = [];
+    next.diarizationQuality = {
       der: {
         status: "unavailable",
         reason:
@@ -172,14 +243,14 @@ export class MockDesktopBackend implements DesktopBackend {
         source: "Pending review segments / generated valid speech segments",
       },
     };
-    this.snapshot.performance = {
+    next.performance = {
       status: "unavailable",
       reason:
         "The task has not run, so model-stage and resource-sampling data are unavailable.",
     };
-    this.snapshot.events = [
+    next.events = [
       {
-        id: `event-${this.snapshot.job.id}`,
+        id: `event-${next.job.id}`,
         sequence: 1,
         type: "job.started",
         stageId: "media",
@@ -192,10 +263,13 @@ export class MockDesktopBackend implements DesktopBackend {
             : `Created the complete ${speakerCount}-speaker roster requested by the manual policy.`,
       },
     ];
-    this.snapshot = parseStudioSnapshot(this.snapshot);
+    this.snapshot = parseStudioSnapshot(next);
+    this.selectedJobId = this.snapshot.job.id;
+    this.snapshots.set(this.selectedJobId, this.snapshot);
+    this.revisions.set(this.selectedJobId, 1);
     return {
       accepted: true,
-      jobId: this.snapshot.job.id,
+      jobId: this.selectedJobId,
       message:
         "The preview task was created. The local model runtime will execute it when real IPC is available.",
     };
@@ -203,8 +277,16 @@ export class MockDesktopBackend implements DesktopBackend {
 
   async cancelJob(jobId: string): Promise<void> {
     await pause();
-    if (this.snapshot.job.id === jobId) {
-      this.snapshot.job.status = "cancelled";
+    const target = this.snapshots.get(jobId);
+    if (!target) {
+      throw new Error("That task does not exist in the local workspace.");
+    }
+    if (CANCELLABLE_JOB_STATUSES.has(target.job.status)) {
+      target.job.status = "cancelled";
+      this.revisions.set(jobId, (this.revisions.get(jobId) ?? 0) + 1);
+      if (jobId === this.selectedJobId) {
+        this.snapshot = target;
+      }
     }
   }
 
@@ -227,6 +309,7 @@ export class MockDesktopBackend implements DesktopBackend {
     speaker.label = request.label.trim();
     speaker.locked = request.locked;
     speaker.reviewStatus = request.reviewStatus;
+    this.markSelectedSnapshotUpdated();
     return structuredClone(speaker);
   }
 
@@ -280,6 +363,7 @@ export class MockDesktopBackend implements DesktopBackend {
     this.snapshot.job.reviewOpenCount = this.snapshot.reviews.filter(
       (item) => !item.reviewed,
     ).length;
+    this.markSelectedSnapshotUpdated();
     return structuredClone(review);
   }
 

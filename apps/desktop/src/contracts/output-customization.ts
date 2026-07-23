@@ -358,7 +358,7 @@ function exactText(
   // Python's len(str) and JSON Schema maxLength count Unicode code points,
   // whereas JavaScript's String.length counts UTF-16 code units. Keep the
   // native contract aligned for non-BMP titles and font family names.
-  if ([...value].length > maximum) {
+  if (Array.from(value).length > maximum) {
     fail(path, `must contain at most ${maximum} characters`);
   }
   if (CONTROL_CHARACTER_PATTERN.test(value) || BIDI_CONTROL_PATTERN.test(value)) {

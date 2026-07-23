@@ -10,6 +10,7 @@ import {
 } from "./catalog-completions";
 import reviewQueueMessages from "./fragments/review-queue.json";
 import speakerSetupMessages from "./fragments/speaker-setup.json";
+import taskCenterMessages from "./fragments/task-center.json";
 import taskCreatorMessages from "./fragments/task-creator.json";
 import workbenchPanelMessages from "./fragments/workbench-panels.json";
 
@@ -272,6 +273,7 @@ export const ENGLISH_MESSAGES = {
   "common.close": "Close",
   "common.previous": "Previous",
   "common.next": "Next",
+  ...taskCenterMessages.en,
   ...taskCreatorMessages.en,
   ...reviewQueueMessages.en,
   ...speakerSetupMessages.en,
@@ -1429,6 +1431,7 @@ const ptBr = {
 const zhHansCatalog = {
   ...zhHans,
   ...ZH_HANS_COMPLETION,
+  ...taskCenterMessages["zh-Hans"],
   ...taskCreatorMessages["zh-Hans"],
   ...reviewQueueMessages["zh-Hans"],
   ...speakerSetupMessages["zh-Hans"],
@@ -1437,6 +1440,7 @@ const zhHansCatalog = {
 const zhHantCatalog = {
   ...zhHant,
   ...ZH_HANT_COMPLETION,
+  ...taskCenterMessages["zh-Hant"],
   ...taskCreatorMessages["zh-Hant"],
   ...reviewQueueMessages["zh-Hant"],
   ...speakerSetupMessages["zh-Hant"],
@@ -1445,6 +1449,7 @@ const zhHantCatalog = {
 const jaCatalog = {
   ...ja,
   ...JA_COMPLETION,
+  ...taskCenterMessages.ja,
   ...taskCreatorMessages.ja,
   ...reviewQueueMessages.ja,
   ...speakerSetupMessages.ja,
@@ -1453,6 +1458,7 @@ const jaCatalog = {
 const koCatalog = {
   ...ko,
   ...KO_COMPLETION,
+  ...taskCenterMessages.ko,
   ...taskCreatorMessages.ko,
   ...reviewQueueMessages.ko,
   ...speakerSetupMessages.ko,
@@ -1461,6 +1467,7 @@ const koCatalog = {
 const esCatalog = {
   ...es,
   ...ES_COMPLETION,
+  ...taskCenterMessages.es,
   ...taskCreatorMessages.es,
   ...reviewQueueMessages.es,
   ...speakerSetupMessages.es,
@@ -1469,6 +1476,7 @@ const esCatalog = {
 const frCatalog = {
   ...fr,
   ...FR_COMPLETION,
+  ...taskCenterMessages.fr,
   ...taskCreatorMessages.fr,
   ...reviewQueueMessages.fr,
   ...speakerSetupMessages.fr,
@@ -1477,6 +1485,7 @@ const frCatalog = {
 const deCatalog = {
   ...de,
   ...DE_COMPLETION,
+  ...taskCenterMessages.de,
   ...taskCreatorMessages.de,
   ...reviewQueueMessages.de,
   ...speakerSetupMessages.de,
@@ -1485,6 +1494,7 @@ const deCatalog = {
 const ptBrCatalog = {
   ...ptBr,
   ...PT_BR_COMPLETION,
+  ...taskCenterMessages["pt-BR"],
   ...taskCreatorMessages["pt-BR"],
   ...reviewQueueMessages["pt-BR"],
   ...speakerSetupMessages["pt-BR"],

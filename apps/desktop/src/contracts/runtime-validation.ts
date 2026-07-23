@@ -7,6 +7,7 @@ import {
   type CreateJobRequest,
   type CreateJobResult,
   type IpcErrorCode,
+  type JobRuntimeStatus,
   type ReviewDecision,
   type ReviewCommandStatus,
   type ReviewSegment,
@@ -2002,6 +2003,89 @@ export function parseCreateJobResult(value: unknown): CreateJobResult {
   string(result.jobId, "createJobResult.jobId", { min: 1, max: 128 });
   string(result.message, "createJobResult.message", { min: 1, max: 4096 });
   return value as CreateJobResult;
+}
+
+export function parseJobRuntimeStatus(value: unknown): JobRuntimeStatus {
+  const status = record(value, "jobRuntimeStatus");
+  exactKeys(status, "jobRuntimeStatus", [
+    "jobId",
+    "status",
+    "revision",
+    "acceptedByWorker",
+    "projected",
+    "inFlight",
+    "workerEventRouteRegistered",
+    "cancellable",
+    "volatileOnly",
+  ]);
+  string(status.jobId, "jobRuntimeStatus.jobId", { min: 1, max: 128 });
+  enumeration(
+    status.status,
+    "jobRuntimeStatus.status",
+    JOB_STATUSES,
+  );
+  finiteNumber(status.revision, "jobRuntimeStatus.revision", {
+    min: 0,
+    integer: true,
+  });
+  boolean(
+    status.acceptedByWorker,
+    "jobRuntimeStatus.acceptedByWorker",
+  );
+  boolean(status.projected, "jobRuntimeStatus.projected");
+  boolean(status.inFlight, "jobRuntimeStatus.inFlight");
+  boolean(
+    status.workerEventRouteRegistered,
+    "jobRuntimeStatus.workerEventRouteRegistered",
+  );
+  boolean(status.cancellable, "jobRuntimeStatus.cancellable");
+  if (status.volatileOnly !== true) {
+    fail(
+      "jobRuntimeStatus.volatileOnly",
+      "must be exactly true until persistent task recovery is implemented.",
+    );
+  }
+  if (
+    status.cancellable &&
+    !["queued", "running", "review_required"].includes(
+      status.status as string,
+    )
+  ) {
+    fail(
+      "jobRuntimeStatus.cancellable",
+      "may only be true for queued, running, or review-required tasks.",
+    );
+  }
+  return value as JobRuntimeStatus;
+}
+
+export function parseJobRuntimeStatuses(
+  value: unknown,
+): JobRuntimeStatus[] {
+  const statuses = array(value, "jobRuntimeStatuses").map((status) =>
+    parseJobRuntimeStatus(status),
+  );
+  const seenIds = new Set<string>();
+  let projectedCount = 0;
+  statuses.forEach((status, index) => {
+    if (seenIds.has(status.jobId)) {
+      fail(
+        `jobRuntimeStatuses[${index}].jobId`,
+        "must be unique.",
+      );
+    }
+    seenIds.add(status.jobId);
+    if (status.projected) {
+      projectedCount += 1;
+    }
+  });
+  if (projectedCount > 1) {
+    fail(
+      "jobRuntimeStatuses",
+      "must not contain more than one projected task.",
+    );
+  }
+  return statuses;
 }
 
 export function parseReviewSegment(value: unknown): ReviewSegment {

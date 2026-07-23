@@ -477,10 +477,13 @@ describe("TaskCreator dynamic speaker policies", () => {
       .mockResolvedValue(selectedPaths);
     const resolver = vi
       .fn<(path: string) => Promise<MediaSelection>>()
-      .mockImplementation(async (path) => ({
-        sourcePath: path,
-        outputDirectory: `${path}-MediaTranscribeStudio`,
-      }));
+      .mockImplementation(async (path) => {
+        await Promise.resolve();
+        return {
+          sourcePath: path,
+          outputDirectory: `${path}-MediaTranscribeStudio`,
+        };
+      });
     const props = taskCreatorProps({
       count: 2,
       policy: { mode: "manual", count: 2 },
@@ -614,6 +617,7 @@ describe("TaskCreator dynamic speaker policies", () => {
     const resolver = vi
       .fn<(path: string) => Promise<MediaSelection>>()
       .mockImplementation(async (path) => {
+        await Promise.resolve();
         if (path.endsWith("\\not-a-media-folder")) {
           throw new MediaDropError(
             "absolutePath",

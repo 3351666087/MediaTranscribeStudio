@@ -87,7 +87,12 @@ export default function App({ mediaDropAdapter }: AppProps) {
 
 function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
   const studio = useStudio();
-  const { notify, setActiveSection } = studio;
+  const {
+    cancelJob,
+    notify,
+    selectJob,
+    setActiveSection,
+  } = studio;
   const { t } = useI18n();
   const mediaDropAdapter = useMemo(
     () => injectedAdapter ?? createMediaDropAdapter(),
@@ -200,6 +205,19 @@ function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
       });
     },
     [overviewRoom],
+  );
+  const selectTask = useCallback(
+    async (jobId: string) => {
+      await selectJob(jobId);
+      setOverviewRoom("home");
+      setRoomDirection("backward");
+      setSectionDirection("neutral");
+      window.requestAnimationFrame(() => {
+        mainRef.current?.focus({ preventScroll: true });
+        mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
+      });
+    },
+    [selectJob],
   );
 
   if (studio.loading) {
@@ -356,6 +374,11 @@ function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
           <TopBar
             activeSection={studio.activeSection}
             system={snapshot.system}
+            jobs={studio.jobs}
+            selectedJobId={studio.selectedJobId}
+            busyAction={studio.busyAction}
+            onSelectJob={selectTask}
+            onCancelJob={cancelJob}
             onCreateTask={openTaskCreator}
           />
 
@@ -503,9 +526,13 @@ function StudioApp({ mediaDropAdapter: injectedAdapter }: AppProps) {
         selectedStrategyId={snapshot.job.activeStrategyId}
         backendMode={snapshot.system.backendMode}
         outputQuality={outputQualityFromPdf(snapshot.pdfQuality)}
-        busy={studio.busyAction === "create-job"}
+        busy={
+          studio.busyAction === "create-job" ||
+          studio.busyAction === "create-job-batch"
+        }
         onClose={closeTaskCreator}
         onCreate={studio.createJob}
+        onCreateBatch={studio.createJobBatch}
       />
       <div
         className="desktop-companion-layer"

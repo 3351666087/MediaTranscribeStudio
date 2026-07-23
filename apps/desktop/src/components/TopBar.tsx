@@ -1,8 +1,13 @@
-import type { AppSection, SystemStatus } from "../contracts/studio";
+import type {
+  AppSection,
+  StudioJobItem,
+  SystemStatus,
+} from "../contracts/studio";
 import { useI18n, type MessageKey } from "../i18n";
 import { Icon } from "./Icon";
 import { PreferencesControl } from "./PreferencesControl";
 import { StatusBadge } from "./StatusBadge";
+import { TaskCenter } from "./TaskCenter";
 
 const sectionCopy: Record<
   AppSection,
@@ -17,10 +22,24 @@ const sectionCopy: Record<
 interface TopBarProps {
   activeSection: AppSection;
   system: SystemStatus;
+  jobs: readonly StudioJobItem[];
+  selectedJobId: string | null;
+  busyAction: string | null;
+  onSelectJob: (jobId: string) => Promise<void>;
+  onCancelJob: (jobId: string) => Promise<void>;
   onCreateTask: () => void;
 }
 
-export function TopBar({ activeSection, system, onCreateTask }: TopBarProps) {
+export function TopBar({
+  activeSection,
+  system,
+  jobs,
+  selectedJobId,
+  busyAction,
+  onSelectJob,
+  onCancelJob,
+  onCreateTask,
+}: TopBarProps) {
   const { t } = useI18n();
   const copy = sectionCopy[activeSection];
   const backendLabel =
@@ -35,6 +54,13 @@ export function TopBar({ activeSection, system, onCreateTask }: TopBarProps) {
       </div>
 
       <div className="top-bar__actions">
+        <TaskCenter
+          jobs={jobs}
+          selectedJobId={selectedJobId}
+          busyAction={busyAction}
+          onSelect={onSelectJob}
+          onCancel={onCancelJob}
+        />
         <PreferencesControl />
         <div className="system-pill" aria-label={t("top.runtime")}>
           <Icon name="cloud-off" size={17} />

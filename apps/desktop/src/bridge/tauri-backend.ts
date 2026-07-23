@@ -4,6 +4,7 @@ import type {
   CreateJobRequest,
   CreateJobResult,
   DesktopBackend,
+  JobRuntimeStatus,
   ReviewDecision,
   ReviewSegment,
   SpeakerProfile,
@@ -18,6 +19,7 @@ import {
   parseArtifactOpenResult,
   parseCreateJobResult,
   parseIpcError,
+  parseJobRuntimeStatuses,
   parseReviewSegment,
   parseSpeakerProfile,
   parseStudioSnapshot,
@@ -27,6 +29,18 @@ type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>
 
 export class TauriDesktopBackend implements DesktopBackend {
   constructor(private readonly invokeCommand: Invoke = invoke) {}
+
+  private assertJobId(jobId: string): void {
+    if (
+      typeof jobId !== "string" ||
+      jobId.length === 0 ||
+      jobId.length > 128
+    ) {
+      throw new Error(
+        "jobId must be a non-empty string of 1–128 characters.",
+      );
+    }
+  }
 
   private async call(command: string, args?: Record<string, unknown>): Promise<unknown> {
     try {
@@ -40,6 +54,17 @@ export class TauriDesktopBackend implements DesktopBackend {
     return parseStudioSnapshot(await this.call("get_snapshot"));
   }
 
+  async listJobs(): Promise<JobRuntimeStatus[]> {
+    return parseJobRuntimeStatuses(await this.call("list_jobs"));
+  }
+
+  async selectJob(jobId: string): Promise<StudioSnapshot> {
+    this.assertJobId(jobId);
+    return parseStudioSnapshot(
+      await this.call("select_job", { jobId }),
+    );
+  }
+
   async createJob(request: CreateJobRequest): Promise<CreateJobResult> {
     assertCreateJobRequest(request);
     return parseCreateJobResult(
@@ -50,9 +75,7 @@ export class TauriDesktopBackend implements DesktopBackend {
   }
 
   async cancelJob(jobId: string): Promise<void> {
-    if (typeof jobId !== "string" || jobId.length === 0 || jobId.length > 128) {
-      throw new Error("jobId must be a non-empty string of 1–128 characters.");
-    }
+    this.assertJobId(jobId);
     assertVoidResult(await this.call("cancel_job", { jobId }), "cancel_job");
   }
 

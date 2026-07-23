@@ -513,6 +513,8 @@ export function OutputCustomizationPanel({
     if (value === undefined) {
       return;
     }
+    // Controlled recipe changes must replace stale local drafts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCurrent(cloneOutputCustomization(value));
     setInteractionError(null);
   }, [value]);
@@ -851,7 +853,6 @@ export function OutputCustomizationPanel({
                     aria-labelledby={`${panelId}-custom-font-label`}
                     aria-describedby={`${panelId}-custom-font-help`}
                     aria-invalid={
-                      current.report.font === "custom" &&
                       current.report.customFontFamily.length === 0
                     }
                     onChange={(event) => {

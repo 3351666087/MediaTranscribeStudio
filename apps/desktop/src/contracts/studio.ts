@@ -394,6 +394,24 @@ export interface CreateJobResult {
   message: string;
 }
 
+export interface JobRuntimeStatus {
+  jobId: string;
+  status: JobStatus;
+  revision: number;
+  acceptedByWorker: boolean;
+  projected: boolean;
+  inFlight: boolean;
+  workerEventRouteRegistered: boolean;
+  cancellable: boolean;
+  volatileOnly: true;
+}
+
+export interface StudioJobItem extends JobRuntimeStatus {
+  title: string | null;
+  sourcePath: string | null;
+  progress: number | null;
+}
+
 export interface ArtifactOpenResult {
   artifactId: string;
   canonicalPath: string;
@@ -432,6 +450,8 @@ export interface UpdateSpeakerRequest {
 
 export interface DesktopBackend {
   getSnapshot(): Promise<StudioSnapshot>;
+  listJobs(): Promise<JobRuntimeStatus[]>;
+  selectJob(jobId: string): Promise<StudioSnapshot>;
   createJob(request: CreateJobRequest): Promise<CreateJobResult>;
   cancelJob(jobId: string): Promise<void>;
   updateSpeaker(request: UpdateSpeakerRequest): Promise<SpeakerProfile>;

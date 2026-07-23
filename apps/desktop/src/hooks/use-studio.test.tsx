@@ -8,12 +8,17 @@ import {
 import type {
   CreateJobRequest,
   CreateJobResult,
+  JobRuntimeStatus,
   ReviewDecision,
   ReviewSegment,
   SpeakerProfile,
   StudioSnapshot,
   UpdateSpeakerRequest,
 } from "../contracts/studio";
+import {
+  I18nProvider,
+  LOCALE_STORAGE_KEY,
+} from "../i18n";
 import { createStudioFixture } from "../mocks/studio-fixture";
 import { useStudio } from "./use-studio";
 
@@ -33,6 +38,8 @@ const mocks = vi.hoisted(() => ({
     createJob: vi.fn<
       (request: CreateJobRequest) => Promise<CreateJobResult>
     >(),
+    listJobs: vi.fn<() => Promise<JobRuntimeStatus[]>>(),
+    selectJob: vi.fn<(jobId: string) => Promise<StudioSnapshot>>(),
     cancelJob: vi.fn<(jobId: string) => Promise<void>>(),
     updateSpeaker: vi.fn<
       (request: UpdateSpeakerRequest) => Promise<SpeakerProfile>
@@ -95,8 +102,46 @@ function completedSnapshot(): StudioSnapshot {
   return snapshot;
 }
 
-async function renderLoadedHook() {
-  const rendered = renderHook(() => useStudio());
+function runtimeStatus(
+  jobId: string,
+  status: JobRuntimeStatus["status"],
+  projected: boolean,
+): JobRuntimeStatus {
+  const active =
+    status === "draft" ||
+    status === "queued" ||
+    status === "running" ||
+    status === "review_required";
+  return {
+    jobId,
+    status,
+    revision: 1,
+    acceptedByWorker: true,
+    projected,
+    inFlight: active,
+    workerEventRouteRegistered: active,
+    cancellable:
+      status === "queued" ||
+      status === "running" ||
+      status === "review_required",
+    volatileOnly: true,
+  };
+}
+
+function statusesFor(
+  snapshot: StudioSnapshot,
+  siblings: readonly JobRuntimeStatus[] = [],
+): JobRuntimeStatus[] {
+  return [
+    runtimeStatus(snapshot.job.id, snapshot.job.status, true),
+    ...siblings,
+  ];
+}
+
+async function renderLoadedHook(options?: {
+  wrapper?: typeof I18nProvider;
+}) {
+  const rendered = renderHook(() => useStudio(), options);
 
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -145,6 +190,12 @@ describe("useStudio synchronization", () => {
     mocks.backend.getSnapshot.mockResolvedValue(
       structuredClone(initialSnapshot),
     );
+    mocks.backend.listJobs.mockResolvedValue(
+      statusesFor(initialSnapshot),
+    );
+    mocks.backend.selectJob.mockResolvedValue(
+      structuredClone(initialSnapshot),
+    );
     mocks.backend.createJob.mockResolvedValue({
       accepted: true,
       jobId: "job-accepted",
@@ -163,6 +214,7 @@ describe("useStudio synchronization", () => {
     cleanup();
     vi.clearAllTimers();
     vi.useRealTimers();
+    window.localStorage.removeItem(LOCALE_STORAGE_KEY);
   });
 
   it("does not register a Tauri listener or reconciliation poll in browser mock mode", async () => {
@@ -251,7 +303,7 @@ describe("useStudio synchronization", () => {
       backendMethod: "cancelJob",
       warningTitle: "Cancellation accepted; refresh delayed",
       invoke: async (studio: ReturnType<typeof useStudio>) =>
-        studio.cancelJob("job-dynamic-8"),
+        studio.cancelJob("job-demo-001"),
     },
   ] as const;
 
@@ -284,4 +336,255 @@ describe("useStudio synchronization", () => {
       expect(result.current.busyAction).toBeNull();
     },
   );
+
+  it("isolates batch failures and deterministically opens the last accepted item", async () => {
+    const initialSnapshot = completedSnapshot();
+    const selectedSnapshot = completedSnapshot();
+    selectedSnapshot.job.id = "job-c";
+    selectedSnapshot.job.title = "Third accepted task";
+    selectedSnapshot.job.sourcePath = "D:\\media\\third.wav";
+
+    mocks.backend.createJob
+      .mockReset()
+      .mockResolvedValueOnce({
+        accepted: true,
+        jobId: "job-a",
+        message: "First accepted.",
+      })
+      .mockRejectedValueOnce(new Error("Second item is invalid."))
+      .mockResolvedValueOnce({
+        accepted: true,
+        jobId: "job-c",
+        message: "Third accepted.",
+      });
+    mocks.backend.selectJob.mockResolvedValue(
+      structuredClone(selectedSnapshot),
+    );
+    mocks.backend.listJobs
+      .mockReset()
+      .mockResolvedValueOnce(statusesFor(initialSnapshot))
+      .mockResolvedValueOnce([
+        runtimeStatus("job-a", "queued", false),
+        runtimeStatus("job-c", "completed", true),
+      ]);
+
+    const { result } = await renderLoadedHook();
+    const requests = [
+      {
+        ...createRequest,
+        title: "First task",
+        mediaPath: "D:\\media\\first.wav",
+      },
+      {
+        ...createRequest,
+        title: "Invalid task",
+        mediaPath: "D:\\media\\invalid.bin",
+      },
+      {
+        ...createRequest,
+        title: "Third accepted task",
+        mediaPath: "D:\\media\\third.wav",
+      },
+    ];
+
+    let batchResult:
+      | Awaited<ReturnType<typeof result.current.createJobBatch>>
+      | undefined;
+    await act(async () => {
+      batchResult = await result.current.createJobBatch(requests);
+    });
+
+    expect(batchResult).toMatchObject({
+      acceptedCount: 2,
+      failedCount: 1,
+    });
+    expect(batchResult?.items.map((item) => item.status)).toEqual([
+      "accepted",
+      "failed",
+      "accepted",
+    ]);
+    expect(mocks.backend.createJob).toHaveBeenCalledTimes(3);
+    expect(mocks.backend.selectJob).toHaveBeenCalledWith("job-c");
+    expect(result.current.snapshot?.job.id).toBe("job-c");
+    expect(result.current.selectedJobId).toBe("job-c");
+    expect(result.current.toast).toMatchObject({
+      tone: "warning",
+      title: "Batch completed with isolated failures",
+    });
+    expect(result.current.busyAction).toBeNull();
+  });
+
+  it("switches the projected snapshot and selected task by exact job ID", async () => {
+    const initialSnapshot = completedSnapshot();
+    const selectedSnapshot = completedSnapshot();
+    selectedSnapshot.job.id = "job-second";
+    selectedSnapshot.job.title = "Second workspace";
+    selectedSnapshot.job.sourcePath = "D:\\media\\second.mov";
+    mocks.backend.listJobs
+      .mockReset()
+      .mockResolvedValueOnce(
+        statusesFor(initialSnapshot, [
+          runtimeStatus("job-second", "running", false),
+        ]),
+      )
+      .mockResolvedValueOnce([
+        runtimeStatus(initialSnapshot.job.id, "completed", false),
+        runtimeStatus("job-second", "completed", true),
+      ]);
+    mocks.backend.selectJob.mockResolvedValue(
+      structuredClone(selectedSnapshot),
+    );
+
+    const { result } = await renderLoadedHook();
+
+    await act(async () => {
+      await result.current.selectJob("job-second");
+    });
+
+    expect(mocks.backend.selectJob).toHaveBeenCalledTimes(1);
+    expect(mocks.backend.selectJob).toHaveBeenCalledWith("job-second");
+    expect(result.current.snapshot?.job.title).toBe("Second workspace");
+    expect(result.current.selectedJobId).toBe("job-second");
+    expect(result.current.activeSection).toBe("overview");
+  });
+
+  it("keeps a freshly selected snapshot authoritative over a stale task-list refresh", async () => {
+    const initialSnapshot = completedSnapshot();
+    const selectedSnapshot = completedSnapshot();
+    selectedSnapshot.job.id = "job-fresh";
+    selectedSnapshot.job.title = "Fresh workspace";
+    selectedSnapshot.job.sourcePath = "D:\\media\\fresh.mov";
+    let resolveStaleRefresh:
+      | ((statuses: JobRuntimeStatus[]) => void)
+      | undefined;
+    const staleRefresh = new Promise<JobRuntimeStatus[]>((resolve) => {
+      resolveStaleRefresh = resolve;
+    });
+
+    mocks.backend.listJobs
+      .mockReset()
+      .mockResolvedValueOnce(
+        statusesFor(initialSnapshot, [
+          runtimeStatus("job-fresh", "running", false),
+        ]),
+      )
+      .mockImplementationOnce(async () => await staleRefresh)
+      .mockResolvedValueOnce([
+        runtimeStatus(initialSnapshot.job.id, "completed", false),
+        runtimeStatus("job-fresh", "completed", true),
+      ]);
+    mocks.backend.selectJob.mockResolvedValue(
+      structuredClone(selectedSnapshot),
+    );
+
+    const { result } = await renderLoadedHook();
+    let pendingRefresh: Promise<JobRuntimeStatus[]> | undefined;
+    act(() => {
+      pendingRefresh = result.current.refreshJobs();
+    });
+
+    await act(async () => {
+      await result.current.selectJob("job-fresh");
+    });
+
+    await act(async () => {
+      resolveStaleRefresh?.(statusesFor(initialSnapshot, [
+        runtimeStatus("job-fresh", "running", false),
+      ]));
+      await pendingRefresh;
+    });
+
+    expect(result.current.snapshot?.job.id).toBe("job-fresh");
+    expect(result.current.selectedJobId).toBe("job-fresh");
+  });
+
+  it("cancels a non-current task without selecting or refreshing its snapshot", async () => {
+    const initialSnapshot = completedSnapshot();
+    mocks.backend.listJobs
+      .mockReset()
+      .mockResolvedValueOnce(
+        statusesFor(initialSnapshot, [
+          runtimeStatus("job-background", "running", false),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        statusesFor(initialSnapshot, [
+          runtimeStatus("job-background", "cancelled", false),
+        ]),
+      );
+
+    const { result } = await renderLoadedHook();
+
+    await act(async () => {
+      await result.current.cancelJob("job-background");
+    });
+
+    expect(mocks.backend.cancelJob).toHaveBeenCalledWith(
+      "job-background",
+    );
+    expect(mocks.backend.selectJob).not.toHaveBeenCalled();
+    expect(mocks.backend.getSnapshot).toHaveBeenCalledTimes(1);
+    expect(mocks.backend.listJobs).toHaveBeenCalledTimes(2);
+    expect(result.current.snapshot?.job.id).toBe(
+      initialSnapshot.job.id,
+    );
+    expect(result.current.selectedJobId).toBe(initialSnapshot.job.id);
+  });
+
+  it("keeps reconciliation active when a sibling runs behind a terminal selected task", async () => {
+    const initialSnapshot = completedSnapshot();
+    mocks.backend.listJobs.mockResolvedValue(
+      statusesFor(initialSnapshot, [
+        runtimeStatus("job-background", "running", false),
+      ]),
+    );
+
+    await renderLoadedHook();
+
+    expect(mocks.backend.getSnapshot).toHaveBeenCalledTimes(1);
+    expect(mocks.backend.listJobs).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(mocks.backend.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(mocks.backend.listJobs).toHaveBeenCalledTimes(2);
+  });
+
+  it("localizes new task-switch notifications through message keys", async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, "zh-Hans");
+    const initialSnapshot = completedSnapshot();
+    const selectedSnapshot = completedSnapshot();
+    selectedSnapshot.job.id = "job-zh";
+    selectedSnapshot.job.title = "中文访谈";
+    mocks.backend.listJobs
+      .mockReset()
+      .mockResolvedValueOnce(
+        statusesFor(initialSnapshot, [
+          runtimeStatus("job-zh", "completed", false),
+        ]),
+      )
+      .mockResolvedValueOnce([
+        runtimeStatus(initialSnapshot.job.id, "completed", false),
+        runtimeStatus("job-zh", "completed", true),
+      ]);
+    mocks.backend.selectJob.mockResolvedValue(
+      structuredClone(selectedSnapshot),
+    );
+
+    const { result } = await renderLoadedHook({
+      wrapper: I18nProvider,
+    });
+
+    await act(async () => {
+      await result.current.selectJob("job-zh");
+    });
+
+    expect(result.current.toast).toMatchObject({
+      tone: "success",
+      title: "任务已打开",
+      detail: "“中文访谈”现在是当前工作区。",
+    });
+  });
 });

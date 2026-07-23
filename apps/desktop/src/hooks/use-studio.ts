@@ -1,6 +1,10 @@
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  createJobBatch as coordinateCreateJobBatch,
+  type CreateJobBatchResult,
+} from "../bridge/batch-coordinator";
+import {
   desktopBackend,
   isTauriRuntime,
 } from "../bridge/desktop-backend";
@@ -8,11 +12,18 @@ import { parseStudioSnapshot } from "../contracts/runtime-validation";
 import type {
   AppSection,
   CreateJobRequest,
+  JobRuntimeStatus,
   ModelStrategyId,
   ReviewDecision,
+  StudioJobItem,
   StudioSnapshot,
   UpdateSpeakerRequest,
 } from "../contracts/studio";
+import {
+  useI18n,
+  type MessageKey,
+  type MessageParams,
+} from "../i18n";
 
 interface ToastState {
   id: number;
@@ -25,7 +36,17 @@ const RECONCILIATION_INTERVAL_MS = 2_000;
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function useStudio() {
+  const { t } = useI18n();
+  const translationRef = useRef(t);
   const [snapshot, setSnapshot] = useState<StudioSnapshot | null>(null);
+  const [jobStatuses, setJobStatuses] = useState<JobRuntimeStatus[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [jobMetadata, setJobMetadata] = useState<
+    ReadonlyMap<
+      string,
+      Pick<StudioJobItem, "title" | "sourcePath" | "progress">
+    >
+  >(() => new Map());
   const [activeSection, setActiveSection] = useState<AppSection>("overview");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -34,8 +55,19 @@ export function useStudio() {
   const toastSequence = useRef(1);
   const loadSequence = useRef(0);
   const snapshotRevision = useRef(0);
+  const selectedJobIdRef = useRef<string | null>(null);
   const pollFailureCount = useRef(0);
   const pollWarningShown = useRef(false);
+
+  useEffect(() => {
+    translationRef.current = t;
+  }, [t]);
+
+  const translateMessage = useCallback(
+    (key: MessageKey, params?: MessageParams) =>
+      translationRef.current(key, params),
+    [],
+  );
 
   const notify = useCallback(
     (tone: ToastState["tone"], title: string, detail: string) => {
@@ -45,19 +77,68 @@ export function useStudio() {
     [],
   );
 
+  const notifyLocalized = useCallback(
+    (
+      tone: ToastState["tone"],
+      titleKey: MessageKey,
+      detailKey: MessageKey,
+      params?: MessageParams,
+    ) => {
+      notify(
+        tone,
+        translateMessage(titleKey, params),
+        translateMessage(detailKey, params),
+      );
+    },
+    [notify, translateMessage],
+  );
+
   const commitSnapshot = useCallback((next: StudioSnapshot) => {
     snapshotRevision.current += 1;
     setSnapshot(next);
+    selectedJobIdRef.current = next.job.id;
+    setSelectedJobId(next.job.id);
+    setJobMetadata((current) => {
+      const updated = new Map(current);
+      updated.set(next.job.id, {
+        title: next.job.title,
+        sourcePath: next.job.sourcePath,
+        progress: next.job.progress,
+      });
+      return updated;
+    });
     setLoadError(null);
   }, []);
 
+  const commitJobStatuses = useCallback(
+    (next: JobRuntimeStatus[]) => {
+      setJobStatuses(next);
+      const projected = next.find((job) => job.projected);
+      if (projected && selectedJobIdRef.current === null) {
+        selectedJobIdRef.current = projected.jobId;
+        setSelectedJobId(projected.jobId);
+      }
+    },
+    [],
+  );
+
+  const refreshJobs = useCallback(async () => {
+    const next = await desktopBackend.listJobs();
+    commitJobStatuses(next);
+    return next;
+  }, [commitJobStatuses]);
+
   const refresh = useCallback(async () => {
     const revisionAtStart = snapshotRevision.current;
-    const next = await desktopBackend.getSnapshot();
+    const [next, nextJobs] = await Promise.all([
+      desktopBackend.getSnapshot(),
+      desktopBackend.listJobs(),
+    ]);
     if (snapshotRevision.current === revisionAtStart) {
       commitSnapshot(next);
     }
-  }, [commitSnapshot]);
+    commitJobStatuses(nextJobs);
+  }, [commitJobStatuses, commitSnapshot]);
 
   const loadSnapshot = useCallback(async () => {
     const sequence = loadSequence.current + 1;
@@ -67,13 +148,17 @@ export function useStudio() {
     setLoadError(null);
 
     try {
-      const next = await desktopBackend.getSnapshot();
+      const [next, nextJobs] = await Promise.all([
+        desktopBackend.getSnapshot(),
+        desktopBackend.listJobs(),
+      ]);
       if (loadSequence.current !== sequence) {
         return;
       }
       if (snapshotRevision.current === revisionAtStart) {
         commitSnapshot(next);
       }
+      commitJobStatuses(nextJobs);
     } catch (error: unknown) {
       if (loadSequence.current !== sequence) {
         return;
@@ -81,22 +166,28 @@ export function useStudio() {
       const detail =
         error instanceof Error
           ? error.message
-          : "The local workspace returned an unknown error.";
+          : translateMessage("notification.workspace.unknownError");
       setSnapshot(null);
+      setJobStatuses([]);
+      selectedJobIdRef.current = null;
+      setSelectedJobId(null);
       setLoadError(detail);
-      toastSequence.current += 1;
-      setToast({
-        id: toastSequence.current,
-        tone: "error",
-        title: "Workspace failed to load",
+      notify(
+        "error",
+        translateMessage("notification.workspace.loadFailedTitle"),
         detail,
-      });
+      );
     } finally {
       if (loadSequence.current === sequence) {
         setLoading(false);
       }
     }
-  }, [commitSnapshot]);
+  }, [
+    commitJobStatuses,
+    commitSnapshot,
+    notify,
+    translateMessage,
+  ]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -128,12 +219,18 @@ export function useStudio() {
         pollFailureCount.current = 0;
         pollWarningShown.current = false;
       } catch (error) {
-        notify(
+        notifyLocalized(
           "error",
-          "Unsafe live update rejected",
-          error instanceof Error
-            ? error.message
-            : "A local worker update failed strict contract validation.",
+          "notification.live.rejectedTitle",
+          "notification.live.rejectedDetail",
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : translateMessage(
+                    "notification.live.invalidPayload",
+                  ),
+          },
         );
       }
     })
@@ -148,14 +245,18 @@ export function useStudio() {
         if (disposed) {
           return;
         }
-        notify(
+        notifyLocalized(
           "warning",
-          "Live updates unavailable",
-          `${
-            error instanceof Error
-              ? error.message
-              : "The Tauri event listener could not be established."
-          } Bounded snapshot reconciliation remains active.`,
+          "notification.live.unavailableTitle",
+          "notification.live.unavailableDetail",
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : translateMessage(
+                    "notification.live.listenerFailed",
+                  ),
+          },
         );
       });
 
@@ -163,14 +264,22 @@ export function useStudio() {
       disposed = true;
       unlisten?.();
     };
-  }, [commitSnapshot, notify]);
+  }, [commitSnapshot, notifyLocalized, translateMessage]);
+
+  const hasActiveJobs = useMemo(
+    () =>
+      jobStatuses.some(
+        (job) => !TERMINAL_JOB_STATUSES.has(job.status),
+      ) ||
+      Boolean(
+        snapshot &&
+          !TERMINAL_JOB_STATUSES.has(snapshot.job.status),
+      ),
+    [jobStatuses, snapshot],
+  );
 
   useEffect(() => {
-    if (
-      !isTauriRuntime() ||
-      !snapshot ||
-      TERMINAL_JOB_STATUSES.has(snapshot.job.status)
-    ) {
+    if (!isTauriRuntime() || !snapshot || !hasActiveJobs) {
       return undefined;
     }
 
@@ -190,12 +299,16 @@ export function useStudio() {
           !disposed
         ) {
           pollWarningShown.current = true;
-          notify(
+          notifyLocalized(
             "warning",
-            "Workspace synchronization is delayed",
-            error instanceof Error
-              ? error.message
-              : "The bounded reconciliation poll could not read the local snapshot.",
+            "notification.sync.delayedTitle",
+            "notification.sync.delayedDetail",
+            {
+              error:
+                error instanceof Error
+                  ? error.message
+                  : translateMessage("notification.sync.readFailed"),
+            },
           );
         }
       } finally {
@@ -220,7 +333,13 @@ export function useStudio() {
         window.clearTimeout(timer);
       }
     };
-  }, [notify, refresh, snapshot]);
+  }, [
+    hasActiveJobs,
+    notifyLocalized,
+    refresh,
+    snapshot,
+    translateMessage,
+  ]);
 
   const chooseStrategy = useCallback((strategyId: ModelStrategyId) => {
     setSnapshot((current) =>
@@ -275,6 +394,17 @@ export function useStudio() {
       setBusyAction("create-job");
       try {
         const result = await desktopBackend.createJob(request);
+        if (result.accepted) {
+          setJobMetadata((current) => {
+            const updated = new Map(current);
+            updated.set(result.jobId, {
+              title: request.title.trim(),
+              sourcePath: request.mediaPath.trim(),
+              progress: 0,
+            });
+            return updated;
+          });
+        }
         try {
           await refresh();
           notify("success", "Task created safely", result.message);
@@ -303,6 +433,165 @@ export function useStudio() {
       }
     },
     [notify, refresh],
+  );
+
+  const createJobBatch = useCallback(
+    async (
+      requests: readonly CreateJobRequest[],
+    ): Promise<CreateJobBatchResult> => {
+      setBusyAction("create-job-batch");
+      try {
+        const result = await coordinateCreateJobBatch(
+          requests,
+          async (request) => await desktopBackend.createJob(request),
+        );
+        const acceptedItems = result.items.filter(
+          (item) => item.status === "accepted",
+        );
+
+        if (acceptedItems.length > 0) {
+          setJobMetadata((current) => {
+            const updated = new Map(current);
+            acceptedItems.forEach((item) => {
+              updated.set(item.result.jobId, {
+                title: item.request.title.trim(),
+                sourcePath: item.request.mediaPath.trim(),
+                progress: 0,
+              });
+            });
+            return updated;
+          });
+
+          const target = acceptedItems.at(-1);
+          if (!target) {
+            return result;
+          }
+
+          try {
+            const next = await desktopBackend.selectJob(
+              target.result.jobId,
+            );
+            commitSnapshot(next);
+            await refreshJobs();
+            setActiveSection("overview");
+            if (result.failedCount === 0) {
+              notifyLocalized(
+                "success",
+                "notification.batch.createdTitle",
+                "notification.batch.createdDetail",
+                { count: result.acceptedCount },
+              );
+            } else {
+              notifyLocalized(
+                "warning",
+                "notification.batch.partialTitle",
+                "notification.batch.partialDetail",
+                {
+                  accepted: result.acceptedCount,
+                  failed: result.failedCount,
+                },
+              );
+            }
+          } catch (syncError) {
+            try {
+              await refreshJobs();
+            } catch {
+              // The accepted items remain valid even if task-list refresh lags.
+            }
+            notifyLocalized(
+              "warning",
+              "notification.batch.syncDelayedTitle",
+              "notification.batch.syncDelayedDetail",
+              {
+                accepted: result.acceptedCount,
+                failed: result.failedCount,
+                error:
+                  syncError instanceof Error
+                    ? syncError.message
+                    : translateMessage("notification.sync.readFailed"),
+              },
+            );
+          }
+        } else {
+          notifyLocalized(
+            "error",
+            "notification.batch.failedTitle",
+            "notification.batch.failedDetail",
+            { count: result.failedCount },
+          );
+        }
+
+        return result;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      commitSnapshot,
+      notifyLocalized,
+      refreshJobs,
+      translateMessage,
+    ],
+  );
+
+  const selectJob = useCallback(
+    async (jobId: string) => {
+      if (jobId === selectedJobIdRef.current) {
+        return;
+      }
+
+      setBusyAction(`select-job:${jobId}`);
+      try {
+        const next = await desktopBackend.selectJob(jobId);
+        commitSnapshot(next);
+        setActiveSection("overview");
+        try {
+          await refreshJobs();
+          notifyLocalized(
+            "success",
+            "notification.task.selectedTitle",
+            "notification.task.selectedDetail",
+            { title: next.job.title },
+          );
+        } catch (syncError) {
+          notifyLocalized(
+            "warning",
+            "notification.task.selectedSyncDelayedTitle",
+            "notification.task.selectedSyncDelayedDetail",
+            {
+              title: next.job.title,
+              error:
+                syncError instanceof Error
+                  ? syncError.message
+                  : translateMessage("notification.sync.readFailed"),
+            },
+          );
+        }
+      } catch (error) {
+        notifyLocalized(
+          "error",
+          "notification.task.selectFailedTitle",
+          "notification.task.selectFailedDetail",
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : translateMessage(
+                    "notification.task.selectRejected",
+                  ),
+          },
+        );
+        throw error;
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      commitSnapshot,
+      notifyLocalized,
+      refreshJobs,
+      translateMessage,
+    ],
   );
 
   const applyReview = useCallback(
@@ -343,39 +632,58 @@ export function useStudio() {
 
   const cancelJob = useCallback(
     async (jobId: string) => {
-      setBusyAction("cancel-job");
+      const cancellingSelectedJob =
+        jobId === selectedJobIdRef.current;
+      setBusyAction(`cancel-job:${jobId}`);
       try {
         await desktopBackend.cancelJob(jobId);
         try {
-          await refresh();
-          notify(
+          if (cancellingSelectedJob) {
+            await refresh();
+          } else {
+            await refreshJobs();
+          }
+          notifyLocalized(
             "success",
-            "Cancellation requested",
-            "The local worker accepted the cancellation request.",
+            "notification.cancel.acceptedTitle",
+            "notification.cancel.acceptedDetail",
           );
         } catch (syncError) {
-          notify(
+          notifyLocalized(
             "warning",
-            "Cancellation accepted; refresh delayed",
-            `Live synchronization will reconcile the final task state. ${
-              syncError instanceof Error ? syncError.message : ""
-            }`.trim(),
+            "notification.cancel.syncDelayedTitle",
+            "notification.cancel.syncDelayedDetail",
+            {
+              error:
+                syncError instanceof Error
+                  ? syncError.message
+                  : translateMessage("notification.sync.readFailed"),
+            },
           );
         }
       } catch (error) {
-        notify(
+        notifyLocalized(
           "error",
-          "Task could not be cancelled",
-          error instanceof Error
-            ? error.message
-            : "The local worker rejected the cancellation request.",
+          "notification.cancel.failedTitle",
+          "notification.cancel.failedDetail",
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : translateMessage("notification.cancel.rejected"),
+          },
         );
         throw error;
       } finally {
         setBusyAction(null);
       }
     },
-    [notify, refresh],
+    [
+      notifyLocalized,
+      refresh,
+      refreshJobs,
+      translateMessage,
+    ],
   );
 
   const openArtifact = useCallback(
@@ -407,9 +715,24 @@ export function useStudio() {
     () => snapshot?.reviews.filter((item) => !item.reviewed) ?? [],
     [snapshot],
   );
+  const jobs = useMemo<StudioJobItem[]>(
+    () =>
+      jobStatuses.map((status) => {
+        const metadata = jobMetadata.get(status.jobId);
+        return {
+          ...status,
+          title: metadata?.title ?? null,
+          sourcePath: metadata?.sourcePath ?? null,
+          progress: metadata?.progress ?? null,
+        };
+      }),
+    [jobMetadata, jobStatuses],
+  );
 
   return {
     snapshot,
+    jobs,
+    selectedJobId,
     activeSection,
     setActiveSection,
     loading,
@@ -422,9 +745,12 @@ export function useStudio() {
     chooseStrategy,
     updateSpeaker,
     createJob,
+    createJobBatch,
+    selectJob,
     cancelJob,
     applyReview,
     openArtifact,
+    refreshJobs,
     notify,
   };
 }

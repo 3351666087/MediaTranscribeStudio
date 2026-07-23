@@ -342,7 +342,8 @@ describe("OutputCustomizationPanel fail-closed editing", () => {
 
   it("keeps an invalid custom-font draft visible and emits only after it is valid", async () => {
     const user = userEvent.setup();
-    const onChange = vi.fn();
+    const onChange =
+      vi.fn<(value: OutputCustomization) => void>();
     renderPanel(<OutputCustomizationPanel onChange={onChange} />);
 
     await user.click(screen.getByRole("button", { name: "Custom" }));
@@ -373,8 +374,9 @@ describe("OutputCustomizationPanel fail-closed editing", () => {
     });
   });
 
-  it("keeps an invalid naming draft visible and blocks apply without emitting it", async () => {
-    const onChange = vi.fn();
+  it("keeps an invalid naming draft visible and blocks apply without emitting it", () => {
+    const onChange =
+      vi.fn<(value: OutputCustomization) => void>();
     renderPanel(
       <OutputCustomizationPanel initialLevel="delivery" onChange={onChange} />,
     );
@@ -404,7 +406,8 @@ describe("OutputCustomizationPanel fail-closed editing", () => {
 
   it("blocks removing the final format without inventing a fallback", async () => {
     const user = userEvent.setup();
-    const onChange = vi.fn();
+    const onChange =
+      vi.fn<(value: OutputCustomization) => void>();
     const value = cloneDefaults();
     value.subtitles.enabled = false;
     value.delivery.formats = ["pdf"];
@@ -432,7 +435,8 @@ describe("OutputCustomizationPanel fail-closed editing", () => {
 
   it("blocks removing the final subtitle mode without repairing the selection", async () => {
     const user = userEvent.setup();
-    const onChange = vi.fn();
+    const onChange =
+      vi.fn<(value: OutputCustomization) => void>();
     renderPanel(
       <OutputCustomizationPanel initialLevel="delivery" onChange={onChange} />,
     );
@@ -454,7 +458,8 @@ describe("OutputCustomizationPanel fail-closed editing", () => {
 
   it("explicitly clears incompatible subtitle outputs when subtitles are disabled", async () => {
     const user = userEvent.setup();
-    const onChange = vi.fn();
+    const onChange =
+      vi.fn<(value: OutputCustomization) => void>();
     renderPanel(<OutputCustomizationPanel onChange={onChange} />);
 
     await user.click(screen.getByRole("tab", { name: /Subtitles/u }));
@@ -502,7 +507,8 @@ describe("OutputCustomizationPanel fail-closed editing", () => {
 
   it("covers sidecar, soft-mux, and burn-in while exposing real container mappings", async () => {
     const user = userEvent.setup();
-    const onChange = vi.fn();
+    const onChange =
+      vi.fn<(value: OutputCustomization) => void>();
     renderPanel(
       <OutputCustomizationPanel initialLevel="delivery" onChange={onChange} />,
     );

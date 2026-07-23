@@ -23,6 +23,9 @@ export const SUPPORTED_MEDIA_EXTENSIONS = [
   "ogg",
 ] as const;
 
+export const MAX_MEDIA_DROP_PATHS = 32;
+export const DEFAULT_MEDIA_DROP_CONCURRENCY = 4;
+
 const SUPPORTED_EXTENSION_SET = new Set<string>(SUPPORTED_MEDIA_EXTENSIONS);
 const MAX_LOCAL_PATH_LENGTH = 4_096;
 const OUTPUT_SUFFIX = "-MediaTranscribeStudio";
@@ -52,6 +55,24 @@ export class MediaDropError extends Error {
 export interface MediaSelection {
   sourcePath: string;
   outputDirectory: string;
+}
+
+export type MediaDropFailureCode =
+  | MediaDropErrorCode
+  | "duplicatePath"
+  | "resolutionFailed";
+
+export interface MediaDropFailure {
+  index: number;
+  path: string;
+  code: MediaDropFailureCode;
+  message: string;
+  duplicateOf?: string;
+}
+
+export interface MediaDropBatchResult {
+  selections: MediaSelection[];
+  failures: MediaDropFailure[];
 }
 
 export type MediaDropEvent =
@@ -97,11 +118,20 @@ function isNetworkOrDevicePath(path: string): boolean {
 }
 
 function comparablePath(path: string): string {
-  const withoutTrailingSeparators = path.replace(/[\\/]+$/u, "");
-  const normalizedSeparators = withoutTrailingSeparators.replace(/\\/gu, "/");
-  return /^[a-zA-Z]:\//u.test(normalizedSeparators)
-    ? normalizedSeparators.toLocaleLowerCase("en-US")
+  const normalizedSeparators = path.replace(/\\/gu, "/");
+  const drivePrefix = /^[a-zA-Z]:\//u.exec(normalizedSeparators)?.[0] ?? "";
+  const rootPrefix =
+    drivePrefix || (normalizedSeparators.startsWith("/") ? "/" : "");
+  const remainder = rootPrefix
+    ? normalizedSeparators.slice(rootPrefix.length)
     : normalizedSeparators;
+  const comparableSegments = remainder
+    .split(/\/+/u)
+    .filter((segment) => segment.length > 0 && segment !== ".");
+  const withoutTrailingSeparators = `${rootPrefix}${comparableSegments.join("/")}`;
+  return drivePrefix
+    ? withoutTrailingSeparators.toLocaleLowerCase("en-US")
+    : withoutTrailingSeparators;
 }
 
 export function pathsAreDistinct(sourcePath: string, outputPath: string): boolean {
@@ -208,11 +238,166 @@ export async function resolveMediaSelection(
   return { sourcePath, outputDirectory };
 }
 
-export function validateDroppedPaths(paths: readonly string[]): string {
-  if (paths.length !== 1) {
-    fail("singleFile", "Drop exactly one local media file.");
+export function validateDroppedPaths(paths: readonly string[]): readonly string[] {
+  if (paths.length < 1 || paths.length > MAX_MEDIA_DROP_PATHS) {
+    fail(
+      "singleFile",
+      `Drop between 1 and ${MAX_MEDIA_DROP_PATHS} local media files.`,
+    );
   }
-  return paths[0];
+  return [...paths];
+}
+
+interface IndexedPath {
+  index: number;
+  path: string;
+}
+
+interface IndexedSelection extends IndexedPath {
+  selection: MediaSelection;
+}
+
+function duplicateFailure(
+  duplicate: IndexedPath,
+  originalPath: string,
+): MediaDropFailure {
+  return {
+    index: duplicate.index,
+    path: duplicate.path,
+    code: "duplicatePath",
+    message: "This media path duplicates an earlier item in the same drop.",
+    duplicateOf: originalPath,
+  };
+}
+
+function resolutionFailure(
+  item: IndexedPath,
+  error: unknown,
+): MediaDropFailure {
+  if (error instanceof MediaDropError) {
+    return {
+      index: item.index,
+      path: item.path,
+      code: error.code,
+      message: error.message,
+    };
+  }
+
+  return {
+    index: item.index,
+    path: item.path,
+    code: "resolutionFailed",
+    message:
+      error instanceof Error && error.message.length > 0
+        ? error.message
+        : "The media path could not be resolved.",
+  };
+}
+
+function deduplicateComparablePaths(paths: readonly string[]): {
+  unique: IndexedPath[];
+  failures: MediaDropFailure[];
+} {
+  const firstPathByComparable = new Map<string, string>();
+  const unique: IndexedPath[] = [];
+  const failures: MediaDropFailure[] = [];
+
+  paths.forEach((path, index) => {
+    const comparable = comparablePath(path);
+    const originalPath = firstPathByComparable.get(comparable);
+    if (originalPath !== undefined) {
+      failures.push(duplicateFailure({ index, path }, originalPath));
+      return;
+    }
+    firstPathByComparable.set(comparable, path);
+    unique.push({ index, path });
+  });
+
+  return { unique, failures };
+}
+
+async function mapWithBoundedConcurrencySettled<TInput, TOutput>(
+  items: readonly TInput[],
+  concurrency: number,
+  mapper: (item: TInput) => Promise<TOutput>,
+): Promise<Array<PromiseSettledResult<TOutput>>> {
+  const results = new Array<PromiseSettledResult<TOutput>>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const [result] = await Promise.allSettled([mapper(items[index])]);
+      results[index] = result;
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      await worker();
+    }),
+  );
+  return results;
+}
+
+export async function resolveMediaDropBatch(
+  adapter: Pick<MediaDropAdapter, "resolve">,
+  rawPaths: readonly string[],
+  concurrency = DEFAULT_MEDIA_DROP_CONCURRENCY,
+): Promise<MediaDropBatchResult> {
+  const paths = validateDroppedPaths(rawPaths);
+  const boundedConcurrency = Math.max(
+    1,
+    Math.min(
+      MAX_MEDIA_DROP_PATHS,
+      Number.isFinite(concurrency) ? Math.floor(concurrency) : 1,
+    ),
+  );
+  const {
+    unique,
+    failures: duplicateFailures,
+  } = deduplicateComparablePaths(paths);
+  const settled = await mapWithBoundedConcurrencySettled(
+    unique,
+    boundedConcurrency,
+    async (item): Promise<IndexedSelection> => ({
+      ...item,
+      selection: await adapter.resolve(item.path),
+    }),
+  );
+  const resolvedSelections: IndexedSelection[] = [];
+  const failures = [...duplicateFailures];
+
+  settled.forEach((result, resultIndex) => {
+    const item = unique[resultIndex];
+    if (result.status === "fulfilled") {
+      resolvedSelections.push(result.value);
+    } else {
+      failures.push(resolutionFailure(item, result.reason));
+    }
+  });
+
+  const firstResolvedPath = new Map<string, IndexedSelection>();
+  const selections: IndexedSelection[] = [];
+  resolvedSelections
+    .sort((left, right) => left.index - right.index)
+    .forEach((item) => {
+      const comparable = comparablePath(item.selection.sourcePath);
+      const original = firstResolvedPath.get(comparable);
+      if (original !== undefined) {
+        failures.push(duplicateFailure(item, original.path));
+        return;
+      }
+      firstResolvedPath.set(comparable, item);
+      selections.push(item);
+    });
+
+  return {
+    selections: selections.map(({ selection }) => selection),
+    failures: failures.sort((left, right) => left.index - right.index),
+  };
 }
 
 export class TauriMediaDropAdapter implements MediaDropAdapter {

@@ -1,8 +1,12 @@
 import { win32 } from "node:path";
 import {
+  DEFAULT_MEDIA_DROP_CONCURRENCY,
+  MAX_MEDIA_DROP_PATHS,
+  ControlledMediaDropAdapter,
   MediaDropError,
   createSafeMediaStem,
   pathsAreDistinct,
+  resolveMediaDropBatch,
   resolveMediaSelection,
   validateDroppedPaths,
   type PathOperations,
@@ -92,21 +96,26 @@ describe("native media-drop path policy", () => {
     );
   });
 
-  it("requires exactly one dropped path", () => {
+  it("accepts between one and thirty-two dropped paths", () => {
     expect(() => validateDroppedPaths([])).toThrow(MediaDropError);
+    expect(validateDroppedPaths(["D:\\Media\\one.mov"])).toEqual([
+      "D:\\Media\\one.mov",
+    ]);
+    const maximumBatch = Array.from(
+      { length: MAX_MEDIA_DROP_PATHS },
+      (_, index) => `D:\\Media\\${index}.mov`,
+    );
+    expect(validateDroppedPaths(maximumBatch)).toEqual(maximumBatch);
     try {
       validateDroppedPaths([
-        "D:\\Media\\one.mov",
-        "D:\\Media\\two.mov",
+        ...maximumBatch,
+        "D:\\Media\\overflow.mov",
       ]);
-      throw new Error("Expected multiple paths to be rejected.");
+      throw new Error("Expected an oversized batch to be rejected.");
     } catch (error: unknown) {
       expect(error).toBeInstanceOf(MediaDropError);
       expect((error as MediaDropError).code).toBe("singleFile");
     }
-    expect(validateDroppedPaths(["D:\\Media\\one.mov"])).toBe(
-      "D:\\Media\\one.mov",
-    );
   });
 
   it("detects source/output equality across Windows case and separators", () => {
@@ -136,5 +145,157 @@ describe("native media-drop path policy", () => {
       resolveMediaSelection("D:\\Media\\meeting.mov", escapingOperations),
       "unsafeOutput",
     );
+  });
+
+  it("deduplicates comparable paths and reports the duplicate", async () => {
+    const resolver = vi.fn(async (path: string) => {
+      await Promise.resolve();
+      return {
+        sourcePath: win32.normalize(path),
+        outputDirectory: `${win32.dirname(path)}\\output`,
+      };
+    });
+    const adapter = new ControlledMediaDropAdapter(resolver);
+
+    await expect(
+      resolveMediaDropBatch(adapter, [
+        "D:\\Media\\Meeting.mov",
+        "d:/media/./meeting.mov",
+        "D:\\Media\\Second.wav",
+      ]),
+    ).resolves.toEqual({
+      selections: [
+        {
+          sourcePath: "D:\\Media\\Meeting.mov",
+          outputDirectory: "D:\\Media\\output",
+        },
+        {
+          sourcePath: "D:\\Media\\Second.wav",
+          outputDirectory: "D:\\Media\\output",
+        },
+      ],
+      failures: [
+        {
+          index: 1,
+          path: "d:/media/./meeting.mov",
+          code: "duplicatePath",
+          message:
+            "This media path duplicates an earlier item in the same drop.",
+          duplicateOf: "D:\\Media\\Meeting.mov",
+        },
+      ],
+    });
+    expect(resolver.mock.calls.map(([path]) => path)).toEqual([
+      "D:\\Media\\Meeting.mov",
+      "D:\\Media\\Second.wav",
+    ]);
+  });
+
+  it("deduplicates paths that resolve to the same canonical source", async () => {
+    const adapter = new ControlledMediaDropAdapter(async (path) => {
+      await Promise.resolve();
+      return {
+        sourcePath:
+          path === "D:\\Alias\\meeting.mov"
+            ? "D:\\Media\\meeting.mov"
+            : path,
+        outputDirectory: "D:\\Media\\meeting-MediaTranscribeStudio",
+      };
+    });
+
+    const result = await resolveMediaDropBatch(adapter, [
+      "D:\\Media\\meeting.mov",
+      "D:\\Alias\\meeting.mov",
+    ]);
+
+    expect(result.selections).toHaveLength(1);
+    expect(result.failures).toEqual([
+      expect.objectContaining({
+        index: 1,
+        path: "D:\\Alias\\meeting.mov",
+        code: "duplicatePath",
+        duplicateOf: "D:\\Media\\meeting.mov",
+      }),
+    ]);
+  });
+
+  it("uses bounded concurrency and preserves successes when one item fails", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const adapter = new ControlledMediaDropAdapter(async (path) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const delay = path.includes("one.mov")
+        ? 20
+        : path.includes("two.wav")
+          ? 15
+          : path.includes("bad.txt")
+            ? 1
+            : 5;
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+      active -= 1;
+      if (path.endsWith(".txt")) {
+        throw new MediaDropError(
+          "unsupportedExtension",
+          "Unsupported media extension.",
+        );
+      }
+      return {
+        sourcePath: path,
+        outputDirectory: `${path}-output`,
+      };
+    });
+    const paths = [
+      "D:\\Media\\one.mov",
+      "D:\\Media\\two.wav",
+      "D:\\Media\\bad.txt",
+      "D:\\Media\\three.mp4",
+      "D:\\Media\\four.flac",
+      "D:\\Media\\five.m4a",
+    ];
+
+    const result = await resolveMediaDropBatch(
+      adapter,
+      paths,
+      DEFAULT_MEDIA_DROP_CONCURRENCY,
+    );
+
+    expect(maximumActive).toBe(DEFAULT_MEDIA_DROP_CONCURRENCY);
+    expect(result.selections.map(({ sourcePath }) => sourcePath)).toEqual([
+      paths[0],
+      paths[1],
+      paths[3],
+      paths[4],
+      paths[5],
+    ]);
+    expect(result.failures).toEqual([
+      {
+        index: 2,
+        path: paths[2],
+        code: "unsupportedExtension",
+        message: "Unsupported media extension.",
+      },
+    ]);
+  });
+
+  it("converts unexpected resolver rejection into an item failure", async () => {
+    const adapter = new ControlledMediaDropAdapter(async () => {
+      await Promise.resolve();
+      throw new Error("resolver unavailable");
+    });
+
+    await expect(
+      resolveMediaDropBatch(adapter, ["D:\\Media\\meeting.mov"]),
+    ).resolves.toEqual({
+      selections: [],
+      failures: [
+        {
+          index: 0,
+          path: "D:\\Media\\meeting.mov",
+          code: "resolutionFailed",
+          message: "resolver unavailable",
+        },
+      ],
+    });
   });
 });

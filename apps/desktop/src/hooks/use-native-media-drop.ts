@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  validateDroppedPaths,
+  resolveMediaDropBatch,
   type MediaDropAdapter,
-  type MediaSelection,
+  type MediaDropBatchResult,
 } from "../bridge/media-drop";
 
 interface NativeMediaDropOptions {
-  onSelection: (selection: MediaSelection) => void;
+  onSelection: (result: MediaDropBatchResult) => void;
   onError: (error: unknown) => void;
 }
 
@@ -17,18 +17,16 @@ export interface NativeMediaDropState {
 
 export function useNativeMediaDrop(
   adapter: MediaDropAdapter,
-  { onSelection, onError }: NativeMediaDropOptions,
+  options: NativeMediaDropOptions,
 ): NativeMediaDropState {
   const [dragging, setDragging] = useState(false);
   const [resolving, setResolving] = useState(false);
-  const onSelectionRef = useRef(onSelection);
-  const onErrorRef = useRef(onError);
+  const callbacksRef = useRef<NativeMediaDropOptions>(options);
   const operationRef = useRef(0);
 
   useEffect(() => {
-    onSelectionRef.current = onSelection;
-    onErrorRef.current = onError;
-  }, [onError, onSelection]);
+    callbacksRef.current = options;
+  }, [options]);
 
   useEffect(() => {
     let disposed = false;
@@ -57,16 +55,15 @@ export function useNativeMediaDrop(
         operationRef.current = operation;
 
         Promise.resolve()
-          .then(() => validateDroppedPaths(event.paths))
-          .then(async (path) => await adapter.resolve(path))
-          .then((selection) => {
+          .then(async () => await resolveMediaDropBatch(adapter, event.paths))
+          .then((result) => {
             if (!disposed && operationRef.current === operation) {
-              onSelectionRef.current(selection);
+              callbacksRef.current.onSelection(result);
             }
           })
           .catch((error: unknown) => {
             if (!disposed && operationRef.current === operation) {
-              onErrorRef.current(error);
+              callbacksRef.current.onError(error);
             }
           })
           .finally(() => {
@@ -84,7 +81,7 @@ export function useNativeMediaDrop(
       })
       .catch((error: unknown) => {
         if (!disposed) {
-          onErrorRef.current(error);
+          callbacksRef.current.onError(error);
         }
       });
 

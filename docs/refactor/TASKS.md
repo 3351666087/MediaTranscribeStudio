@@ -187,6 +187,8 @@
 
 ### 7.7 发布、清理和主分支
 
+- [x] 建立 fail-closed Ultimate parity/cutover 检查器，绑定当前 Git HEAD、外部证据根、证据时效、字节数、SHA-256、真实媒体分域指标、Design Pack facets 和独立授权。
+- [x] 建立事务式 Windows/Tauri release、install、upgrade、rollback、recover、uninstall 框架及开发 fixture 回归；这不等同于真实签名 native bundle 已完成。
 - [ ] 完成 Windows native bundle、运行时依赖、FFmpeg、Java、模型和字体证据。
 - [ ] 删除 Python 前端、Python PDF 渲染和所有已被新架构替代的旧代码、依赖与打包入口。
 - [ ] 英文 README、全球化架构说明、隐私、模型卡、许可证和迁移指南完成。

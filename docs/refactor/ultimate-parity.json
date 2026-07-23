@@ -1,0 +1,924 @@
+{
+  "schemaVersion": "1.0.0",
+  "auditId": "media-transcribe-studio-ultimate-parity-v1",
+  "title": "MediaTranscribeStudio Ultimate Pre-release Parity Gate",
+  "updatedAt": "2026-07-22T00:00:00+08:00",
+  "policy": {
+    "defaultFailClosed": true,
+    "forbidEvidenceInsideRepository": true,
+    "maxEvidenceAgeHours": 336,
+    "evidenceRootEnv": "MTS_ULTIMATE_EVIDENCE_ROOT",
+    "requiredCapabilityIds": [
+      "transcription",
+      "speaker-diarization",
+      "translation",
+      "polishing",
+      "summary",
+      "export",
+      "dynamic-n",
+      "java-pdf",
+      "desktop-react-typescript-tauri",
+      "design-pack",
+      "globalization",
+      "real-media-auto",
+      "real-media-manual-5",
+      "offline-security",
+      "packaging-rollback",
+      "legacy-cutover"
+    ],
+    "requiredGateIds": [
+      "ULT-TRANSCRIPTION-001",
+      "ULT-SPEAKER-001",
+      "ULT-TRANSLATION-001",
+      "ULT-POLISH-001",
+      "ULT-SUMMARY-001",
+      "ULT-EXPORT-001",
+      "ULT-DYNAMIC-N-001",
+      "ULT-JAVA-PDF-001",
+      "ULT-DESKTOP-001",
+      "ULT-DESIGN-PACK-001",
+      "ULT-GLOBALIZATION-001",
+      "ULT-REAL-MOV-AUTO-001",
+      "ULT-REAL-MOV-MANUAL-5-001",
+      "ULT-OFFLINE-SECURITY-001",
+      "ULT-PACKAGING-ROLLBACK-001",
+      "ULT-LEGACY-CUTOVER-001"
+    ],
+    "parityGateIds": [
+      "ULT-TRANSCRIPTION-001",
+      "ULT-SPEAKER-001",
+      "ULT-TRANSLATION-001",
+      "ULT-POLISH-001",
+      "ULT-SUMMARY-001",
+      "ULT-EXPORT-001",
+      "ULT-DYNAMIC-N-001",
+      "ULT-JAVA-PDF-001",
+      "ULT-DESKTOP-001",
+      "ULT-DESIGN-PACK-001",
+      "ULT-GLOBALIZATION-001",
+      "ULT-REAL-MOV-AUTO-001",
+      "ULT-REAL-MOV-MANUAL-5-001",
+      "ULT-OFFLINE-SECURITY-001",
+      "ULT-PACKAGING-ROLLBACK-001"
+    ],
+    "releaseGateIds": [
+      "ULT-TRANSCRIPTION-001",
+      "ULT-SPEAKER-001",
+      "ULT-TRANSLATION-001",
+      "ULT-POLISH-001",
+      "ULT-SUMMARY-001",
+      "ULT-EXPORT-001",
+      "ULT-DYNAMIC-N-001",
+      "ULT-JAVA-PDF-001",
+      "ULT-DESKTOP-001",
+      "ULT-DESIGN-PACK-001",
+      "ULT-GLOBALIZATION-001",
+      "ULT-REAL-MOV-AUTO-001",
+      "ULT-REAL-MOV-MANUAL-5-001",
+      "ULT-OFFLINE-SECURITY-001",
+      "ULT-PACKAGING-ROLLBACK-001",
+      "ULT-LEGACY-CUTOVER-001"
+    ],
+    "protectedLegacyPaths": [
+      "main.py",
+      "ui_app.py",
+      "mts_ui",
+      "pipeline.py",
+      "output_formatter.py",
+      "report_generator.py",
+      "packaging"
+    ],
+    "protectedMainRefs": {
+      "refs/heads/main": "d42d6526d9a503c9ad6167609e0ae6cf4a77a649",
+      "refs/remotes/origin/main": "d42d6526d9a503c9ad6167609e0ae6cf4a77a649"
+    },
+    "authorization": {
+      "legacyRemoval": {
+        "scope": "legacy-removal",
+        "approved": false,
+        "approvedBy": null,
+        "approvedAt": null,
+        "changeTicket": null
+      },
+      "mainReplacement": {
+        "scope": "main-replacement",
+        "approved": false,
+        "approvedBy": null,
+        "approvedAt": null,
+        "changeTicket": null
+      }
+    }
+  },
+  "capabilities": [
+    {
+      "id": "transcription",
+      "name": "Production transcription",
+      "required": true,
+      "gateIds": ["ULT-TRANSCRIPTION-001"]
+    },
+    {
+      "id": "speaker-diarization",
+      "name": "Speaker diarization and attribution",
+      "required": true,
+      "gateIds": ["ULT-SPEAKER-001"]
+    },
+    {
+      "id": "translation",
+      "name": "Local multilingual translation",
+      "required": true,
+      "gateIds": ["ULT-TRANSLATION-001"]
+    },
+    {
+      "id": "polishing",
+      "name": "Local semantic polishing",
+      "required": true,
+      "gateIds": ["ULT-POLISH-001"]
+    },
+    {
+      "id": "summary",
+      "name": "Local evidence-bound summary",
+      "required": true,
+      "gateIds": ["ULT-SUMMARY-001"]
+    },
+    {
+      "id": "export",
+      "name": "Structured document and artifact export",
+      "required": true,
+      "gateIds": ["ULT-EXPORT-001"]
+    },
+    {
+      "id": "dynamic-n",
+      "name": "Dynamic speaker cardinality",
+      "required": true,
+      "gateIds": ["ULT-DYNAMIC-N-001"]
+    },
+    {
+      "id": "java-pdf",
+      "name": "Java PDF rendering and validation",
+      "required": true,
+      "gateIds": ["ULT-JAVA-PDF-001"]
+    },
+    {
+      "id": "desktop-react-typescript-tauri",
+      "name": "React TypeScript Tauri desktop application",
+      "required": true,
+      "gateIds": ["ULT-DESKTOP-001"]
+    },
+    {
+      "id": "design-pack",
+      "name": "Design Pack implementation and visual quality",
+      "required": true,
+      "gateIds": ["ULT-DESIGN-PACK-001"]
+    },
+    {
+      "id": "globalization",
+      "name": "Global language and English documentation policy",
+      "required": true,
+      "gateIds": ["ULT-GLOBALIZATION-001"]
+    },
+    {
+      "id": "real-media-auto",
+      "name": "Real MOV automatic speaker-count regression",
+      "required": true,
+      "gateIds": ["ULT-REAL-MOV-AUTO-001"]
+    },
+    {
+      "id": "real-media-manual-5",
+      "name": "Real MOV manual five-speaker regression",
+      "required": true,
+      "gateIds": ["ULT-REAL-MOV-MANUAL-5-001"]
+    },
+    {
+      "id": "offline-security",
+      "name": "Offline operation and local-provider security",
+      "required": true,
+      "gateIds": ["ULT-OFFLINE-SECURITY-001"]
+    },
+    {
+      "id": "packaging-rollback",
+      "name": "Commercial packaging and rollback",
+      "required": true,
+      "gateIds": ["ULT-PACKAGING-ROLLBACK-001"]
+    },
+    {
+      "id": "legacy-cutover",
+      "name": "Authorized legacy removal and main cutover",
+      "required": true,
+      "gateIds": ["ULT-LEGACY-CUTOVER-001"]
+    }
+  ],
+  "gates": [
+    {
+      "id": "ULT-TRANSCRIPTION-001",
+      "title": "Production transcription parity",
+      "description": "The production worker must transcribe media with stable language, timing, persistence, and failure semantics.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["transcription"],
+      "repoChecks": [
+        {"id": "transcription-runner-present", "type": "path_exists", "path": "backend/production_runners.py"},
+        {"id": "transcription-service-present", "type": "path_exists", "path": "backend/service.py"},
+        {"id": "transcription-language-present", "type": "path_exists", "path": "backend/language.py"}
+      ],
+      "commandChecks": [
+        {
+          "id": "transcription-focused-pytest",
+          "argv": ["{python}", "-m", "pytest", "tests/test_production_runners.py", "tests/test_service.py", "tests/test_language.py", "-q"],
+          "cwd": ".",
+          "timeoutSeconds": 900,
+          "attestationPath": "commands/transcription-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/transcription.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-SPEAKER-001",
+      "title": "Speaker diarization parity",
+      "description": "Speaker boundaries, identities, sequence decoding, cardinality, and semantic attribution must be independently verified.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["speaker-diarization"],
+      "repoChecks": [
+        {"id": "speaker-pipeline-present", "type": "path_exists", "path": "backend/speaker_pipeline.py"},
+        {"id": "speaker-change-present", "type": "path_exists", "path": "backend/speaker_change_detection.py"},
+        {"id": "speaker-decoder-present", "type": "path_exists", "path": "backend/speaker_sequence_decoder.py"},
+        {"id": "diar-fusion-present", "type": "path_exists", "path": "diar_fusion"}
+      ],
+      "commandChecks": [
+        {
+          "id": "speaker-focused-pytest",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "tests/test_dynamic_n_clustering.py",
+            "tests/test_dynamic_speaker_count.py",
+            "tests/test_speaker_change_detection.py",
+            "tests/test_speaker_pipeline_production.py",
+            "tests/test_speaker_sequence_decoder.py",
+            "tests/test_worker_speaker_cardinality.py",
+            "-q"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 1200,
+          "attestationPath": "commands/speaker-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/speaker-diarization.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-TRANSLATION-001",
+      "title": "Local translation parity",
+      "description": "Local translation must preserve segment identity, speaker assignment, timing, and the requested output language.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["translation"],
+      "repoChecks": [
+        {"id": "business-processing-present-for-translation", "type": "path_exists", "path": "backend/business_processing.py"},
+        {"id": "translation-contract-valid", "type": "json_file_valid", "path": "contracts/translation-output.schema.json"}
+      ],
+      "commandChecks": [
+        {
+          "id": "translation-focused-pytest",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "tests/test_business_processing.py::test_translation_cannot_change_speaker_or_timing",
+            "tests/test_business_processing.py::test_translation_must_return_the_requested_language",
+            "-q"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 600,
+          "attestationPath": "commands/translation-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/translation.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-POLISH-001",
+      "title": "Local polishing parity",
+      "description": "Local semantic polishing must remain schema-bound, traceable, and unable to alter speaker or timing invariants.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["polishing"],
+      "repoChecks": [
+        {"id": "local-llm-present-for-polishing", "type": "path_exists", "path": "backend/local_llm.py"},
+        {"id": "polish-contract-valid", "type": "json_file_valid", "path": "contracts/polish-output.schema.json"}
+      ],
+      "commandChecks": [
+        {
+          "id": "polishing-focused-pytest",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "tests/test_business_processing.py::test_runner_creates_translation_polish_summary_and_manifest",
+            "tests/test_local_llm_contracts.py",
+            "-q"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 600,
+          "attestationPath": "commands/polishing-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/polishing.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-SUMMARY-001",
+      "title": "Local summary parity",
+      "description": "Local summaries must be schema-valid, evidence-bound, deterministic under fixtures, and fail closed on invalid references.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["summary"],
+      "repoChecks": [
+        {"id": "business-processing-present-for-summary", "type": "path_exists", "path": "backend/business_processing.py"},
+        {"id": "summary-contract-valid", "type": "json_file_valid", "path": "contracts/summary-output.schema.json"}
+      ],
+      "commandChecks": [
+        {
+          "id": "summary-focused-pytest",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "tests/test_business_processing.py::test_summary_requires_valid_evidence_references",
+            "tests/test_local_llm_contracts.py",
+            "-q"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 600,
+          "attestationPath": "commands/summary-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/summary.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-EXPORT-001",
+      "title": "Export parity",
+      "description": "The report document, artifact manifest, and export surface must preserve transcript, speaker, timing, and derived-output contracts.",
+      "required": true,
+      "state": "blocked",
+      "capabilityIds": ["export"],
+      "repoChecks": [
+        {"id": "report-assembler-present", "type": "path_exists", "path": "reporting/report_document_assembler.py"},
+        {"id": "artifact-manifest-contract-valid", "type": "json_file_valid", "path": "contracts/artifact-manifest.schema.json"},
+        {"id": "report-document-contract-valid", "type": "json_file_valid", "path": "contracts/report-document.schema.json"}
+      ],
+      "commandChecks": [
+        {
+          "id": "export-focused-pytest",
+          "argv": ["{python}", "-m", "pytest", "tests/test_report_document_assembler.py", "tests/test_java_pdf_client.py", "-q"],
+          "cwd": ".",
+          "timeoutSeconds": 600,
+          "attestationPath": "commands/export-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/export.json", "kind": "capability-attestation", "minimumArtifacts": 1}
+        ]
+      }
+    },
+    {
+      "id": "ULT-DYNAMIC-N-001",
+      "title": "Dynamic-N speaker cardinality",
+      "description": "Automatic, manual, and hybrid speaker-count modes must support arbitrary practical N without a fixed product maximum.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["dynamic-n"],
+      "repoChecks": [
+        {
+          "id": "speaker-count-policy-modes-present",
+          "type": "file_contains_all",
+          "path": "backend/models.py",
+          "strings": ["AUTO = \"auto\"", "MANUAL = \"manual\"", "HYBRID = \"hybrid\""]
+        }
+      ],
+      "commandChecks": [
+        {
+          "id": "dynamic-n-focused-pytest",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "tests/test_dynamic_n_clustering.py",
+            "tests/test_dynamic_speaker_count.py",
+            "tests/test_worker_speaker_cardinality.py",
+            "-q"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 900,
+          "attestationPath": "commands/dynamic-n-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/dynamic-n.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-JAVA-PDF-001",
+      "title": "Java PDF parity",
+      "description": "OpenHTMLtoPDF and PDFBox must render, inspect, and fail closed on transcript-integrity and visual-quality defects.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["java-pdf"],
+      "repoChecks": [
+        {
+          "id": "java-pdf-versions-locked",
+          "type": "file_contains_all",
+          "path": "pdf-renderer/pom.xml",
+          "strings": [
+            "<openhtmltopdf.version>1.0.10</openhtmltopdf.version>",
+            "<pdfbox.version>2.0.30</pdfbox.version>"
+          ]
+        },
+        {"id": "pdf-quality-contract-valid", "type": "json_file_valid", "path": "contracts/pdf-quality-report.schema.json"}
+      ],
+      "commandChecks": [
+        {
+          "id": "java-pdf-maven-test",
+          "argv": ["mvn", "-f", "pdf-renderer/pom.xml", "test"],
+          "cwd": ".",
+          "timeoutSeconds": 1800,
+          "attestationPath": "commands/java-pdf-maven-test.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/java-pdf.json", "kind": "capability-attestation", "minimumArtifacts": 2}
+        ]
+      }
+    },
+    {
+      "id": "ULT-DESKTOP-001",
+      "title": "React TypeScript Tauri desktop parity",
+      "description": "The production desktop must use React and TypeScript with a validated Tauri shell and no Python UI dependency.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["desktop-react-typescript-tauri"],
+      "repoChecks": [
+        {"id": "desktop-package-present", "type": "path_exists", "path": "apps/desktop/package.json"},
+        {"id": "desktop-typescript-present", "type": "glob_min", "pattern": "apps/desktop/src/**/*.tsx", "minimum": 1},
+        {"id": "desktop-tauri-present", "type": "path_exists", "path": "apps/desktop/src-tauri/Cargo.toml"}
+      ],
+      "commandChecks": [
+        {
+          "id": "desktop-eslint",
+          "argv": ["npm", "run", "lint"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 900,
+          "attestationPath": "commands/desktop-eslint.json"
+        },
+        {
+          "id": "desktop-typecheck",
+          "argv": ["npm", "run", "typecheck"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 900,
+          "attestationPath": "commands/desktop-typecheck.json"
+        },
+        {
+          "id": "desktop-vitest",
+          "argv": ["npm", "test", "--", "--reporter=dot"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 1200,
+          "attestationPath": "commands/desktop-vitest.json"
+        },
+        {
+          "id": "desktop-vite-build",
+          "argv": ["npm", "run", "build"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 1200,
+          "attestationPath": "commands/desktop-vite-build.json"
+        },
+        {
+          "id": "desktop-cargo-fmt",
+          "argv": ["cargo", "fmt", "--manifest-path", "src-tauri/Cargo.toml", "--", "--check"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 900,
+          "attestationPath": "commands/desktop-cargo-fmt.json"
+        },
+        {
+          "id": "desktop-cargo-check",
+          "argv": ["cargo", "check", "--manifest-path", "src-tauri/Cargo.toml"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 1800,
+          "attestationPath": "commands/desktop-cargo-check.json"
+        },
+        {
+          "id": "desktop-cargo-test",
+          "argv": ["cargo", "test", "--manifest-path", "src-tauri/Cargo.toml"],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 1800,
+          "attestationPath": "commands/desktop-cargo-test.json"
+        },
+        {
+          "id": "desktop-cargo-clippy",
+          "argv": [
+            "cargo",
+            "clippy",
+            "--manifest-path",
+            "src-tauri/Cargo.toml",
+            "--all-targets",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "cwd": "apps/desktop",
+          "timeoutSeconds": 1800,
+          "attestationPath": "commands/desktop-cargo-clippy.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/desktop-react-typescript-tauri.json", "kind": "capability-attestation", "minimumArtifacts": 1}
+        ]
+      }
+    },
+    {
+      "id": "ULT-DESIGN-PACK-001",
+      "title": "Design Pack visual-quality parity",
+      "description": "The Design Pack workflow must complete with verified wide and narrow evidence and every canonical aesthetic facet passing.",
+      "required": true,
+      "state": "blocked",
+      "capabilityIds": ["design-pack"],
+      "repoChecks": [
+        {"id": "design-pack-workflow-state-present", "type": "json_file_valid", "path": ".codex/frontend-design-runtime/workflow-state.json"},
+        {"id": "design-pack-evaluation-present", "type": "json_file_valid", "path": ".codex/frontend-design-runtime/evaluation-submission.json"}
+      ],
+      "commandChecks": [
+        {
+          "id": "design-pack-evaluate",
+          "argv": [
+            "node",
+            "../frontend-design-pack-global/scripts/run-codex-design-workflow.mjs",
+            "evaluate",
+            "--project-root",
+            ".",
+            "--session-dir",
+            ".codex/frontend-design-runtime"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 1800,
+          "attestationPath": "commands/design-pack-evaluate.json"
+        },
+        {
+          "id": "design-pack-repository-organization",
+          "argv": ["node", "../frontend-design-pack-global/scripts/validate-repository-organization.mjs"],
+          "cwd": ".",
+          "timeoutSeconds": 900,
+          "attestationPath": "commands/design-pack-repository-organization.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/design-pack.json", "kind": "capability-attestation", "minimumArtifacts": 4}
+        ]
+      }
+    },
+    {
+      "id": "ULT-GLOBALIZATION-001",
+      "title": "Globalization parity",
+      "description": "Language identifiers must be normalized, auto detection must resolve before persistence, and public README files must be English-only.",
+      "required": true,
+      "state": "blocked",
+      "capabilityIds": ["globalization"],
+      "repoChecks": [
+        {"id": "language-module-present", "type": "path_exists", "path": "backend/language.py"},
+        {"id": "public-readmes-english", "type": "readmes_english"}
+      ],
+      "commandChecks": [
+        {
+          "id": "globalization-focused-pytest",
+          "argv": ["{python}", "-m", "pytest", "tests/test_language.py", "tests/test_business_processing.py::test_business_config_normalizes_language_tags_and_is_schema_ready", "-q"],
+          "cwd": ".",
+          "timeoutSeconds": 600,
+          "attestationPath": "commands/globalization-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/globalization.json", "kind": "capability-attestation", "minimumArtifacts": 0}
+        ]
+      }
+    },
+    {
+      "id": "ULT-REAL-MOV-AUTO-001",
+      "title": "Real MOV automatic-speaker evidence",
+      "description": "A fresh run of the approved real MOV must complete in automatic speaker-count mode with independent transcript, diarization, semantic, efficiency, and PDF evidence.",
+      "required": true,
+      "state": "not_started",
+      "capabilityIds": ["real-media-auto"],
+      "repoChecks": [
+        {"id": "production-smoke-harness-present-for-auto", "type": "path_exists", "path": "tests/test_production_smoke_harness.py"}
+      ],
+      "commandChecks": [],
+      "evidence": {
+        "attestations": [
+          {
+            "path": "real-media/auto.json",
+            "kind": "real-media-attestation",
+            "profile": "realMediaAuto",
+            "minimumArtifacts": 7
+          }
+        ]
+      }
+    },
+    {
+      "id": "ULT-REAL-MOV-MANUAL-5-001",
+      "title": "Real MOV manual five-speaker evidence",
+      "description": "An independent fresh run of the same approved real MOV must request, detect, and resolve exactly five speakers.",
+      "required": true,
+      "state": "not_started",
+      "capabilityIds": ["real-media-manual-5"],
+      "repoChecks": [
+        {"id": "production-smoke-harness-present-for-manual-five", "type": "path_exists", "path": "tests/test_production_smoke_harness.py"}
+      ],
+      "commandChecks": [],
+      "evidence": {
+        "attestations": [
+          {
+            "path": "real-media/manual-5.json",
+            "kind": "real-media-attestation",
+            "profile": "realMediaManualFive",
+            "minimumArtifacts": 7
+          }
+        ]
+      }
+    },
+    {
+      "id": "ULT-OFFLINE-SECURITY-001",
+      "title": "Offline and security parity",
+      "description": "Production processing must work offline, restrict local model providers to loopback, and fail closed on malformed or remote provider configuration.",
+      "required": true,
+      "state": "in_progress",
+      "capabilityIds": ["offline-security"],
+      "repoChecks": [
+        {
+          "id": "local-llm-loopback-policy-present",
+          "type": "file_contains_all",
+          "path": "backend/local_llm.py",
+          "strings": ["127.0.0.1", "_assert_loopback_endpoint", "fail closed"]
+        }
+      ],
+      "commandChecks": [
+        {
+          "id": "offline-security-focused-pytest",
+          "argv": [
+            "{python}",
+            "-m",
+            "pytest",
+            "tests/test_production_worker_cli.py",
+            "tests/test_production_smoke_harness.py",
+            "tests/test_local_llm_contracts.py",
+            "-q"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 1200,
+          "attestationPath": "commands/offline-security-focused-pytest.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/offline-security.json", "kind": "capability-attestation", "minimumArtifacts": 1}
+        ]
+      }
+    },
+    {
+      "id": "ULT-PACKAGING-ROLLBACK-001",
+      "title": "Packaging and rollback parity",
+      "description": "Install, upgrade, uninstall, rollback, artifact provenance, and recovery procedures must be exercised on supported platforms.",
+      "required": true,
+      "state": "blocked",
+      "capabilityIds": ["packaging-rollback"],
+      "repoChecks": [
+        {"id": "packaging-tree-present", "type": "path_exists", "path": "packaging"},
+        {"id": "windows-build-entry-present", "type": "path_exists", "path": "packaging/one_click_build.py"},
+        {"id": "macos-build-entry-present", "type": "path_exists", "path": "packaging/build_macos.py"},
+        {"id": "uninstaller-present", "type": "path_exists", "path": "packaging/uninstall_app.py"}
+      ],
+      "commandChecks": [
+        {
+          "id": "packaging-python-syntax",
+          "argv": [
+            "{python}",
+            "-m",
+            "py_compile",
+            "packaging/one_click_build.py",
+            "packaging/build_macos.py",
+            "packaging/uninstall_app.py"
+          ],
+          "cwd": ".",
+          "timeoutSeconds": 300,
+          "attestationPath": "commands/packaging-python-syntax.json"
+        }
+      ],
+      "evidence": {
+        "attestations": [
+          {"path": "capabilities/packaging-rollback.json", "kind": "capability-attestation", "minimumArtifacts": 3}
+        ]
+      }
+    },
+    {
+      "id": "ULT-LEGACY-CUTOVER-001",
+      "title": "Legacy cutover authorization",
+      "description": "Legacy deletion and main replacement are prohibited until all required gates pass and two explicit approvals are recorded.",
+      "required": true,
+      "state": "blocked",
+      "capabilityIds": ["legacy-cutover"],
+      "repoChecks": [
+        {"id": "legacy-removal-plan-present", "type": "path_exists", "path": "docs/refactor/LEGACY_REMOVAL.md"}
+      ],
+      "commandChecks": [],
+      "evidence": {
+        "attestations": [
+          {"path": "cutover/legacy-cutover.json", "kind": "cutover-attestation", "minimumArtifacts": 1}
+        ]
+      }
+    }
+  ],
+  "realMedia": {
+    "sourceFileName": "2026-07-21 12-58-40.mov",
+    "autoGateId": "ULT-REAL-MOV-AUTO-001",
+    "manualFiveGateId": "ULT-REAL-MOV-MANUAL-5-001",
+    "manualRegressionSpeakerCount": 5,
+    "requiredArtifactRoles": [
+      "transcript",
+      "report-document",
+      "pdf",
+      "pdf-inspection",
+      "quality-report",
+      "artifact-manifest",
+      "contact-sheet"
+    ],
+    "artifactRoleContracts": {
+      "transcript": {
+        "extension": ".json",
+        "mediaType": "application/json",
+        "format": "transcript-document-v2"
+      },
+      "report-document": {
+        "extension": ".json",
+        "mediaType": "application/json",
+        "format": "report-document-v1"
+      },
+      "pdf": {
+        "extension": ".pdf",
+        "mediaType": "application/pdf",
+        "format": "pdf"
+      },
+      "pdf-inspection": {
+        "extension": ".json",
+        "mediaType": "application/json",
+        "format": "pdfbox-inspection-v1"
+      },
+      "quality-report": {
+        "extension": ".json",
+        "mediaType": "application/json",
+        "format": "pdf-quality-report-v1"
+      },
+      "artifact-manifest": {
+        "extension": ".json",
+        "mediaType": "application/json",
+        "format": "pdf-artifact-manifest-v1"
+      },
+      "contact-sheet": {
+        "extension": ".png",
+        "mediaType": "image/png",
+        "format": "png"
+      }
+    },
+    "requiredMetricDomains": [
+      "speakerCount",
+      "diarization",
+      "boundary",
+      "asr",
+      "semantic",
+      "efficiency",
+      "pdf"
+    ],
+    "requiredMetricFields": {
+      "speakerCount": [
+        "expectedCount",
+        "detectedCount",
+        "resolvedCount",
+        "absoluteError",
+        "reviewRequired"
+      ],
+      "diarization": [
+        "segmentCount",
+        "auditedSegmentCount",
+        "speakerAssignmentErrors",
+        "unresolvedSpeakerSegments",
+        "humanAuditCompleted"
+      ],
+      "boundary": [
+        "segmentCount",
+        "invalidIntervals",
+        "nonMonotonicIntervals",
+        "outOfBoundsIntervals"
+      ],
+      "asr": [
+        "segmentCount",
+        "auditedSegmentCount",
+        "emptySegments",
+        "unresolvedTextSegments",
+        "sourceLanguagePreserved"
+      ],
+      "semantic": [
+        "reviewedRevisionCount",
+        "unresolvedRevisionCount",
+        "rawTranscriptImmutable",
+        "speakerLocksPreserved",
+        "humanApproved"
+      ],
+      "efficiency": [
+        "mediaDurationSeconds",
+        "wallClockSeconds",
+        "realTimeFactor",
+        "peakRamMb",
+        "peakVramMb"
+      ],
+      "pdf": [
+        "pageCount",
+        "qualityScore",
+        "hardGateFailureCount",
+        "facetFailureCount",
+        "pdfBoxValidated"
+      ]
+    },
+    "maximumRealTimeFactor": 4.0
+  },
+  "javaPdf": {
+    "renderer": "OpenHTMLtoPDF",
+    "rendererVersion": "1.0.10",
+    "validator": "PDFBox",
+    "validatorVersion": "2.0.30",
+    "minimumQualityScore": 85,
+    "hardGateIds": [
+      "PDF-OPENABLE",
+      "PDF-PAGE-COUNT",
+      "PDF-PAGE-SIZE",
+      "PDF-TRANSCRIPT-TEXT-INTEGRITY",
+      "PDF-SEGMENT-COUNT",
+      "PDF-TIMESTAMP-INTEGRITY",
+      "PDF-SPEAKER-SET-INTEGRITY",
+      "PDF-FONT-EMBEDDED",
+      "PDF-NO-BLANK-PAGES",
+      "PDF-NO-CONTENT-OVERFLOW",
+      "PDF-OFFLINE-ASSETS",
+      "PDF-PAGE-EVIDENCE",
+      "PDF-IMMUTABLE-CONTENT-HASH"
+    ],
+    "designPackFacetIds": [
+      "AESTHETIC-COHERENCE",
+      "AESTHETIC-DISTINCTION",
+      "AESTHETIC-REFINEMENT",
+      "AESTHETIC-PROPORTION",
+      "AESTHETIC-HIERARCHY",
+      "AESTHETIC-TYPOGRAPHY",
+      "AESTHETIC-COLOR-RELATIONSHIPS",
+      "AESTHETIC-RHYTHM",
+      "AESTHETIC-DENSITY",
+      "AESTHETIC-RESTRAINT",
+      "AESTHETIC-REAL-CONTENT-STRESS",
+      "AESTHETIC-FONT-FAILURE",
+      "AESTHETIC-IMAGE-FAILURE",
+      "AESTHETIC-SCRIPT-FAILURE"
+    ]
+  },
+  "dynamicN": {
+    "modes": ["auto", "manual", "hybrid"],
+    "regressionMatrix": [1, 2, 5, 8, 13],
+    "fixedProductMaximum": null
+  },
+  "globalization": {
+    "persistedAutoAllowed": false,
+    "unknownLanguageCode": "und",
+    "multilingualCode": "mul",
+    "publicReadmesEnglishOnly": true
+  }
+}

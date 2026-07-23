@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribe.studio/schemas/tauri-install-state-envelope-v1.json",
+  "title": "MediaTranscribe Studio Atomic Install-State Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "recordContract",
+    "recordSha256",
+    "recordJson"
+  ],
+  "properties": {
+    "contract": {
+      "const": "mts-tauri-record-envelope/v1"
+    },
+    "recordContract": {
+      "enum": [
+        "mts-tauri-install-state/v1",
+        "mts-tauri-transaction/v1"
+      ]
+    },
+    "recordSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "recordJson": {
+      "type": "string",
+      "minLength": 2,
+      "description": "UTF-8 JSON text hashed byte-for-byte by recordSha256. Parse only after hash verification."
+    }
+  }
+}

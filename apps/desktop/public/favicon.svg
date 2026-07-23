@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">MediaTranscribe Studio</title>
+  <defs>
+    <linearGradient id="shell" x1="8" y1="7" x2="56" y2="57" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f1edff"/>
+      <stop offset=".5" stop-color="#fff2f7"/>
+      <stop offset="1" stop-color="#e5f7f2"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="17" y1="22" x2="48" y2="43" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#806ee8"/>
+      <stop offset="1" stop-color="#43a58f"/>
+    </linearGradient>
+  </defs>
+  <rect x="5" y="5" width="54" height="54" rx="18" fill="url(#shell)"/>
+  <path d="M17 34v-4m6 10V24m6 20V20m6 19V25m6 11v-8m6 6v-4" fill="none" stroke="url(#wave)" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="48" cy="17" r="4" fill="#f29ab8"/>
+  <path d="m46.5 17 1 1 2-2.5" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

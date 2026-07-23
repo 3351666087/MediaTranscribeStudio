@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/design-quality-screenshot-evidence/1.0.0",
+  "title": "MediaTranscribeStudio Native Screenshot Evidence",
+  "description": "Fail-closed evidence manifest for real Tauri native-window screenshots. Browser-only or synthetic captures are not accepted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "capturedAt",
+    "buildId",
+    "sourceRevision",
+    "capturePlatform",
+    "coverage",
+    "screenshots"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "kind": {
+      "const": "media-transcribe-studio/native-screenshot-evidence"
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "buildId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "sourceRevision": {
+      "type": "string",
+      "minLength": 7,
+      "maxLength": 128
+    },
+    "capturePlatform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "architecture",
+        "displayScale",
+        "windowWidth",
+        "windowHeight"
+      ],
+      "properties": {
+        "os": {
+          "type": "string",
+          "minLength": 1
+        },
+        "architecture": {
+          "type": "string",
+          "minLength": 1
+        },
+        "displayScale": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "windowWidth": {
+          "type": "integer",
+          "minimum": 800
+        },
+        "windowHeight": {
+          "type": "integer",
+          "minimum": 600
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "landingLight",
+        "landingDark",
+        "speakerStudio",
+        "qualityLab",
+        "pipelineObservatory",
+        "preferences",
+        "dragOverlay"
+      ],
+      "properties": {
+        "landingLight": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "landingDark": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "speakerStudio": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "qualityLab": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "pipelineObservatory": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "preferences": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "dragOverlay": {
+          "$ref": "#/$defs/evidenceId"
+        }
+      }
+    },
+    "screenshots": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "$ref": "#/$defs/screenshot"
+      }
+    }
+  },
+  "$defs": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "screenshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "path",
+        "sha256",
+        "width",
+        "height",
+        "theme",
+        "view",
+        "locale",
+        "captureSurface",
+        "realCapture",
+        "synthetic",
+        "capturedAt",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 500,
+          "pattern": "(?i)\\.png$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 320
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 240
+        },
+        "theme": {
+          "enum": [
+            "light",
+            "dark"
+          ]
+        },
+        "view": {
+          "enum": [
+            "overview-landing",
+            "speaker-studio",
+            "quality-lab",
+            "pipeline-observatory",
+            "preferences",
+            "drag-overlay"
+          ]
+        },
+        "locale": {
+          "enum": [
+            "en",
+            "zh-Hans",
+            "zh-Hant",
+            "ja",
+            "ko",
+            "es",
+            "fr",
+            "de",
+            "pt-BR"
+          ]
+        },
+        "captureSurface": {
+          "const": "tauri-native-webview"
+        },
+        "realCapture": {
+          "const": true
+        },
+        "synthetic": {
+          "const": false
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

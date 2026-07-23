@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.npm-cache/
+.runtime-tmp/
+.cargo-home/
+.cargo-target/
+src-tauri/target/
+*.log
+.DS_Store
+Thumbs.db

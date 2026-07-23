@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/design-quality-ocr-result/1.0.0",
+  "title": "MediaTranscribeStudio Background OCR Evidence",
+  "description": "Fail-closed OCR and composition assessment for the real day, night, and scene background assets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "createdAt",
+    "realOcrRun",
+    "synthetic",
+    "coverage",
+    "assets"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "kind": {
+      "const": "media-transcribe-studio/background-ocr-evidence"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "realOcrRun": {
+      "const": true
+    },
+    "synthetic": {
+      "const": false
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "day",
+        "night",
+        "scene"
+      ],
+      "properties": {
+        "day": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "night": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "scene": {
+          "$ref": "#/$defs/evidenceId"
+        }
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "$ref": "#/$defs/asset"
+      }
+    }
+  },
+  "$defs": {
+    "evidenceId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "box": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "textRegion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "confidence",
+        "box"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "box": {
+          "$ref": "#/$defs/box"
+        }
+      }
+    },
+    "placementAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recommendedBackgroundPosition",
+        "primarySubjectBox",
+        "occlusionRisk",
+        "safeControlRegions",
+        "notes"
+      ],
+      "properties": {
+        "recommendedBackgroundPosition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "primarySubjectBox": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/box"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "occlusionRisk": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "safeControlRegions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/box"
+          }
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "path",
+        "sha256",
+        "width",
+        "height",
+        "engine",
+        "engineVersion",
+        "runAt",
+        "status",
+        "noTextDetected",
+        "textRegions",
+        "placementAssessment"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/evidenceId"
+        },
+        "role": {
+          "enum": [
+            "day-background",
+            "night-background",
+            "scene-background"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 500,
+          "pattern": "(?i)\\.(?:png|jpe?g|webp)$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "engine": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "engineVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "runAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "const": "completed"
+        },
+        "noTextDetected": {
+          "type": "boolean"
+        },
+        "textRegions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/textRegion"
+          }
+        },
+        "placementAssessment": {
+          "$ref": "#/$defs/placementAssessment"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "noTextDetected": {
+                "const": true
+              }
+            },
+            "required": [
+              "noTextDetected"
+            ]
+          },
+          "then": {
+            "properties": {
+              "textRegions": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "textRegions": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

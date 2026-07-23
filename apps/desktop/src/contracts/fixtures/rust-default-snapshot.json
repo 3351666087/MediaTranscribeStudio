@@ -1,0 +1,354 @@
+{
+  "contractVersion": "1.6.0",
+  "job": {
+    "id": "job-draft",
+    "title": "Awaiting transcription task",
+    "sourcePath": "",
+    "durationLabel": "Not processed",
+    "status": "draft",
+    "progress": 0,
+    "startedAt": "Not started",
+    "speakerPolicy": {
+      "mode": "auto"
+    },
+    "speakerCount": null,
+    "speakerDetection": null,
+    "reviewOpenCount": 0,
+    "activeStrategyId": "balanced"
+  },
+  "speakers": [],
+  "strategies": [
+    {
+      "id": "balanced",
+      "label": "Balanced",
+      "description": "CAM++ dynamic clustering, Qwen3-ASR, and FunASR boundaries work together; difficult segments enter local human review.",
+      "asrModel": "Qwen3-ASR-1.7B",
+      "diarizationModel": "CAM++ · dynamic clustering",
+      "semanticModel": "qwen3.5:4b",
+      "semanticModelStatus": "reject_for_production",
+      "semanticModelEvaluation": "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.",
+      "estimatedVramGb": 7.2,
+      "semanticGuardrail": "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers.",
+      "recommended": true
+    },
+    {
+      "id": "quality",
+      "label": "Quality first",
+      "description": "Difficult segments receive local reruns, a second overlap pass, and human listening while preserving the full acoustic evidence chain.",
+      "asrModel": "Qwen3-ASR-1.7B · dual-window review",
+      "diarizationModel": "CAM++ · second overlap pass",
+      "semanticModel": "qwen3.5:4b",
+      "semanticModelStatus": "reject_for_production",
+      "semanticModelEvaluation": "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.",
+      "estimatedVramGb": 8.0,
+      "semanticGuardrail": "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers."
+    },
+    {
+      "id": "memory-saver",
+      "label": "Memory saver",
+      "description": "Reduces VRAM use while retaining acoustic anomaly escalation, local audio review, and human confirmation.",
+      "asrModel": "SenseVoiceSmall",
+      "diarizationModel": "CAM++ · CPU clustering",
+      "semanticModel": "qwen3.5:4b",
+      "semanticModelStatus": "reject_for_production",
+      "semanticModelEvaluation": "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.",
+      "estimatedVramGb": 4.4,
+      "semanticGuardrail": "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers."
+    }
+  ],
+  "stages": [
+    {
+      "id": "media",
+      "label": "Media preprocessing",
+      "shortLabel": "Preprocess",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "vad",
+      "label": "Speech boundaries",
+      "shortLabel": "Boundaries",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "speaker",
+      "label": "Dynamic speaker clustering",
+      "shortLabel": "Speakers",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "asr",
+      "label": "Multilingual recognition",
+      "shortLabel": "Recognition",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "alignment",
+      "label": "Time alignment",
+      "shortLabel": "Alignment",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "review",
+      "label": "Acoustic evidence review",
+      "shortLabel": "Review",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "document",
+      "label": "Report assembly",
+      "shortLabel": "Report",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    },
+    {
+      "id": "pdf",
+      "label": "PDF rendering and QA",
+      "shortLabel": "PDF",
+      "status": "pending",
+      "progress": 0,
+      "detail": "Awaiting the local processing worker"
+    }
+  ],
+  "events": [],
+  "reviews": [],
+  "artifacts": [],
+  "diarizationQuality": {
+    "der": {
+      "status": "unavailable",
+      "reason": "Reference labels are missing, so DER cannot be calculated or inferred."
+    },
+    "jer": {
+      "status": "unavailable",
+      "reason": "Reference labels are missing, so JER cannot be calculated or inferred."
+    },
+    "confusion": {
+      "status": "unavailable",
+      "reason": "Reference labels are missing, so confusion cannot be calculated or inferred."
+    },
+    "overlapF1": {
+      "status": "unavailable",
+      "reason": "Reference labels are missing, so overlap F1 cannot be calculated or inferred."
+    },
+    "reviewRate": {
+      "status": "available",
+      "value": 0.0,
+      "unit": "percent",
+      "source": "Review-pending segments / generated valid speech segments"
+    }
+  },
+  "performance": {
+    "status": "unavailable",
+    "reason": "The task has not run, so model-stage and resource-sampling data are unavailable."
+  },
+  "pdfQuality": {
+    "status": "pending",
+    "passNumber": 1,
+    "score": 0.0,
+    "minimumScore": 85,
+    "pageCount": 0,
+    "renderedAt": "Not rendered",
+    "hardGates": [
+      {
+        "id": "PDF-OPENABLE",
+        "label": "PDF opens successfully",
+        "status": "pending",
+        "detail": "Awaiting PDFBox validation after this job generates a PDF."
+      },
+      {
+        "id": "PDF-PAGE-COUNT",
+        "label": "Page count matches",
+        "status": "pending",
+        "detail": "Awaiting comparison of rendered pages, PDFBox pages, and the evidence manifest."
+      },
+      {
+        "id": "PDF-PAGE-SIZE",
+        "label": "Page sizes are compliant",
+        "status": "pending",
+        "detail": "Awaiting A4 size validation for every page in this job."
+      },
+      {
+        "id": "PDF-TRANSCRIPT-TEXT-INTEGRITY",
+        "label": "Transcript text is intact",
+        "status": "pending",
+        "detail": "Awaiting comparison of PDFBox-extracted text with the immutable transcript manifest."
+      },
+      {
+        "id": "PDF-SEGMENT-COUNT",
+        "label": "Segment count matches",
+        "status": "pending",
+        "detail": "Awaiting comparison of transcript and PDF speech-segment counts."
+      },
+      {
+        "id": "PDF-TIMESTAMP-INTEGRITY",
+        "label": "Timestamps are intact",
+        "status": "pending",
+        "detail": "Awaiting validation that timestamps are extractable, monotonic, and aligned with boundaries."
+      },
+      {
+        "id": "PDF-SPEAKER-SET-INTEGRITY",
+        "label": "Speaker set is complete",
+        "status": "pending",
+        "detail": "Awaiting validation of the dynamic speaker legend, labels, and non-color markers."
+      },
+      {
+        "id": "PDF-FONT-EMBEDDED",
+        "label": "Required fonts are embedded",
+        "status": "pending",
+        "detail": "Awaiting checks for multilingual font embedding and deterministic fallback."
+      },
+      {
+        "id": "PDF-NO-BLANK-PAGES",
+        "label": "No blank pages",
+        "status": "pending",
+        "detail": "Awaiting page-by-page confirmation of verifiable content."
+      },
+      {
+        "id": "PDF-NO-CONTENT-OVERFLOW",
+        "label": "No content overflow",
+        "status": "pending",
+        "detail": "Awaiting page evidence checks for safe areas and content overflow."
+      },
+      {
+        "id": "PDF-OFFLINE-ASSETS",
+        "label": "All assets are offline",
+        "status": "pending",
+        "detail": "Awaiting a scan for remote URLs, scripts, fonts, images, and telemetry dependencies."
+      },
+      {
+        "id": "PDF-PAGE-EVIDENCE",
+        "label": "Page evidence is complete",
+        "status": "pending",
+        "detail": "Awaiting generation and linking of per-page PNGs and the contact sheet."
+      },
+      {
+        "id": "PDF-IMMUTABLE-CONTENT-HASH",
+        "label": "Immutable content hashes match",
+        "status": "pending",
+        "detail": "Awaiting SHA-256 manifests for the transcript, PDF, and page evidence."
+      }
+    ],
+    "facets": [
+      {
+        "id": "AESTHETIC-COHERENCE",
+        "label": "Coherence",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-DISTINCTION",
+        "label": "Distinction",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-REFINEMENT",
+        "label": "Refinement",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-PROPORTION",
+        "label": "Proportion",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-HIERARCHY",
+        "label": "Hierarchy",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-TYPOGRAPHY",
+        "label": "Typography",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-COLOR-RELATIONSHIPS",
+        "label": "Color relationships",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-RHYTHM",
+        "label": "Rhythm",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-DENSITY",
+        "label": "Information density",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-RESTRAINT",
+        "label": "Restraint",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-REAL-CONTENT-STRESS",
+        "label": "Real-content stress",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-FONT-FAILURE",
+        "label": "Font failure",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-IMAGE-FAILURE",
+        "label": "Image failure",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      },
+      {
+        "id": "AESTHETIC-SCRIPT-FAILURE",
+        "label": "Script failure",
+        "score": 0.0,
+        "status": "pending",
+        "evidence": "Awaiting per-page PNGs, a contact sheet, and failure-scenario evidence for this job."
+      }
+    ],
+    "repairQueue": [],
+    "evidenceDigest": "Not generated"
+  },
+  "system": {
+    "offline": true,
+    "backendMode": "tauri-ipc",
+    "gpuLabel": "Detected by the local model runtime",
+    "vramLabel": "Not detected",
+    "inferenceWorker": "missing",
+    "javaRenderer": "missing"
+  }
+}

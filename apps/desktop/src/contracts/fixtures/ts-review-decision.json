@@ -1,0 +1,8 @@
+{
+  "reviewId": "review-contract-1",
+  "speakerId": "speaker-2",
+  "normalizedText": "人工确认后的中文原文。",
+  "reason": "依据人工复听确认角色归属。",
+  "evidence": "对比前后片段声纹及问答关系。",
+  "confidence": 0.95
+}

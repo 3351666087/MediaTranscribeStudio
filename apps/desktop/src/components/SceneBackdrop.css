@@ -1,0 +1,145 @@
+.scene-backdrop {
+  position: fixed;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  background: var(--paper-100);
+  pointer-events: none;
+  user-select: none;
+  isolation: isolate;
+}
+
+.scene-backdrop__theme,
+.scene-backdrop__illustration,
+.scene-backdrop__aurora,
+.scene-backdrop__veil {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.scene-backdrop__theme,
+.scene-backdrop__illustration {
+  display: block;
+  object-fit: cover;
+  object-position: center 48%;
+}
+
+.scene-backdrop__theme {
+  filter: saturate(1.08) contrast(1.04);
+  opacity: 0;
+  transform: scale(1.015);
+  transition:
+    opacity 280ms var(--ease-out),
+    transform 280ms var(--ease-in-out);
+  will-change: opacity, transform;
+}
+
+:root[data-theme="light"] .scene-backdrop__theme--light,
+:root[data-theme="dark"] .scene-backdrop__theme--dark {
+  opacity: 1;
+  transform: scale(1);
+}
+
+:root[data-theme="dark"] .scene-backdrop__theme--dark {
+  filter: saturate(1.06) contrast(1.08) brightness(0.82);
+}
+
+.scene-backdrop__illustration {
+  opacity: 0.32;
+  mix-blend-mode: soft-light;
+  transform: scale(1.045) translate3d(0, -0.8%, 0);
+  filter: saturate(1.2) contrast(1.08);
+  -webkit-mask-image:
+    linear-gradient(115deg, transparent 0 3%, black 19% 86%, transparent 100%);
+  mask-image:
+    linear-gradient(115deg, transparent 0 3%, black 19% 86%, transparent 100%);
+  animation: scene-backdrop-depth-drift 18s var(--ease-in-out) infinite alternate;
+  will-change: transform, opacity;
+}
+
+:root[data-theme="dark"] .scene-backdrop__illustration {
+  opacity: 0.2;
+  mix-blend-mode: screen;
+  filter: saturate(0.92) contrast(1.08) brightness(0.68);
+}
+
+.scene-backdrop__aurora {
+  background:
+    radial-gradient(
+      circle at 15% 10%,
+      color-mix(in srgb, var(--violet-300) 34%, transparent),
+      transparent 31rem
+    ),
+    radial-gradient(
+      circle at 86% 22%,
+      color-mix(in srgb, var(--rose-200) 28%, transparent),
+      transparent 30rem
+    ),
+    radial-gradient(
+      circle at 62% 92%,
+      color-mix(in srgb, var(--mint-200) 24%, transparent),
+      transparent 36rem
+  );
+  opacity: 0.74;
+  transform: translateZ(0);
+  animation: scene-backdrop-aurora-drift 22s var(--ease-in-out) infinite alternate;
+  will-change: transform, opacity;
+}
+
+.scene-backdrop__veil {
+  background: var(--background-overlay);
+  opacity: 0.72;
+}
+
+:root[data-theme="dark"] .scene-backdrop__veil {
+  opacity: 0.66;
+}
+
+body::before,
+body::after {
+  opacity: 0 !important;
+}
+
+@keyframes scene-backdrop-depth-drift {
+  from {
+    transform: scale(1.045) translate3d(-0.35%, -0.8%, 0);
+  }
+
+  to {
+    transform: scale(1.065) translate3d(0.55%, 0.3%, 0);
+  }
+}
+
+@keyframes scene-backdrop-aurora-drift {
+  from {
+    opacity: 0.66;
+    transform: translate3d(-1.2%, -0.8%, 0) scale(1);
+  }
+
+  to {
+    opacity: 0.8;
+    transform: translate3d(1.1%, 0.9%, 0) scale(1.04);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene-backdrop__theme {
+    transform: none;
+    transition:
+      opacity 180ms var(--ease-out);
+  }
+
+  .scene-backdrop__illustration,
+  .scene-backdrop__aurora {
+    animation: none;
+    transform: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .scene-backdrop {
+    display: none;
+  }
+}

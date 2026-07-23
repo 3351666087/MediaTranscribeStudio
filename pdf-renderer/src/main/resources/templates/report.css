@@ -208,3 +208,63 @@ main { padding-top: 2mm; }
   text-align: center;
   font-size: 7.2pt;
 }
+
+/*
+ * Direction is opt-in through the canonical XHTML lang/dir attributes.
+ * The default LTR rules above remain unchanged to protect the established
+ * Chinese layout, while RTL reports mirror only direction-sensitive details.
+ */
+html[dir="rtl"],
+html[dir="rtl"] body {
+  direction: rtl;
+}
+html[dir="rtl"] .running-header,
+html[dir="rtl"] .cover,
+html[dir="rtl"] .subtitle,
+html[dir="rtl"] .policy-note,
+html[dir="rtl"] .transcript-intro,
+html[dir="rtl"] .time-section,
+html[dir="rtl"] .end-mark {
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: embed;
+}
+html[dir="rtl"] .meta-grid,
+html[dir="rtl"] .legend-table,
+html[dir="rtl"] .turn-table {
+  direction: rtl;
+}
+html[dir="rtl"] .legend-heading span {
+  float: left;
+}
+html[dir="rtl"] .legend-card {
+  border-left-width: 0;
+  border-right: 1.2mm solid;
+}
+html[dir="rtl"] .legend-index {
+  margin-right: 0;
+  margin-left: 1.6mm;
+}
+html[dir="rtl"] .speaker-cell {
+  padding-right: 0;
+  padding-left: 2mm;
+}
+html[dir="rtl"] .time-cell {
+  padding-right: 0;
+  padding-left: 2.5mm;
+}
+html[dir="rtl"] .speaker-cell small,
+html[dir="rtl"] .time-cell,
+html[dir="rtl"] .turn-meta {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: embed;
+}
+.text-cell p[dir="rtl"] {
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: embed;
+}
+.text-cell p[dir="ltr"] {
+  direction: ltr;
+}

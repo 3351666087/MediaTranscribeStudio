@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 final class ReportDocumentValidatorTest {
@@ -57,6 +58,104 @@ final class ReportDocumentValidatorTest {
         segment.displayText = edited;
         segment.revisions = List.of(revision(
                 "revision-1", "llm", segment.rawText, edited, "local-llm"));
+        assertThrows(IllegalArgumentException.class,
+                () -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void multilingualDocumentAndSegmentLanguagesAreAccepted() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = "sr-Latn-RS";
+        document.segments.get(0).language = "pt-BR";
+        document.segments.get(1).language = "zh-Hans-CN";
+
+        assertDoesNotThrow(() -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void missingRequiredDocumentLanguageIsRejected() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = null;
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void missingOptionalSegmentLanguageDefaultsToUndetermined() {
+        ReportDocument document = TestFixtures.document(2);
+        document.segments.get(0).language = null;
+
+        ReportDocumentValidator.validate(document);
+
+        assertEquals("und", document.segments.get(0).language);
+    }
+
+    @Test
+    void explicitUndeterminedLanguageIsAcceptedAndCanonicalized() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = "UND";
+        document.segments.get(0).language = "und";
+
+        ReportDocumentValidator.validate(document);
+
+        assertEquals("und", document.language);
+        assertEquals("und", document.segments.get(0).language);
+    }
+
+    @Test
+    void concreteLanguageTagsAreCanonicalizedAndStored() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = "EN_us";
+        document.segments.get(0).language = "SR_latn_rs";
+
+        ReportDocumentValidator.validate(document);
+
+        assertEquals("en-US", document.language);
+        assertEquals("sr-Latn-RS", document.segments.get(0).language);
+    }
+
+    @Test
+    void requestOnlyAutoLanguageIsRejected() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = "auto";
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void persistedSegmentAutoLanguageIsRejected() {
+        ReportDocument document = TestFixtures.document(2);
+        document.segments.get(0).language = "AUTO";
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void malformedDocumentLanguageIsRejected() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = "sl-rozaj-ROZAJ";
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void malformedSegmentLanguageIsRejected() {
+        ReportDocument document = TestFixtures.document(2);
+        document.segments.get(0).language = "en-a";
+
+        assertThrows(IllegalArgumentException.class,
+                () -> ReportDocumentValidator.validate(document));
+    }
+
+    @Test
+    void malformedUnderscoreLanguageIsRejected() {
+        ReportDocument document = TestFixtures.document(2);
+        document.language = "en__US";
+
         assertThrows(IllegalArgumentException.class,
                 () -> ReportDocumentValidator.validate(document));
     }

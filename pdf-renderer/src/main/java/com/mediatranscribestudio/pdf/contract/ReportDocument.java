@@ -10,6 +10,7 @@ public final class ReportDocument {
     public String generatedAt;
     public String title;
     public String language;
+    public String reportLocale;
     public Source source;
     public SpeakerPolicy speakerPolicy;
     public List<Speaker> speakers;

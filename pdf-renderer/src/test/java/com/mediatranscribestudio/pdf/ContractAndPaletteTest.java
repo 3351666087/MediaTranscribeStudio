@@ -84,6 +84,7 @@ final class ContractAndPaletteTest {
     @Test
     void xhtmlIsOfflineParseableAndUsesDynamicLegend() {
         ReportDocument document = TestFixtures.document(64);
+        document.language = "sr-Latn-RS";
         document.segments.get(0).rawText = "特殊字符 A&B <离线> \"引号\" '单引号' 必须安全保留。";
         document.segments.get(0).normalizedText = document.segments.get(0).rawText;
         document.segments.get(0).displayText = document.segments.get(0).rawText;
@@ -91,7 +92,10 @@ final class ContractAndPaletteTest {
         String xhtml = new CanonicalXhtmlRenderer().render(
                 document, RenderProfile.forRound(1, 14));
         String lower = xhtml.toLowerCase(Locale.ROOT);
-        assertTrue(xhtml.contains("64 位已解析角色"));
+        assertTrue(xhtml.contains("64 resolved roles"));
+        assertTrue(xhtml.contains("lang=\"en-US\""));
+        assertTrue(xhtml.contains("xml:lang=\"en-US\""));
+        assertTrue(xhtml.contains("<strong>sr-Latn-RS</strong>"));
         for (int index = 1; index <= 64; index++) {
             assertTrue(xhtml.contains("speaker-" + index));
         }

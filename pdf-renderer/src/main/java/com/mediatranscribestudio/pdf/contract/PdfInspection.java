@@ -5,6 +5,10 @@ import java.util.List;
 
 public final class PdfInspection {
     public String schemaVersion = "1.0.0";
+    public String validator = "PDFBox";
+    public String validatorVersion = "2.0.30";
+    public String documentId;
+    public String pdfSha256;
     public boolean openable;
     public int pageCount;
     public boolean allPagesA4;

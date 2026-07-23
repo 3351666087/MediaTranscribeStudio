@@ -30,6 +30,14 @@ public final class PdfBoxInspector {
 
     public InspectionResult inspect(Path pdf, ReportDocument source) {
         PdfInspection result = new PdfInspection();
+        result.documentId = source.documentId;
+        try {
+            result.pdfSha256 = Hashing.sha256(pdf);
+        } catch (IOException exception) {
+            result.openable = false;
+            result.failure = exception.getClass().getSimpleName() + ": " + exception.getMessage();
+            return new InspectionResult(result, "");
+        }
         String extracted = "";
         try (PDDocument document = PDDocument.load(pdf.toFile())) {
             result.openable = true;

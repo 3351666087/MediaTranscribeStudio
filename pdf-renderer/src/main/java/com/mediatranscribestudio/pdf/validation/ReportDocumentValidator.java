@@ -5,13 +5,63 @@ import com.mediatranscribestudio.pdf.contract.ReportDocument;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.IllformedLocaleException;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
 public final class ReportDocumentValidator {
-    private static final Set<String> LANGUAGES = Set.of("zh", "zh-CN", "zh-Hans");
+    private static final int MAX_LANGUAGE_TAG_LENGTH = 255;
+    private static final String UNKNOWN_LANGUAGE_TAG = "und";
+    private static final Pattern PRIMARY_LANGUAGE = Pattern.compile("^[A-Za-z]{2,8}$");
+    private static final Pattern EXTLANG = Pattern.compile("^[A-Za-z]{3}$");
+    private static final Pattern SCRIPT = Pattern.compile("^[A-Za-z]{4}$");
+    private static final Pattern REGION = Pattern.compile("^(?:[A-Za-z]{2}|[0-9]{3})$");
+    private static final Pattern VARIANT =
+            Pattern.compile("^(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3})$");
+    private static final Pattern EXTENSION_SINGLETON =
+            Pattern.compile("^[0-9A-WY-Za-wy-z]$");
+    private static final Pattern EXTENSION_SUBTAG = Pattern.compile("^[A-Za-z0-9]{2,8}$");
+    private static final Pattern PRIVATE_USE_SUBTAG = Pattern.compile("^[A-Za-z0-9]{1,8}$");
+    private static final Set<String> GRANDFATHERED_LANGUAGE_TAGS = Set.of(
+            "art-lojban",
+            "cel-gaulish",
+            "en-gb-oed",
+            "i-ami",
+            "i-bnn",
+            "i-default",
+            "i-enochian",
+            "i-hak",
+            "i-klingon",
+            "i-lux",
+            "i-mingo",
+            "i-navajo",
+            "i-pwn",
+            "i-tao",
+            "i-tay",
+            "i-tsu",
+            "no-bok",
+            "no-nyn",
+            "sgn-be-fr",
+            "sgn-be-nl",
+            "sgn-ch-de",
+            "zh-guoyu",
+            "zh-hakka",
+            "zh-min",
+            "zh-min-nan",
+            "zh-xiang"
+    );
+    private static final Set<String> RTL_LANGUAGES = Set.of(
+            "ar", "arc", "ckb", "dv", "fa", "he", "khw", "ks", "nqo",
+            "ps", "sd", "syr", "ug", "ur", "yi"
+    );
+    private static final Set<String> RTL_SCRIPTS = Set.of(
+            "Adlm", "Arab", "Hebr", "Nkoo", "Rohg", "Samr", "Syrc", "Thaa", "Yezi"
+    );
     private static final Set<String> MODES = Set.of("auto", "manual", "hybrid");
     private static final Set<String> REVISION_TYPES =
             Set.of("text", "speaker", "boundary", "split", "merge");
@@ -32,7 +82,10 @@ public final class ReportDocumentValidator {
         } catch (DateTimeParseException | NullPointerException exception) {
             throw new IllegalArgumentException("generatedAt must be RFC 3339", exception);
         }
-        require(LANGUAGES.contains(document.language), "language must be Chinese");
+        document.language = requireLanguageTag(document.language, "language");
+        if (document.reportLocale != null) {
+            document.reportLocale = requireLanguageTag(document.reportLocale, "reportLocale");
+        }
         require(document.source != null, "source is required");
         requireText(document.source.fileName, "source.fileName");
         requireText(document.source.mediaType, "source.mediaType");
@@ -80,6 +133,9 @@ public final class ReportDocumentValidator {
             requireText(segment.rawText, "segment.rawText");
             requireText(segment.normalizedText, "segment.normalizedText");
             requireText(segment.displayText, "segment.displayText");
+            segment.language = segment.language == null
+                    ? UNKNOWN_LANGUAGE_TAG
+                    : requireLanguageTag(segment.language, "segment.language");
             require(segment.confidence != null && unit(segment.confidence),
                     "segment.confidence must be in [0,1]");
             validateEvidence(segment, canonical);
@@ -96,6 +152,152 @@ public final class ReportDocumentValidator {
     public static List<String> canonicalSpeakerIds(int count) {
         require(count >= 1, "speaker count must be positive");
         return IntStream.rangeClosed(1, count).mapToObj(i -> "speaker-" + i).toList();
+    }
+
+    public static String canonicalizeLanguageTag(String value) {
+        if (value == null
+                || value.isEmpty()
+                || !value.equals(value.trim())
+                || value.length() > MAX_LANGUAGE_TAG_LENGTH
+                || value.chars().anyMatch(codePoint -> codePoint > 0x7f)) {
+            throw invalidLanguageTag();
+        }
+
+        String normalized = value.replace('_', '-');
+        String normalizedLowerCase = normalized.toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("-")
+                || normalized.endsWith("-")
+                || normalized.contains("--")
+                || "auto".equals(normalizedLowerCase)) {
+            throw invalidLanguageTag();
+        }
+
+        if (GRANDFATHERED_LANGUAGE_TAGS.contains(normalizedLowerCase)) {
+            return canonicalizeWithLocaleBuilder(normalized);
+        }
+
+        String[] subtags = normalized.split("-", -1);
+        List<String> output = new ArrayList<>(subtags.length);
+        int index = 0;
+
+        if ("x".equalsIgnoreCase(subtags[0])) {
+            if (subtags.length == 1) {
+                throw invalidLanguageTag();
+            }
+            output.add("x");
+            for (index = 1; index < subtags.length; index++) {
+                if (!PRIVATE_USE_SUBTAG.matcher(subtags[index]).matches()) {
+                    throw invalidLanguageTag();
+                }
+                output.add(subtags[index].toLowerCase(Locale.ROOT));
+            }
+            return canonicalizeWithLocaleBuilder(String.join("-", output));
+        }
+
+        String primary = subtags[index];
+        if (!PRIMARY_LANGUAGE.matcher(primary).matches()) {
+            throw invalidLanguageTag();
+        }
+        output.add(primary.toLowerCase(Locale.ROOT));
+        index++;
+
+        if (primary.length() <= 3) {
+            int extlangCount = 0;
+            while (index < subtags.length
+                    && extlangCount < 3
+                    && EXTLANG.matcher(subtags[index]).matches()) {
+                output.add(subtags[index].toLowerCase(Locale.ROOT));
+                index++;
+                extlangCount++;
+            }
+        }
+
+        if (index < subtags.length && SCRIPT.matcher(subtags[index]).matches()) {
+            String script = subtags[index].toLowerCase(Locale.ROOT);
+            output.add(script.substring(0, 1).toUpperCase(Locale.ROOT) + script.substring(1));
+            index++;
+        }
+
+        if (index < subtags.length && REGION.matcher(subtags[index]).matches()) {
+            String region = subtags[index];
+            output.add(region.chars().allMatch(Character::isLetter)
+                    ? region.toUpperCase(Locale.ROOT)
+                    : region);
+            index++;
+        }
+
+        Set<String> variants = new HashSet<>();
+        while (index < subtags.length && VARIANT.matcher(subtags[index]).matches()) {
+            String variant = subtags[index].toLowerCase(Locale.ROOT);
+            if (!variants.add(variant)) {
+                throw invalidLanguageTag();
+            }
+            output.add(variant);
+            index++;
+        }
+
+        Set<String> extensionSingletons = new HashSet<>();
+        while (index < subtags.length
+                && EXTENSION_SINGLETON.matcher(subtags[index]).matches()) {
+            String singleton = subtags[index].toLowerCase(Locale.ROOT);
+            if (!extensionSingletons.add(singleton)) {
+                throw invalidLanguageTag();
+            }
+            output.add(singleton);
+            index++;
+
+            int extensionStart = index;
+            while (index < subtags.length
+                    && EXTENSION_SUBTAG.matcher(subtags[index]).matches()) {
+                output.add(subtags[index].toLowerCase(Locale.ROOT));
+                index++;
+            }
+            if (index == extensionStart) {
+                throw invalidLanguageTag();
+            }
+        }
+
+        if (index < subtags.length && "x".equalsIgnoreCase(subtags[index])) {
+            output.add("x");
+            index++;
+            int privateUseStart = index;
+            while (index < subtags.length
+                    && PRIVATE_USE_SUBTAG.matcher(subtags[index]).matches()) {
+                output.add(subtags[index].toLowerCase(Locale.ROOT));
+                index++;
+            }
+            if (index == privateUseStart) {
+                throw invalidLanguageTag();
+            }
+        }
+
+        if (index != subtags.length) {
+            throw invalidLanguageTag();
+        }
+        return canonicalizeWithLocaleBuilder(String.join("-", output));
+    }
+
+    public static boolean isRightToLeftLanguage(String value) {
+        String language = canonicalizeLanguageTag(value);
+        String[] subtags = language.split("-");
+        if ("x".equals(subtags[0])) {
+            return false;
+        }
+
+        int index = 1;
+        if (subtags[0].length() <= 3) {
+            int extlangCount = 0;
+            while (index < subtags.length
+                    && extlangCount < 3
+                    && EXTLANG.matcher(subtags[index]).matches()) {
+                index++;
+                extlangCount++;
+            }
+        }
+        if (index < subtags.length && SCRIPT.matcher(subtags[index]).matches()) {
+            return RTL_SCRIPTS.contains(subtags[index]);
+        }
+        return RTL_LANGUAGES.contains(subtags[0]);
     }
 
     private static void validatePolicy(ReportDocument.SpeakerPolicy policy) {
@@ -236,6 +438,38 @@ public final class ReportDocumentValidator {
 
     private static void requireText(String value, String field) {
         require(value != null && !value.isBlank(), field + " is required");
+    }
+
+    private static String requireLanguageTag(String value, String field) {
+        try {
+            return canonicalizeLanguageTag(value);
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException(
+                    field + " must be a concrete persisted BCP-47 language tag, not auto",
+                    exception
+            );
+        }
+    }
+
+    private static IllegalArgumentException invalidLanguageTag() {
+        return new IllegalArgumentException(
+                "language must be a concrete persisted BCP-47 language tag, not auto"
+        );
+    }
+
+    private static String canonicalizeWithLocaleBuilder(String value) {
+        try {
+            String canonical = new Locale.Builder()
+                    .setLanguageTag(value)
+                    .build()
+                    .toLanguageTag();
+            if (canonical.isEmpty()) {
+                throw invalidLanguageTag();
+            }
+            return canonical;
+        } catch (IllformedLocaleException exception) {
+            throw invalidLanguageTag();
+        }
     }
 
     private static void require(boolean condition, String message) {

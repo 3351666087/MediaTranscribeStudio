@@ -1,6 +1,7 @@
 package com.mediatranscribestudio.pdf;
 
 import com.mediatranscribestudio.pdf.app.RenderApplication;
+import com.mediatranscribestudio.pdf.contract.PdfInspection;
 import com.mediatranscribestudio.pdf.contract.QualityReport;
 import com.mediatranscribestudio.pdf.contract.RenderResult;
 import com.mediatranscribestudio.pdf.qa.AestheticFacetId;
@@ -63,6 +64,13 @@ final class DynamicSpeakerRenderingTest {
         assertEquals(0, BigDecimal.ONE.compareTo(weight));
 
         Path pdf = output.resolve(result.artifacts.pdfPath);
+        PdfInspection inspection = JsonSupport.read(
+                output.resolve("artifacts/pdf-inspection.json"), PdfInspection.class);
+        assertEquals("PDFBox", inspection.validator);
+        assertEquals("2.0.30", inspection.validatorVersion);
+        assertEquals("synthetic-pdf-" + speakerCount + "-speakers",
+                inspection.documentId);
+        assertEquals(Hashing.sha256(pdf), inspection.pdfSha256);
         List<String> expectedSpeakerIds =
                 ReportDocumentValidator.canonicalSpeakerIds(speakerCount);
         String expectedSpeakerIdValue = String.join(",", expectedSpeakerIds);
@@ -74,6 +82,13 @@ final class DynamicSpeakerRenderingTest {
                     metadata.getCustomMetadataValue("MTS-Speaker-Ids"));
             assertEquals(Hashing.sha256(expectedSpeakerIdValue),
                     metadata.getCustomMetadataValue("MTS-Speaker-Set-SHA256"));
+            assertEquals("zh-CN",
+                    metadata.getCustomMetadataValue("MTS-Transcript-Language"));
+            assertEquals("zh-CN",
+                    metadata.getCustomMetadataValue("MTS-Report-Locale"));
+            assertEquals(
+                    "原文逐字稿，包含动态任意 N 说话人和毫秒级时间戳",
+                    metadata.getSubject());
             assertEquals("OpenHTMLtoPDF 1.0.10 + Apache PDFBox 2.0.30",
                     metadata.getProducer());
         }

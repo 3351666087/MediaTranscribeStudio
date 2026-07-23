@@ -8,7 +8,7 @@
   <artifactId>pdf-renderer</artifactId>
   <version>3.0.0</version>
   <name>MediaTranscribeStudio PDF Renderer</name>
-  <description>Offline, deterministic Chinese transcript PDF renderer and quality gate.</description>
+  <description>Offline, deterministic multilingual transcript PDF renderer and quality gate.</description>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -47,6 +47,11 @@
     <dependency>
       <groupId>com.openhtmltopdf</groupId>
       <artifactId>openhtmltopdf-pdfbox</artifactId>
+      <version>${openhtmltopdf.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.openhtmltopdf</groupId>
+      <artifactId>openhtmltopdf-rtl-support</artifactId>
       <version>${openhtmltopdf.version}</version>
     </dependency>
     <dependency>

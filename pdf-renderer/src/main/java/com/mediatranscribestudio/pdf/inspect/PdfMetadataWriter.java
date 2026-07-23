@@ -1,6 +1,7 @@
 package com.mediatranscribestudio.pdf.inspect;
 
 import com.mediatranscribestudio.pdf.contract.ReportDocument;
+import com.mediatranscribestudio.pdf.i18n.ReportCopy;
 import com.mediatranscribestudio.pdf.support.Hashing;
 import com.mediatranscribestudio.pdf.validation.ReportDocumentValidator;
 import org.apache.pdfbox.cos.COSArray;
@@ -38,9 +39,10 @@ public final class PdfMetadataWriter {
         Files.deleteIfExists(temporary);
         try {
             try (PDDocument document = PDDocument.load(pdf.toFile())) {
+                ReportCopy copy = ReportCopy.forDocument(source);
                 PDDocumentInformation information = document.getDocumentInformation();
-                information.setTitle(title(source));
-                information.setSubject("中文逐字稿，包含动态任意 N 说话人和毫秒级时间戳");
+                information.setTitle(title(source, copy));
+                information.setSubject(copy.metadataSubject());
                 information.setCreator("MediaTranscribeStudio PDF Renderer 3.0.0");
                 information.setProducer("OpenHTMLtoPDF 1.0.10 + Apache PDFBox 2.0.30");
                 GregorianCalendar generatedAt = GregorianCalendar.from(
@@ -48,6 +50,8 @@ public final class PdfMetadataWriter {
                 information.setCreationDate((GregorianCalendar) generatedAt.clone());
                 information.setModificationDate((GregorianCalendar) generatedAt.clone());
                 information.setCustomMetadataValue("MTS-Request-Id", requestId);
+                information.setCustomMetadataValue("MTS-Transcript-Language", source.language);
+                information.setCustomMetadataValue("MTS-Report-Locale", copy.locale());
                 information.setCustomMetadataValue("MTS-Transcript-SHA256", integritySha256);
                 information.setCustomMetadataValue(
                         "MTS-Speaker-Count",
@@ -72,8 +76,10 @@ public final class PdfMetadataWriter {
         }
     }
 
-    private static String title(ReportDocument source) {
-        return source.title == null || source.title.isBlank() ? "中文逐字稿" : source.title;
+    private static String title(ReportDocument source, ReportCopy copy) {
+        return source.title == null || source.title.isBlank()
+                ? copy.defaultTitle()
+                : source.title;
     }
 
     private static void requireText(String value, String field) {

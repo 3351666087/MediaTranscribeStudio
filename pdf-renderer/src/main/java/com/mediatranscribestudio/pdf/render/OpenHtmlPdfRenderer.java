@@ -1,5 +1,7 @@
 package com.mediatranscribestudio.pdf.render;
 
+import com.openhtmltopdf.bidi.support.ICUBidiReorderer;
+import com.openhtmltopdf.bidi.support.ICUBidiSplitter;
 import com.mediatranscribestudio.pdf.support.AtomicFiles;
 import com.mediatranscribestudio.pdf.support.Hashing;
 import com.mediatranscribestudio.pdf.support.OfflinePolicy;
@@ -39,6 +41,9 @@ public final class OpenHtmlPdfRenderer {
             try (OutputStream stream = Files.newOutputStream(temporaryPdf)) {
                 PdfRendererBuilder builder = new PdfRendererBuilder();
                 builder.useFastMode();
+                builder.useUnicodeBidiSplitter(
+                        new ICUBidiSplitter.ICUBidiSplitterFactory());
+                builder.useUnicodeBidiReorderer(new ICUBidiReorderer());
                 builder.withHtmlContent(xhtml, null);
                 builder.useFont(temporaryFont.toFile(), "MTS CJK", 400,
                         BaseRendererBuilder.FontStyle.NORMAL, true);

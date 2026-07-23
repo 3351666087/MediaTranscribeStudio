@@ -1,0 +1,624 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/subtitle-delivery/1.0.0",
+  "title": "MediaTranscribeStudio Subtitle Delivery Receipt",
+  "description": "Evidence-bearing receipt for immutable-source sidecar, soft-mux, or burn-in subtitle delivery.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "mode",
+    "sourcePath",
+    "outputPath",
+    "subtitlePath",
+    "container",
+    "selectedSubtitleCodec",
+    "selectedVideoStrategy",
+    "command",
+    "process",
+    "sourceIntegrity",
+    "outputEvidence",
+    "qa",
+    "probeEvidence",
+    "publication",
+    "karaokeTiming"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "status": {
+      "const": "delivered"
+    },
+    "mode": {
+      "enum": [
+        "sidecar",
+        "soft-mux",
+        "burn-in"
+      ]
+    },
+    "sourcePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outputPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subtitlePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "container": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "mp4",
+        "mov",
+        "matroska",
+        "webm",
+        null
+      ]
+    },
+    "selectedSubtitleCodec": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "mov_text",
+        "webvtt",
+        "ass",
+        "subrip",
+        null
+      ]
+    },
+    "selectedVideoStrategy": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "h264-high-quality",
+        "h265-high-quality",
+        "vp9-high-quality",
+        "av1-high-quality",
+        "prores-422-hq",
+        "ffv1-lossless",
+        null
+      ]
+    },
+    "command": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/command"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "process": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/process"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sourceIntegrity": {
+      "$ref": "#/$defs/sourceIntegrity"
+    },
+    "outputEvidence": {
+      "$ref": "#/$defs/nonEmptyFileEvidence"
+    },
+    "qa": {
+      "$ref": "#/$defs/qa"
+    },
+    "probeEvidence": {
+      "$ref": "#/$defs/probeEvidence"
+    },
+    "publication": {
+      "$ref": "#/$defs/publication"
+    },
+    "karaokeTiming": {
+      "$ref": "#/$defs/karaokeTiming"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "sidecar"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "container": {
+            "type": "null"
+          },
+          "selectedSubtitleCodec": {
+            "type": "null"
+          },
+          "selectedVideoStrategy": {
+            "type": "null"
+          },
+          "command": {
+            "type": "null"
+          },
+          "process": {
+            "type": "null"
+          },
+          "probeEvidence": {
+            "properties": {
+              "outputFingerprintSha256": {
+                "type": "null"
+              },
+              "capabilityFingerprintSha256": {
+                "type": "null"
+              }
+            }
+          },
+          "qa": {
+            "properties": {
+              "durationChecked": {
+                "const": false
+              },
+              "postPublishProbeVerified": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "enum": [
+              "soft-mux",
+              "burn-in"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "container": {
+            "type": "string"
+          },
+          "command": {
+            "$ref": "#/$defs/command"
+          },
+          "process": {
+            "$ref": "#/$defs/process"
+          },
+          "qa": {
+            "properties": {
+              "durationChecked": {
+                "const": true
+              },
+              "postPublishProbeVerified": {
+                "const": true
+              }
+            }
+          },
+          "probeEvidence": {
+            "properties": {
+              "outputFingerprintSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "capabilityFingerprintSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "soft-mux"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "selectedSubtitleCodec": {
+            "type": "string"
+          },
+          "selectedVideoStrategy": {
+            "type": "null"
+          },
+          "qa": {
+            "properties": {
+              "subtitleStreamVerified": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "burn-in"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "selectedSubtitleCodec": {
+            "type": "null"
+          },
+          "selectedVideoStrategy": {
+            "type": "string"
+          },
+          "qa": {
+            "properties": {
+              "expectedSubtitleCodec": {
+                "type": "null"
+              },
+              "subtitleStreamVerified": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fileEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sizeBytes",
+        "modifiedTimeNs",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modifiedTimeNs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "nonEmptyFileEvidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fileEvidence"
+        },
+        {
+          "properties": {
+            "sizeBytes": {
+              "minimum": 1
+            }
+          }
+        }
+      ]
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "arguments",
+        "shell",
+        "timeoutSeconds",
+        "maxStdoutBytes",
+        "maxStderrBytes"
+      ],
+      "properties": {
+        "executable": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "shell": {
+          "const": false
+        },
+        "timeoutSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 86400
+        },
+        "maxStdoutBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 67108864
+        },
+        "maxStderrBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 67108864
+        }
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "returnCode",
+        "elapsedMs",
+        "stdoutBytes",
+        "stderrBytes"
+      ],
+      "properties": {
+        "returnCode": {
+          "const": 0
+        },
+        "elapsedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stdoutBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stderrBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "sourceIntegrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unchanged",
+        "before",
+        "after"
+      ],
+      "properties": {
+        "unchanged": {
+          "const": true
+        },
+        "before": {
+          "$ref": "#/$defs/fileEvidence"
+        },
+        "after": {
+          "$ref": "#/$defs/fileEvidence"
+        }
+      }
+    },
+    "qa": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "outputNonEmpty",
+        "durationChecked",
+        "sourceDurationMs",
+        "outputDurationMs",
+        "durationDeltaMs",
+        "durationToleranceMs",
+        "sourceAudioStreams",
+        "outputAudioStreams",
+        "sourceVideoStreams",
+        "outputVideoStreams",
+        "sourceSubtitleStreams",
+        "outputSubtitleStreams",
+        "expectedSubtitleCodec",
+        "subtitleStreamVerified",
+        "postPublishProbeVerified"
+      ],
+      "properties": {
+        "passed": {
+          "const": true
+        },
+        "outputNonEmpty": {
+          "const": true
+        },
+        "durationChecked": {
+          "type": "boolean"
+        },
+        "sourceDurationMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "outputDurationMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "durationDeltaMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "durationToleranceMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sourceAudioStreams": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputAudioStreams": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sourceVideoStreams": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputVideoStreams": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sourceSubtitleStreams": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputSubtitleStreams": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "expectedSubtitleCodec": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "mov_text",
+            "webvtt",
+            "ass",
+            "subrip",
+            null
+          ]
+        },
+        "subtitleStreamVerified": {
+          "type": "boolean"
+        },
+        "postPublishProbeVerified": {
+          "type": "boolean"
+        }
+      }
+    },
+    "probeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceFingerprintSha256",
+        "outputFingerprintSha256",
+        "capabilityFingerprintSha256"
+      ],
+      "properties": {
+        "sourceFingerprintSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "outputFingerprintSha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilityFingerprintSha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "temporaryFileRemoved",
+        "sourceMediaImmutable",
+        "outputPreexisted"
+      ],
+      "properties": {
+        "strategy": {
+          "const": "same-directory-hard-link-no-replace"
+        },
+        "temporaryFileRemoved": {
+          "const": true
+        },
+        "sourceMediaImmutable": {
+          "const": true
+        },
+        "outputPreexisted": {
+          "const": false
+        }
+      }
+    },
+    "karaokeTiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "detected",
+        "synthesized",
+        "verifiedEvidence"
+      ],
+      "properties": {
+        "detected": {
+          "type": "boolean"
+        },
+        "synthesized": {
+          "const": false
+        },
+        "verifiedEvidence": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

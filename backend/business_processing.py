@@ -13,6 +13,7 @@ speaker profiles, review decisions, or the transcript document itself.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 import unicodedata
@@ -28,7 +29,11 @@ from .business_contracts import (
 )
 from .errors import JobCancelled, WorkerError
 from .language import normalize_language_tag
-from .local_llm import LocalLLMError, LocalLLMProvider
+from .local_llm import (
+    LocalLLMError,
+    LocalLLMProvider,
+    assert_loopback_provider,
+)
 from .persistence import (
     atomic_write_json,
     canonical_json_sha256,
@@ -38,8 +43,9 @@ from .persistence import (
 
 BUSINESS_SCHEMA_VERSION = "1.0.0"
 BUSINESS_PROMPT_VERSION = "business-v2"
-_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v3"
+_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v4"
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+_SPEAKER_ID_PATTERN = re.compile(r"^speaker-[1-9][0-9]*$")
 _TRANSLATION_PROGRESS_KIND = "translation-segment-progress"
 _TRANSLATION_PROGRESS_STATUSES = {
     "pending",
@@ -268,6 +274,17 @@ def _bounded_segment_batches(
     for item in items:
         source_text = str(item.get("sourceText") or "")
         item_characters = len(source_text)
+        if item_characters > max_characters:
+            raise WorkerError(
+                "BUSINESS_CONTEXT_LIMIT_EXCEEDED",
+                "one immutable transcript segment exceeds the local-model "
+                "context boundary",
+                details={
+                    "segmentId": str(item.get("id") or ""),
+                    "segmentCharacters": item_characters,
+                    "maximumCharacters": max_characters,
+                },
+            )
         if current and (
             len(current) >= max_items
             or current_characters + item_characters > max_characters
@@ -514,12 +531,64 @@ def _segment_projection(
                 "BUSINESS_INPUT_INVALID",
                 f"segment is missing {field}",
             )
-    text = str(segment.get("normalizedText") or segment.get("displayText") or "")
-    raw_text = str(segment.get("rawText") or "")
+    segment_id = segment["id"]
+    speaker_id = segment["speakerId"]
+    start_ms = segment["startMs"]
+    end_ms = segment["endMs"]
+    human_locked = segment.get("humanLocked", False)
+    if not isinstance(segment_id, str) or not segment_id.strip():
+        raise WorkerError(
+            "BUSINESS_INPUT_INVALID",
+            "segment.id must be non-empty text",
+        )
+    if (
+        not isinstance(speaker_id, str)
+        or _SPEAKER_ID_PATTERN.fullmatch(speaker_id.strip()) is None
+    ):
+        raise WorkerError(
+            "BUSINESS_INPUT_INVALID",
+            f"segment {segment_id} speakerId must match speaker-N",
+        )
+    if (
+        isinstance(start_ms, bool)
+        or not isinstance(start_ms, int)
+        or isinstance(end_ms, bool)
+        or not isinstance(end_ms, int)
+        or start_ms < 0
+        or end_ms <= start_ms
+    ):
+        raise WorkerError(
+            "BUSINESS_INPUT_INVALID",
+            f"segment {segment_id} has invalid startMs/endMs",
+        )
+    if not isinstance(human_locked, bool):
+        raise WorkerError(
+            "BUSINESS_INPUT_INVALID",
+            f"segment {segment_id} humanLocked must be a boolean",
+        )
+    normalized_text = segment.get("normalizedText")
+    display_text = segment.get("displayText")
+    raw_value = segment.get("rawText")
+    if raw_value is not None and (
+        not isinstance(raw_value, str) or not raw_value.strip()
+    ):
+        raise WorkerError(
+            "BUSINESS_INPUT_INVALID",
+            f"segment {segment_id} rawText must be non-empty text",
+        )
+    raw_text = raw_value if isinstance(raw_value, str) else ""
+    text = next(
+        (
+            value
+            for value in (normalized_text, display_text)
+            if isinstance(value, str) and value.strip()
+        ),
+        "",
+    )
     if not text and not raw_text:
         raise WorkerError(
             "BUSINESS_INPUT_INVALID",
-            f"segment {segment.get('id')} has no source text",
+            f"segment {segment_id} has no source text",
         )
     source_text = text or raw_text
     try:
@@ -533,13 +602,15 @@ def _segment_projection(
             f"segment {segment.get('id')} has an invalid persisted language",
         ) from exc
     return {
-        "id": str(segment["id"]),
-        "startMs": int(segment["startMs"]),
-        "endMs": int(segment["endMs"]),
-        "speakerId": str(segment["speakerId"]),
+        "id": segment_id.strip(),
+        "startMs": start_ms,
+        "endMs": end_ms,
+        "speakerId": speaker_id.strip(),
+        "humanLocked": human_locked,
         "sourceLanguage": source_language,
         "sourceText": source_text,
         "sourceTextHash": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        "rawTextHash": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
     }
 
 
@@ -561,6 +632,34 @@ def _transcript_input(document: Mapping[str, Any]) -> tuple[dict[str, Any], ...]
             "BUSINESS_INPUT_INVALID",
             "document must contain at least one object segment",
         )
+    ids = [item["id"] for item in materialized]
+    duplicate_ids = sorted(
+        segment_id
+        for segment_id, count in Counter(ids).items()
+        if count > 1
+    )
+    if duplicate_ids:
+        raise WorkerError(
+            "BUSINESS_INPUT_INVALID",
+            "document.segments contains duplicate segment IDs",
+            details={"duplicateSegmentIds": duplicate_ids},
+        )
+    for previous, current in zip(materialized, materialized[1:]):
+        if (
+            current["startMs"] < previous["startMs"]
+            or (
+                current["startMs"] == previous["startMs"]
+                and current["endMs"] < previous["endMs"]
+            )
+        ):
+            raise WorkerError(
+                "BUSINESS_INPUT_INVALID",
+                "document.segments must remain in deterministic timeline order",
+                details={
+                    "previousSegmentId": previous["id"],
+                    "currentSegmentId": current["id"],
+                },
+            )
     return materialized
 
 
@@ -572,6 +671,7 @@ def _base_provenance(
     provider: LocalLLMProvider,
     prompt_set: _BusinessPromptSet,
 ) -> dict[str, Any]:
+    network_policy = _assert_business_provider(provider)
     return {
         "schemaVersion": BUSINESS_SCHEMA_VERSION,
         "variant": variant,
@@ -581,7 +681,7 @@ def _base_provenance(
         "provider": {
             "id": provider.provider_id,
             "version": provider.provider_version,
-            "networkPolicy": "loopback-only",
+            "networkPolicy": network_policy,
         },
         "temperature": 0.0,
     }
@@ -801,6 +901,7 @@ def _provider_call(
     cancellation_check: Callable[[], None] | None,
 ) -> dict[str, Any]:
     _cancel(cancellation_check)
+    _assert_business_provider(provider)
     try:
         output = provider.generate_json(
             system_prompt=system_prompt,
@@ -831,6 +932,74 @@ def _provider_call(
     return result
 
 
+def _assert_business_provider(provider: LocalLLMProvider) -> str:
+    try:
+        return assert_loopback_provider(provider)
+    except LocalLLMError as exc:
+        raise WorkerError(
+            "BUSINESS_PROVIDER_POLICY_INVALID",
+            "business-model provider is not loopback-only",
+            details={
+                "providerId": str(getattr(provider, "provider_id", "unknown")),
+                "declaredNetworkPolicy": getattr(
+                    provider,
+                    "network_policy",
+                    None,
+                ),
+                "exceptionType": type(exc).__name__,
+                "reason": str(exc),
+            },
+        ) from exc
+
+
+def _validated_provider_attempts(
+    provider: LocalLLMProvider,
+    *,
+    operation: str,
+    execute: Callable[[], dict[str, Any]],
+    validate: Callable[[dict[str, Any]], Any],
+) -> Any:
+    """Retry untrusted model output and retain a bounded audit on failure."""
+
+    attempts = min(
+        _positive_capability(
+            provider,
+            "business_generation_attempts",
+            3,
+        ),
+        5,
+    )
+    failures: list[dict[str, Any]] = []
+    for attempt in range(1, attempts + 1):
+        try:
+            return validate(execute())
+        except JobCancelled:
+            raise
+        except WorkerError as exc:
+            failures.append(
+                {
+                    "attempt": attempt,
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": dict(exc.details),
+                    "retryable": exc.retryable,
+                }
+            )
+    terminal = failures[-1]
+    terminal_details = dict(terminal["details"])
+    raise WorkerError(
+        str(terminal["code"]),
+        f"{operation} failed closed after bounded local-model retries",
+        details={
+            **terminal_details,
+            "operation": operation,
+            "attempts": attempts,
+            "failures": failures,
+        },
+        retryable=True,
+    )
+
+
 def _require_exact_keys(
     value: Mapping[str, Any],
     *,
@@ -849,6 +1018,70 @@ def _require_exact_keys(
         )
 
 
+def _require_exact_segment_sequence(
+    values: Any,
+    sources: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+) -> list[Mapping[str, Any]]:
+    if not isinstance(values, list):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} segments must be an array",
+        )
+    expected_ids = [str(item["id"]) for item in sources]
+    actual_ids: list[str | None] = [
+        str(item.get("id")) if isinstance(item, Mapping) and "id" in item else None
+        for item in values
+    ]
+    present_ids = [item for item in actual_ids if item is not None]
+    duplicate_ids = sorted(
+        segment_id
+        for segment_id, count in Counter(present_ids).items()
+        if count > 1
+    )
+    if duplicate_ids:
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} contains duplicate segment IDs",
+            details={
+                "duplicateSegmentIds": duplicate_ids,
+                "expectedSegmentIds": expected_ids,
+                "actualSegmentIds": actual_ids,
+            },
+            retryable=True,
+        )
+    if len(values) != len(sources):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} changed segment cardinality",
+            details={
+                "expectedCount": len(sources),
+                "actualCount": len(values),
+                "expectedSegmentIds": expected_ids,
+                "actualSegmentIds": actual_ids,
+            },
+            retryable=True,
+        )
+    if actual_ids != expected_ids:
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} changed segment order or identity",
+            details={
+                "expectedSegmentIds": expected_ids,
+                "actualSegmentIds": actual_ids,
+            },
+            retryable=True,
+        )
+    if any(not isinstance(item, Mapping) for item in values):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} segment must be an object",
+            retryable=True,
+        )
+    return list(values)
+
+
 def _validate_transformed_segment(
     item: Any,
     source: Mapping[str, Any],
@@ -858,7 +1091,7 @@ def _validate_transformed_segment(
 ) -> dict[str, Any]:
     if not isinstance(item, Mapping):
         raise WorkerError("BUSINESS_OUTPUT_INVALID", f"{label} segment must be an object")
-    allowed_optional = {"language", *(optional_keys or set())}
+    allowed_optional = {"language", "humanLocked", *(optional_keys or set())}
     _require_exact_keys(
         item,
         required={"id", "speakerId", "startMs", "endMs", "sourceTextHash", "text"},
@@ -871,6 +1104,22 @@ def _validate_transformed_segment(
     # fields (``rawText``/``normalizedText``/``displayText``).
     expected = source
     if (
+        not isinstance(item["id"], str)
+        or not isinstance(item["speakerId"], str)
+        or isinstance(item["startMs"], bool)
+        or not isinstance(item["startMs"], int)
+        or isinstance(item["endMs"], bool)
+        or not isinstance(item["endMs"], int)
+        or not isinstance(item["sourceTextHash"], str)
+        or _SHA256_PATTERN.fullmatch(item["sourceTextHash"]) is None
+    ):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} returned invalid immutable metadata types",
+            details={"segmentId": expected["id"]},
+            retryable=True,
+        )
+    if (
         item["id"] != expected["id"]
         or item["speakerId"] != expected["speakerId"]
         or item["startMs"] != expected["startMs"]
@@ -881,12 +1130,34 @@ def _validate_transformed_segment(
             "BUSINESS_OUTPUT_INVALID",
             f"{label} changed immutable segment identity or timing",
             details={"segmentId": expected["id"]},
+            retryable=True,
         )
+    if "humanLocked" in item:
+        if not isinstance(item["humanLocked"], bool):
+            raise WorkerError(
+                "BUSINESS_OUTPUT_INVALID",
+                f"{label} returned an invalid human lock",
+                details={"segmentId": expected["id"]},
+                retryable=True,
+            )
+        if item["humanLocked"] is not expected["humanLocked"]:
+            raise WorkerError(
+                "BUSINESS_OUTPUT_INVALID",
+                f"{label} changed the immutable human lock",
+                details={"segmentId": expected["id"]},
+                retryable=True,
+            )
     text = item["text"]
     if not isinstance(text, str) or not text.strip():
-        raise WorkerError("BUSINESS_OUTPUT_INVALID", f"{label} text must be non-empty")
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} text must be non-empty",
+            details={"segmentId": expected["id"]},
+            retryable=True,
+        )
     result = dict(item)
     result["id"] = expected["id"]
+    result["humanLocked"] = expected["humanLocked"]
     return result
 
 
@@ -1211,6 +1482,7 @@ def _normalize_translation_segment(
             "text",
             "language",
         },
+        optional={"humanLocked"},
         label=label,
     )
     normalized = dict(translated)
@@ -1305,13 +1577,18 @@ def _validate_business_artifact(
                 "BUSINESS_OUTPUT_INVALID",
                 "translation artifact language or status metadata is inconsistent",
             )
-        output_segments = value["segments"]
-        if len(output_segments) != len(segments):
-            raise WorkerError(
-                "BUSINESS_OUTPUT_INVALID",
-                "translation artifact changed the segment cardinality",
-            )
+        output_segments = _require_exact_segment_sequence(
+            value["segments"],
+            segments,
+            label="translation artifact",
+        )
         for output, source in zip(output_segments, segments, strict=True):
+            if "humanLocked" not in output:
+                raise WorkerError(
+                    "BUSINESS_OUTPUT_INVALID",
+                    "translation artifact omitted the immutable human lock",
+                    details={"segmentId": source["id"]},
+                )
             if (
                 source["sourceLanguage"] == target
                 and (
@@ -1343,14 +1620,19 @@ def _validate_business_artifact(
                 "BUSINESS_OUTPUT_INVALID",
                 "polish artifact language, status, or application policy is inconsistent",
             )
-        output_segments = value["segments"]
-        if len(output_segments) != len(segments):
-            raise WorkerError(
-                "BUSINESS_OUTPUT_INVALID",
-                "polish artifact changed the segment cardinality",
-            )
+        output_segments = _require_exact_segment_sequence(
+            value["segments"],
+            segments,
+            label="polish artifact",
+        )
         expected_diff: list[dict[str, Any]] = []
         for output, source in zip(output_segments, segments, strict=True):
+            if "humanLocked" not in output:
+                raise WorkerError(
+                    "BUSINESS_OUTPUT_INVALID",
+                    "polish artifact omitted the immutable human lock",
+                    details={"segmentId": source["id"]},
+                )
             normalized = _validate_transformed_segment(
                 output,
                 source,
@@ -1446,6 +1728,7 @@ def _copy_translation_segment(
         "speakerId": item["speakerId"],
         "startMs": item["startMs"],
         "endMs": item["endMs"],
+        "humanLocked": item["humanLocked"],
         "sourceTextHash": item["sourceTextHash"],
         "text": item["sourceText"],
         "language": target,
@@ -1617,11 +1900,19 @@ def _read_translation_progress(
             )
         _require_exact_keys(
             persisted,
-            required={"id", "status", "attempts", "output", "lastError"},
+            required={
+                "id",
+                "status",
+                "attempts",
+                "output",
+                "lastError",
+                "errors",
+            },
             label="translation progress segment",
         )
         status = persisted["status"]
         attempts = persisted["attempts"]
+        errors = persisted["errors"]
         if (
             persisted["id"] != source["id"]
             or not isinstance(status, str)
@@ -1629,15 +1920,76 @@ def _read_translation_progress(
             or isinstance(attempts, bool)
             or not isinstance(attempts, int)
             or attempts < 0
+            or not isinstance(errors, list)
         ):
             raise WorkerError(
                 "BUSINESS_CHECKPOINT_INVALID",
                 "translation progress segment metadata failed validation",
                 details={"segmentId": source["id"]},
             )
+        validated_errors: list[dict[str, Any]] = []
+        for error_index, error in enumerate(errors):
+            if not isinstance(error, Mapping):
+                raise WorkerError(
+                    "BUSINESS_CHECKPOINT_INVALID",
+                    "translation progress audit error must be an object",
+                    details={
+                        "segmentId": source["id"],
+                        "errorIndex": error_index,
+                    },
+                )
+            _require_exact_keys(
+                error,
+                required={
+                    "attempt",
+                    "phase",
+                    "code",
+                    "message",
+                    "details",
+                    "retryable",
+                },
+                label="translation progress audit error",
+            )
+            if (
+                isinstance(error["attempt"], bool)
+                or not isinstance(error["attempt"], int)
+                or error["attempt"] < 1
+                or error["attempt"] > attempts
+                or error["phase"] not in {"batch", "segment"}
+                or not isinstance(error["code"], str)
+                or not error["code"]
+                or not isinstance(error["message"], str)
+                or not error["message"]
+                or not isinstance(error["details"], Mapping)
+                or not isinstance(error["retryable"], bool)
+            ):
+                raise WorkerError(
+                    "BUSINESS_CHECKPOINT_INVALID",
+                    "translation progress audit error failed validation",
+                    details={
+                        "segmentId": source["id"],
+                        "errorIndex": error_index,
+                    },
+                )
+            validated_errors.append(
+                {
+                    "attempt": error["attempt"],
+                    "phase": error["phase"],
+                    "code": error["code"],
+                    "message": error["message"],
+                    "details": dict(error["details"]),
+                    "retryable": error["retryable"],
+                }
+            )
         output = persisted["output"]
         last_error = persisted["lastError"]
         if status in _TRANSLATION_COMPLETION_STATUSES:
+            if not isinstance(output, Mapping) or "humanLocked" not in output:
+                raise WorkerError(
+                    "BUSINESS_CHECKPOINT_INVALID",
+                    "completed translation progress omitted the immutable human lock",
+                    details={"segmentId": source["id"]},
+                )
             try:
                 normalized = _normalize_translation_segment(
                     output,
@@ -1685,6 +2037,7 @@ def _read_translation_progress(
                     "attempts": attempts,
                     "output": normalized,
                     "lastError": None,
+                    "errors": validated_errors,
                 }
             )
             continue
@@ -1733,6 +2086,7 @@ def _read_translation_progress(
                 "attempts": attempts,
                 "output": None,
                 "lastError": None,
+                "errors": validated_errors,
             }
         )
 
@@ -1771,6 +2125,24 @@ def _translation_error_snapshot(error: WorkerError) -> dict[str, Any]:
     return {
         "code": error.code,
         "message": error.message,
+        "retryable": error.retryable,
+    }
+
+
+def _translation_attempt_error(
+    error: WorkerError,
+    *,
+    attempt: int,
+    phase: str,
+) -> dict[str, Any]:
+    if phase not in {"batch", "segment"}:
+        raise ValueError(f"unsupported translation error phase {phase!r}")
+    return {
+        "attempt": attempt,
+        "phase": phase,
+        "code": error.code,
+        "message": error.message,
+        "details": dict(error.details),
         "retryable": error.retryable,
     }
 
@@ -1831,7 +2203,9 @@ def _translation_batch_results(
             "translation batch segments must be an array",
         )
     source_by_id = {str(item["id"]): item for item in batch}
+    expected_ids = list(source_by_id)
     candidate_by_id: dict[str, Any] = {}
+    actual_ids: list[str] = []
     for candidate in values:
         if not isinstance(candidate, Mapping):
             raise WorkerError(
@@ -1842,13 +2216,44 @@ def _translation_batch_results(
         if (
             not isinstance(candidate_id, str)
             or candidate_id not in source_by_id
-            or candidate_id in candidate_by_id
         ):
             raise WorkerError(
                 "BUSINESS_OUTPUT_INVALID",
-                "translation batch contains an unknown or duplicate segment id",
+                "translation batch contains an unknown segment ID",
+                details={
+                    "expectedSegmentIds": expected_ids,
+                    "actualSegmentIds": actual_ids + [candidate_id],
+                },
+                retryable=True,
             )
+        if candidate_id in candidate_by_id:
+            raise WorkerError(
+                "BUSINESS_OUTPUT_INVALID",
+                "translation batch contains duplicate segment IDs",
+                details={
+                    "duplicateSegmentIds": [candidate_id],
+                    "expectedSegmentIds": expected_ids,
+                    "actualSegmentIds": actual_ids + [candidate_id],
+                },
+                retryable=True,
+            )
+        actual_ids.append(candidate_id)
         candidate_by_id[candidate_id] = candidate
+    expected_present_order = [
+        segment_id
+        for segment_id in expected_ids
+        if segment_id in candidate_by_id
+    ]
+    if actual_ids != expected_present_order:
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            "translation batch returned segments out of source order",
+            details={
+                "expectedSegmentIds": expected_present_order,
+                "actualSegmentIds": actual_ids,
+            },
+            retryable=True,
+        )
 
     completed: dict[str, dict[str, Any]] = {}
     failures: dict[str, WorkerError] = {}
@@ -1949,6 +2354,7 @@ def _translation(
                             target=target,
                         ),
                         "lastError": None,
+                        "errors": [],
                     }
                 )
             else:
@@ -1959,6 +2365,7 @@ def _translation(
                         "attempts": 0,
                         "output": None,
                         "lastError": None,
+                        "errors": [],
                     }
                 )
     else:
@@ -2067,6 +2474,14 @@ def _translation(
                         "lastError": None,
                     }
                 )
+            for segment_id, error in batch_failures.items():
+                state_by_id[segment_id]["errors"].append(
+                    _translation_attempt_error(
+                        error,
+                        attempt=state_by_id[segment_id]["attempts"],
+                        phase="batch",
+                    )
+                )
             last_errors.update(batch_failures)
             _write_translation_progress(
                 progress_path,
@@ -2101,6 +2516,13 @@ def _translation(
                     )
                 except WorkerError as exc:
                     last_errors[segment_id] = exc
+                    state_by_id[segment_id]["errors"].append(
+                        _translation_attempt_error(
+                            exc,
+                            attempt=state_by_id[segment_id]["attempts"],
+                            phase="segment",
+                        )
+                    )
                     continue
                 state_by_id[segment_id].update(
                     {
@@ -2211,6 +2633,79 @@ def _translation(
     }
 
 
+def _normalize_polish_batch_result(
+    result: Mapping[str, Any],
+    *,
+    batch: Sequence[Mapping[str, Any]],
+    batched: bool,
+) -> list[dict[str, Any]]:
+    if batched:
+        _require_exact_keys(
+            result,
+            required={"segments"},
+            label="polish batch",
+        )
+        polished_values = _require_exact_segment_sequence(
+            result["segments"],
+            batch,
+            label="polish batch",
+        )
+    else:
+        polished_values = [result]
+
+    normalized_values: list[dict[str, Any]] = []
+    for polished, item in zip(polished_values, batch, strict=True):
+        _require_exact_keys(
+            polished,
+            required={
+                "id",
+                "speakerId",
+                "startMs",
+                "endMs",
+                "sourceTextHash",
+                "text",
+                "language",
+                "diffReason",
+            },
+            optional={"humanLocked"},
+            label="polish",
+        )
+        if (
+            not isinstance(polished["diffReason"], str)
+            or not polished["diffReason"].strip()
+        ):
+            raise WorkerError(
+                "BUSINESS_OUTPUT_INVALID",
+                "polish diffReason must be a non-empty string",
+                details={"segmentId": item["id"]},
+                retryable=True,
+            )
+        normalized_polish = dict(polished)
+        normalized_polish["language"] = _model_language(
+            normalized_polish["language"],
+            label="polish",
+        )
+        normalized_polish = _validate_transformed_segment(
+            normalized_polish,
+            item,
+            label="polish",
+            optional_keys={"diffReason"},
+        )
+        if normalized_polish["language"] != item["sourceLanguage"]:
+            raise WorkerError(
+                "BUSINESS_OUTPUT_INVALID",
+                "polish output changed the source language",
+                details={"segmentId": item["id"]},
+                retryable=True,
+            )
+        _assert_polish_semantic_fidelity(
+            item,
+            str(normalized_polish["text"]),
+        )
+        normalized_values.append(normalized_polish)
+    return normalized_values
+
+
 def _polish(
     *,
     document: Mapping[str, Any],
@@ -2241,92 +2736,52 @@ def _polish(
     ):
         if len(batch) == 1:
             prompt = prompt_set.polish_user(item=batch[0])
-            polished_values = [
-                _provider_call(
+            normalized_values = _validated_provider_attempts(
+                provider,
+                operation=f"polish segment {batch[0]['id']}",
+                execute=lambda prompt=prompt: _provider_call(
                     provider,
                     system_prompt=prompt_set.polish_system,
                     user_prompt=prompt,
                     model=config.model,
                     response_schema=_POLISHED_SEGMENT_SCHEMA,
                     cancellation_check=cancellation_check,
-                )
-            ]
+                ),
+                validate=lambda result, batch=batch: _normalize_polish_batch_result(
+                    result,
+                    batch=batch,
+                    batched=False,
+                ),
+            )
         else:
             prompt = prompt_set.polish_batch_user(items=batch)
-            envelope = _provider_call(
+            normalized_values = _validated_provider_attempts(
                 provider,
-                system_prompt=prompt_set.polish_system,
-                user_prompt=prompt,
-                model=config.model,
-                response_schema=_batch_response_schema(
-                    _POLISHED_SEGMENT_SCHEMA,
-                    item_count=len(batch),
+                operation=(
+                    f"polish batch {batch[0]['id']}..{batch[-1]['id']}"
                 ),
-                cancellation_check=cancellation_check,
+                execute=lambda prompt=prompt, batch=batch: _provider_call(
+                    provider,
+                    system_prompt=prompt_set.polish_system,
+                    user_prompt=prompt,
+                    model=config.model,
+                    response_schema=_batch_response_schema(
+                        _POLISHED_SEGMENT_SCHEMA,
+                        item_count=len(batch),
+                    ),
+                    cancellation_check=cancellation_check,
+                ),
+                validate=lambda result, batch=batch: _normalize_polish_batch_result(
+                    result,
+                    batch=batch,
+                    batched=True,
+                ),
             )
-            _require_exact_keys(
-                envelope,
-                required={"segments"},
-                label="polish batch",
-            )
-            polished_values = envelope["segments"]
-            if (
-                not isinstance(polished_values, list)
-                or len(polished_values) != len(batch)
-            ):
-                raise WorkerError(
-                    "BUSINESS_OUTPUT_INVALID",
-                    "polish batch changed segment cardinality",
-                )
-
-        for polished, item in zip(polished_values, batch, strict=True):
-            if not isinstance(polished, Mapping):
-                raise WorkerError(
-                    "BUSINESS_OUTPUT_INVALID",
-                    "polish segment must be an object",
-                )
-            _require_exact_keys(
-                polished,
-                required={
-                    "id",
-                    "speakerId",
-                    "startMs",
-                    "endMs",
-                    "sourceTextHash",
-                    "text",
-                    "language",
-                    "diffReason",
-                },
-                label="polish",
-            )
-            if (
-                not isinstance(polished["diffReason"], str)
-                or not polished["diffReason"].strip()
-            ):
-                raise WorkerError(
-                    "BUSINESS_OUTPUT_INVALID",
-                    "polish diffReason must be a non-empty string",
-                )
-            normalized_polish = dict(polished)
-            normalized_polish["language"] = _model_language(
-                normalized_polish["language"],
-                label="polish",
-            )
-            normalized_polish = _validate_transformed_segment(
-                normalized_polish,
-                item,
-                label="polish",
-                optional_keys={"diffReason"},
-            )
-            if normalized_polish["language"] != item["sourceLanguage"]:
-                raise WorkerError(
-                    "BUSINESS_OUTPUT_INVALID",
-                    "polish output changed the source language",
-                )
-            _assert_polish_semantic_fidelity(
-                item,
-                str(normalized_polish["text"]),
-            )
+        for normalized_polish, item in zip(
+            normalized_values,
+            batch,
+            strict=True,
+        ):
             output_by_id[item["id"]] = normalized_polish
             if normalized_polish["text"] != item["sourceText"]:
                 diffs.append(
@@ -2334,7 +2789,7 @@ def _polish(
                         "segmentId": item["id"],
                         "before": item["sourceText"],
                         "after": normalized_polish["text"],
-                        "reason": str(polished["diffReason"]).strip(),
+                        "reason": str(normalized_polish["diffReason"]).strip(),
                     }
                 )
     output_segments = [output_by_id[item["id"]] for item in segments]
@@ -2518,18 +2973,22 @@ def _summary(
             output_language=config.output_locale,
             segments=segments,
         )
-        raw_result = _provider_call(
+        result = _validated_provider_attempts(
             provider,
-            system_prompt=prompt_set.summary_system,
-            user_prompt=prompt,
-            model=config.model,
-            response_schema=_SUMMARY_RESPONSE_SCHEMA,
-            cancellation_check=cancellation_check,
-        )
-        result = _normalize_summary_result(
-            raw_result,
-            segments=segments,
-            label="summary",
+            operation="summary",
+            execute=lambda: _provider_call(
+                provider,
+                system_prompt=prompt_set.summary_system,
+                user_prompt=prompt,
+                model=config.model,
+                response_schema=_SUMMARY_RESPONSE_SCHEMA,
+                cancellation_check=cancellation_check,
+            ),
+            validate=lambda raw_result: _normalize_summary_result(
+                raw_result,
+                segments=segments,
+                label="summary",
+            ),
         )
     else:
         partials: list[dict[str, Any]] = []
@@ -2545,20 +3004,26 @@ def _summary(
                 output_language=config.output_locale,
                 segments=chunk,
             )
-            partial = _provider_call(
-                provider,
-                system_prompt=prompt_set.summary_system,
-                user_prompt=prompt,
-                model=config.model,
-                response_schema=_SUMMARY_RESPONSE_SCHEMA,
-                cancellation_check=cancellation_check,
-            )
             partials.append(
                 _summary_reduction_projection(
-                    _normalize_summary_result(
-                        partial,
-                        segments=chunk,
-                        label=f"summary chunk {index + 1}",
+                    _validated_provider_attempts(
+                        provider,
+                        operation=f"summary chunk {index + 1}",
+                        execute=lambda prompt=prompt: _provider_call(
+                            provider,
+                            system_prompt=prompt_set.summary_system,
+                            user_prompt=prompt,
+                            model=config.model,
+                            response_schema=_SUMMARY_RESPONSE_SCHEMA,
+                            cancellation_check=cancellation_check,
+                        ),
+                        validate=lambda partial, chunk=chunk, index=index: (
+                            _normalize_summary_result(
+                                partial,
+                                segments=chunk,
+                                label=f"summary chunk {index + 1}",
+                            )
+                        ),
                     )
                 )
             )
@@ -2594,20 +3059,26 @@ def _summary(
                     output_language=config.output_locale,
                     summaries=group,
                 )
-                merged = _provider_call(
-                    provider,
-                    system_prompt=prompt_set.summary_system,
-                    user_prompt=prompt,
-                    model=config.model,
-                    response_schema=_SUMMARY_RESPONSE_SCHEMA,
-                    cancellation_check=cancellation_check,
-                )
                 reduced.append(
                     _summary_reduction_projection(
-                        _normalize_summary_result(
-                            merged,
-                            segments=evidence_scope,
-                            label="summary reduction",
+                        _validated_provider_attempts(
+                            provider,
+                            operation="summary reduction",
+                            execute=lambda prompt=prompt: _provider_call(
+                                provider,
+                                system_prompt=prompt_set.summary_system,
+                                user_prompt=prompt,
+                                model=config.model,
+                                response_schema=_SUMMARY_RESPONSE_SCHEMA,
+                                cancellation_check=cancellation_check,
+                            ),
+                            validate=lambda merged, evidence_scope=evidence_scope: (
+                                _normalize_summary_result(
+                                    merged,
+                                    segments=evidence_scope,
+                                    label="summary reduction",
+                                )
+                            ),
                         )
                     )
                 )
@@ -2667,8 +3138,42 @@ class BusinessProcessingRunner:
     ) -> tuple[Path, ...]:
         if not config.enabled:
             return ()
-        document_language = _document_language(document)
-        segments = _transcript_input(document)
+        _assert_business_provider(self.provider)
+        try:
+            validate_strict_json(document)
+            document_snapshot = copy.deepcopy(dict(document))
+            source_document_hash = canonical_json_sha256(document_snapshot)
+        except (TypeError, ValueError) as exc:
+            raise WorkerError(
+                "BUSINESS_INPUT_INVALID",
+                "document must be an immutable strict-JSON mapping",
+                details={"reason": str(exc)},
+            ) from exc
+
+        def assert_source_unchanged() -> None:
+            try:
+                current_hash = canonical_json_sha256(document)
+            except (TypeError, ValueError) as exc:
+                raise WorkerError(
+                    "BUSINESS_SOURCE_MUTATED",
+                    "raw transcript changed into a non-canonical JSON value",
+                    details={
+                        "expectedDocumentHash": source_document_hash,
+                        "reason": str(exc),
+                    },
+                ) from exc
+            if current_hash != source_document_hash:
+                raise WorkerError(
+                    "BUSINESS_SOURCE_MUTATED",
+                    "raw transcript changed during business processing",
+                    details={
+                        "expectedDocumentHash": source_document_hash,
+                        "actualDocumentHash": current_hash,
+                    },
+                )
+
+        document_language = _document_language(document_snapshot)
+        segments = _transcript_input(document_snapshot)
         artifacts: list[Path] = []
         translation_completeness: dict[str, dict[str, Any]] = {}
         tasks: list[tuple[str, str, Callable[[], dict[str, Any]], str]] = []
@@ -2679,7 +3184,7 @@ class BusinessProcessingRunner:
                     task_id,
                     f"translation-{target}.v1.json",
                     lambda target=target: _translation(
-                        document=document,
+                        document=document_snapshot,
                         segments=segments,
                         config=config,
                         provider=self.provider,
@@ -2696,7 +3201,7 @@ class BusinessProcessingRunner:
                     "polish",
                     "polished-transcript.v1.json",
                     lambda: _polish(
-                        document=document,
+                        document=document_snapshot,
                         segments=segments,
                         config=config,
                         provider=self.provider,
@@ -2711,7 +3216,7 @@ class BusinessProcessingRunner:
                     "summary",
                     "summary.v1.json",
                     lambda: _summary(
-                        document=document,
+                        document=document_snapshot,
                         segments=segments,
                         config=config,
                         provider=self.provider,
@@ -2723,8 +3228,9 @@ class BusinessProcessingRunner:
 
         for task_id, filename, build, variant in tasks:
             _cancel(self.cancellation_check)
+            assert_source_unchanged()
             input_hash = _variant_input_hash(
-                document=document,
+                document=document_snapshot,
                 segments=segments,
                 variant=variant,
             )
@@ -2773,6 +3279,7 @@ class BusinessProcessingRunner:
                     "business processing failed closed",
                     details={"variant": variant, "exceptionType": type(exc).__name__},
                 ) from exc
+            assert_source_unchanged()
             _validate_business_artifact(
                 value,
                 variant=variant,
@@ -2802,9 +3309,10 @@ class BusinessProcessingRunner:
                 output_hash=canonical_json_sha256(value),
             )
             artifacts.append(artifact)
+        assert_source_unchanged()
         manifest = {
             "schemaVersion": BUSINESS_SCHEMA_VERSION,
-            "documentId": document.get("documentId"),
+            "documentId": document_snapshot.get("documentId"),
             "rawTranscriptImmutable": True,
             "artifacts": [str(path) for path in artifacts],
             "config": config.as_dict(),

@@ -138,6 +138,10 @@
           "type": "integer",
           "minimum": 1
         },
+        "humanLocked": {
+          "type": "boolean",
+          "description": "Immutable source review lock copied by the trusted backend."
+        },
         "sourceTextHash": {
           "$ref": "#/$defs/sha256"
         },

@@ -13,16 +13,19 @@ network client dependency.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import re
-import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from .errors import JobCancelled
 
@@ -36,6 +39,7 @@ class LocalLLMProvider(Protocol):
 
     provider_id: str
     provider_version: str
+    network_policy: str
 
     def generate_json(
         self,
@@ -112,21 +116,54 @@ def _assert_loopback_endpoint(endpoint: str) -> None:
         raise ValueError("local LLM endpoint must use http or https")
     if parsed.username or parsed.password:
         raise ValueError("local LLM endpoint must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("local LLM endpoint must not contain a query or fragment")
     host = (parsed.hostname or "").strip().casefold()
-    if host in {"localhost", "127.0.0.1", "::1"}:
+    if host == "localhost":
         return
     try:
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo(host, parsed.port or 80, type=socket.SOCK_STREAM)
-        }
-    except OSError as exc:
-        raise ValueError("local LLM endpoint host cannot be resolved safely") from exc
-    if not addresses or not all(
-        address.startswith("127.") or address in {"::1", "0:0:0:0:0:0:0:1"}
-        for address in addresses
-    ):
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError(
+            "local LLM endpoint must use localhost or a literal loopback address"
+        ) from exc
+    if not address.is_loopback:
         raise ValueError("local LLM endpoint must resolve to loopback only")
+
+
+def assert_loopback_provider(provider: LocalLLMProvider) -> str:
+    """Validate the transport declaration used by a business-model provider.
+
+    Endpoint-backed providers must expose either ``config.endpoint`` or
+    ``endpoint`` so the boundary can validate the concrete destination.
+    Endpoint-less providers are in-process adapters and therefore expose no
+    network destination through this contract.  An explicit policy declaration
+    always wins and any value other than ``loopback-only`` is rejected.
+    """
+
+    policy = getattr(provider, "network_policy", None)
+    if policy is not None and policy != "loopback-only":
+        raise LocalLLMError(
+            "local LLM provider network policy must be loopback-only"
+        )
+
+    config = getattr(provider, "config", None)
+    endpoint = getattr(config, "endpoint", None)
+    if endpoint is None:
+        endpoint = getattr(provider, "endpoint", None)
+    if endpoint is not None:
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            raise LocalLLMError(
+                "local LLM provider endpoint must be non-empty text"
+            )
+        try:
+            _assert_loopback_endpoint(endpoint.strip())
+        except ValueError as exc:
+            raise LocalLLMError(
+                "local LLM provider endpoint is not loopback-only"
+            ) from exc
+
+    return "loopback-only"
 
 
 def parse_strict_json_object(raw: Any) -> dict[str, Any]:
@@ -232,14 +269,82 @@ def _assert_loopback_response_url(response: Any, requested_url: str) -> None:
         ) from exc
 
 
+def _estimated_tokens(*values: str) -> int:
+    """Return a conservative deterministic token estimate for preflight checks."""
+
+    encoded_size = sum(len(value.encode("utf-8")) for value in values)
+    return max(1, math.ceil(encoded_size / 3)) + 64
+
+
+def _validate_response_against_schema(
+    value: Mapping[str, Any],
+    *,
+    validator: Draft202012Validator | None,
+) -> None:
+    if validator is None:
+        return
+    errors = sorted(
+        validator.iter_errors(dict(value)),
+        key=lambda error: tuple(str(part) for part in error.absolute_path),
+    )
+    if not errors:
+        return
+    error = errors[0]
+    location = "$"
+    for part in error.absolute_path:
+        location += f"[{part}]" if isinstance(part, int) else f".{part}"
+    raise LocalLLMError(
+        f"local LLM output failed response schema at {location}: {error.message}"
+    )
+
+
+def _assert_complete_generation(
+    envelope: Mapping[str, Any],
+    *,
+    output_token_limit: int,
+) -> None:
+    done = envelope.get("done")
+    if "done" in envelope and not isinstance(done, bool):
+        raise LocalLLMError("local LLM provider returned an invalid done flag")
+    if done is False:
+        raise LocalLLMError("local LLM provider returned an incomplete generation")
+    done_reason = envelope.get("done_reason")
+    if "done_reason" in envelope and not isinstance(done_reason, str):
+        raise LocalLLMError("local LLM provider returned an invalid done reason")
+    if isinstance(done_reason, str) and done_reason.strip().casefold() in {
+        "length",
+        "limit",
+        "max_length",
+        "max_tokens",
+        "token_limit",
+    }:
+        raise LocalLLMError("local LLM provider truncated the structured response")
+    eval_count = envelope.get("eval_count")
+    if "eval_count" in envelope and (
+        isinstance(eval_count, bool)
+        or not isinstance(eval_count, int)
+        or eval_count < 0
+    ):
+        raise LocalLLMError("local LLM provider returned an invalid eval count")
+    if (
+        isinstance(eval_count, int)
+        and not isinstance(eval_count, bool)
+        and eval_count >= output_token_limit
+    ):
+        raise LocalLLMError(
+            "local LLM provider exhausted the structured-output token budget"
+        )
+
+
 class OllamaLocalProvider:
     """Ollama-compatible provider restricted to a loopback endpoint."""
 
     provider_id = "ollama-loopback"
+    network_policy = "loopback-only"
     # Cache/provenance contract v3 covers bounded multi-segment batching and
-    # hierarchical evidence-grounded summarization. Bumping this value keeps
-    # pre-v3 single-request cache entries from being reused under the new
-    # business-processing semantics.
+    # hierarchical evidence-grounded summarization. Reliability hardening in
+    # this module preserves that public provider contract; the business-layer
+    # execution revision independently invalidates unsafe checkpoints.
     provider_version = "native-json-v3"
     # Business tasks may opt into bounded batching/hierarchical summarization.
     # These are capability hints, not trust signals; every response still goes
@@ -247,6 +352,7 @@ class OllamaLocalProvider:
     business_batch_size = 8
     business_batch_character_limit = 7_000
     business_translation_segment_attempts = 3
+    business_generation_attempts = 3
     business_summary_segment_limit = 40
     business_summary_character_limit = 8_000
     business_summary_reduce_size = 8
@@ -263,6 +369,17 @@ class OllamaLocalProvider:
             min(
                 type(self).business_batch_character_limit,
                 self.config.output_tokens // 2,
+            ),
+        )
+        available_input_tokens = max(
+            128,
+            self.config.context_tokens - self.config.output_tokens - 256,
+        )
+        self.business_summary_character_limit = max(
+            256,
+            min(
+                type(self).business_summary_character_limit,
+                available_input_tokens * 2,
             ),
         )
         self._opener = urllib.request.build_opener(_RejectRedirectHandler())
@@ -288,10 +405,30 @@ class OllamaLocalProvider:
         if response_schema is not None:
             try:
                 schema = parse_strict_json_object(response_schema)
-            except LocalLLMError as exc:
+                Draft202012Validator.check_schema(schema)
+                schema_validator: Draft202012Validator | None = (
+                    Draft202012Validator(schema)
+                )
+            except (LocalLLMError, SchemaError) as exc:
                 raise LocalLLMError("response schema must be strict JSON") from exc
         else:
             schema = None
+            schema_validator = None
+        schema_text = (
+            json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+            if schema is not None
+            else ""
+        )
+        estimated_input_tokens = _estimated_tokens(
+            system_prompt,
+            user_prompt,
+            schema_text,
+        )
+        input_token_budget = self.config.context_tokens - self.config.output_tokens
+        if estimated_input_tokens > input_token_budget:
+            raise LocalLLMError(
+                "local LLM request exceeds the configured context window"
+            )
         payload = {
             "model": selected_model,
             "stream": False,
@@ -314,6 +451,12 @@ class OllamaLocalProvider:
             ],
         }
         endpoint = self.config.endpoint.rstrip("/") + "/api/chat"
+        try:
+            _assert_loopback_endpoint(endpoint)
+        except ValueError as exc:
+            raise LocalLLMError(
+                "local LLM request endpoint is not loopback-only"
+            ) from exc
         request = urllib.request.Request(
             endpoint,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -336,11 +479,13 @@ class OllamaLocalProvider:
             raise LocalLLMError("loopback local LLM request failed") from exc
         _check_cancelled(cancellation_check)
         try:
-            envelope = json.loads(body)
-        except json.JSONDecodeError as exc:
+            envelope = parse_strict_json_object(body)
+        except LocalLLMError as exc:
             raise LocalLLMError("local LLM provider returned malformed JSON") from exc
-        if not isinstance(envelope, Mapping):
-            raise LocalLLMError("local LLM provider response must be an object")
+        _assert_complete_generation(
+            envelope,
+            output_token_limit=self.config.output_tokens,
+        )
         message = envelope.get("message")
         content: Any
         if isinstance(message, Mapping):
@@ -353,7 +498,12 @@ class OllamaLocalProvider:
             raise LocalLLMError(
                 "local LLM provider returned empty structured content"
             )
-        return parse_strict_json_object(content)
+        result = parse_strict_json_object(content)
+        _validate_response_against_schema(
+            result,
+            validator=schema_validator,
+        )
+        return result
 
 
 class MappingLocalLLMProvider:
@@ -361,8 +511,10 @@ class MappingLocalLLMProvider:
 
     provider_id = "mapping-fixture"
     provider_version = "1"
+    network_policy = "loopback-only"
     business_batch_size = 1
     business_translation_segment_attempts = 1
+    business_generation_attempts = 1
 
     def __init__(self, responses: list[Mapping[str, Any]]) -> None:
         self._responses = [dict(item) for item in responses]
@@ -390,5 +542,6 @@ __all__ = [
     "LocalLLMProvider",
     "MappingLocalLLMProvider",
     "OllamaLocalProvider",
+    "assert_loopback_provider",
     "parse_strict_json_object",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -1081,3 +1082,450 @@ def test_job_cancellation_is_not_wrapped_as_a_business_provider_failure(
             output_directory=tmp_path,
             config=BusinessProcessingConfig(summary=True),
         )
+
+
+def _reliability_document(
+    count: int,
+    *,
+    source_text: str | None = None,
+) -> dict[str, object]:
+    languages = ("en", "es", "fr", "de")
+    segments: list[dict[str, object]] = []
+    for index in range(1, count + 1):
+        text = source_text or (
+            f"Release planning source segment {index} keeps every immutable "
+            "speaker, timestamp, and review-lock field."
+        )
+        segments.append(
+            {
+                "id": f"segment-{index}",
+                "startMs": (index - 1) * 1_100,
+                "endMs": (index - 1) * 1_100 + 1_000,
+                "speakerId": f"speaker-{(index - 1) % 9 + 1}",
+                "humanLocked": index % 3 == 0,
+                "language": languages[(index - 1) % len(languages)],
+                "rawText": text,
+                "normalizedText": text,
+                "displayText": text,
+            }
+        )
+    return {
+        "schemaVersion": "2.0.0",
+        "documentId": "business-reliability-document",
+        "language": "mul" if count > 1 else "en",
+        "segments": segments,
+    }
+
+
+def _reliability_prompt_items(
+    user_prompt: str,
+) -> tuple[list[dict[str, object]], bool]:
+    if "\nsegments=" in user_prompt:
+        payload = user_prompt.split("\nsegments=", 1)[1]
+        values = ast.literal_eval(payload)
+        assert isinstance(values, list)
+        return [dict(item) for item in values], True
+    payload = user_prompt.split("\nsegment=", 1)[1]
+    value = ast.literal_eval(payload)
+    assert isinstance(value, dict)
+    return [dict(value)], False
+
+
+def _reliability_translation(item: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": item["id"],
+        "speakerId": item["speakerId"],
+        "startMs": item["startMs"],
+        "endMs": item["endMs"],
+        "sourceTextHash": item["sourceTextHash"],
+        "text": (
+            "\u8fd9\u662f\u5b8c\u6574\u4e14\u53ef\u5ba1\u8ba1\u7684"
+            f"\u4e2d\u6587\u7ffb\u8bd1 {item['id']}\u3002"
+        ),
+        "language": "zh-CN",
+    }
+
+
+class _ReliabilityTranslationProvider:
+    provider_id = "reliability-fixture"
+    provider_version = "1"
+    network_policy = "loopback-only"
+    business_translation_segment_attempts = 3
+
+    def __init__(
+        self,
+        *,
+        batch_size: int = 16,
+        character_limit: int = 20_000,
+        first_batch_mode: str | None = None,
+    ) -> None:
+        self.business_batch_size = batch_size
+        self.business_batch_character_limit = character_limit
+        self.first_batch_mode = first_batch_mode
+        self.batch_calls: list[tuple[str, ...]] = []
+        self.single_calls: list[str] = []
+
+    def generate_json(self, **kwargs: object) -> dict[str, object]:
+        items, is_batch = _reliability_prompt_items(
+            str(kwargs["user_prompt"])
+        )
+        outputs = [_reliability_translation(item) for item in items]
+        if not is_batch:
+            self.single_calls.append(str(items[0]["id"]))
+            return outputs[0]
+
+        self.batch_calls.append(tuple(str(item["id"]) for item in items))
+        if len(self.batch_calls) == 1:
+            if self.first_batch_mode == "omit":
+                return {
+                    "segments": [
+                        output
+                        for output in outputs
+                        if output["id"] != "segment-3"
+                    ]
+                }
+            if self.first_batch_mode == "duplicate":
+                return {
+                    "segments": [
+                        outputs[0],
+                        outputs[0],
+                        *outputs[2:],
+                    ]
+                }
+            if self.first_batch_mode == "out-of-order":
+                return {
+                    "segments": [
+                        outputs[1],
+                        outputs[0],
+                        *outputs[2:],
+                    ]
+                }
+        return {"segments": outputs}
+
+
+def test_large_multilingual_translation_is_complete_and_metadata_lossless(
+    tmp_path: Path,
+) -> None:
+    document = _reliability_document(96)
+    original = copy.deepcopy(document)
+    provider = _ReliabilityTranslationProvider(batch_size=13)
+
+    BusinessProcessingRunner(provider=provider).run(
+        document,
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+    )
+
+    artifact = _read_json(
+        tmp_path / "business" / "translation-zh-CN.v1.json"
+    )
+    source_segments = original["segments"]
+    output_segments = artifact["segments"]
+    assert isinstance(source_segments, list)
+    assert isinstance(output_segments, list)
+    assert len(output_segments) == len(source_segments) == 96
+    assert document == original
+    assert [
+        (
+            output["id"],
+            output["startMs"],
+            output["endMs"],
+            output["speakerId"],
+            output["humanLocked"],
+        )
+        for output in output_segments
+    ] == [
+        (
+            source["id"],
+            source["startMs"],
+            source["endMs"],
+            source["speakerId"],
+            source["humanLocked"],
+        )
+        for source in source_segments
+    ]
+    assert provider.batch_calls
+    assert not provider.single_calls
+
+
+def test_partial_translation_omission_retries_only_the_missing_segment(
+    tmp_path: Path,
+) -> None:
+    provider = _ReliabilityTranslationProvider(
+        batch_size=8,
+        first_batch_mode="omit",
+    )
+    BusinessProcessingRunner(provider=provider).run(
+        _reliability_document(8),
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+    )
+
+    artifact = _read_json(
+        tmp_path / "business" / "translation-zh-CN.v1.json"
+    )
+    assert [item["id"] for item in artifact["segments"]] == [
+        f"segment-{index}" for index in range(1, 9)
+    ]
+    assert provider.single_calls == ["segment-3"]
+    progress = _read_json(
+        tmp_path
+        / "business"
+        / "checkpoints"
+        / "translation-zh-CN.progress.json"
+    )
+    missing = next(
+        item for item in progress["segments"] if item["id"] == "segment-3"
+    )
+    assert missing["status"] == "translated"
+    assert missing["errors"][0]["phase"] == "batch"
+    assert "omitted" in missing["errors"][0]["message"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "message_fragment"),
+    [
+        ("duplicate", "duplicate segment IDs"),
+        ("out-of-order", "out of source order"),
+    ],
+)
+def test_invalid_batch_identity_or_order_is_rejected_audited_and_merged_by_source(
+    tmp_path: Path,
+    mode: str,
+    message_fragment: str,
+) -> None:
+    provider = _ReliabilityTranslationProvider(
+        batch_size=4,
+        first_batch_mode=mode,
+    )
+    BusinessProcessingRunner(provider=provider).run(
+        _reliability_document(4),
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+    )
+
+    artifact = _read_json(
+        tmp_path / "business" / "translation-zh-CN.v1.json"
+    )
+    assert [item["id"] for item in artifact["segments"]] == [
+        "segment-1",
+        "segment-2",
+        "segment-3",
+        "segment-4",
+    ]
+    assert provider.single_calls == [
+        "segment-1",
+        "segment-2",
+        "segment-3",
+        "segment-4",
+    ]
+    progress = _read_json(
+        tmp_path
+        / "business"
+        / "checkpoints"
+        / "translation-zh-CN.progress.json"
+    )
+    assert all(
+        any(
+            message_fragment in error["message"]
+            for error in item["errors"]
+        )
+        for item in progress["segments"]
+    )
+
+
+def test_business_character_boundary_accepts_exact_segment_and_rejects_overflow(
+    tmp_path: Path,
+) -> None:
+    exact_provider = _ReliabilityTranslationProvider(
+        batch_size=1,
+        character_limit=256,
+    )
+    BusinessProcessingRunner(provider=exact_provider).run(
+        _reliability_document(1, source_text="a" * 256),
+        output_directory=tmp_path / "exact",
+        config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+    )
+    assert exact_provider.single_calls == ["segment-1"]
+
+    overflow_provider = _ReliabilityTranslationProvider(
+        batch_size=1,
+        character_limit=256,
+    )
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(provider=overflow_provider).run(
+            _reliability_document(1, source_text="a" * 257),
+            output_directory=tmp_path / "overflow",
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_CONTEXT_LIMIT_EXCEEDED"
+    assert error.value.details == {
+        "segmentId": "segment-1",
+        "segmentCharacters": 257,
+        "maximumCharacters": 256,
+    }
+    assert not overflow_provider.single_calls
+    assert not (
+        tmp_path
+        / "overflow"
+        / "business"
+        / "translation-zh-CN.v1.json"
+    ).exists()
+
+
+def test_translation_and_polish_preserve_human_lock_and_raw_document(
+    tmp_path: Path,
+) -> None:
+    source = "The desktop app should accept 3 PDF files."
+    document = _single_segment_document(source)
+    segment = document["segments"][0]
+    assert isinstance(segment, dict)
+    segment["humanLocked"] = True
+    original = copy.deepcopy(document)
+    translation = {
+        "id": "segment-1",
+        "speakerId": "speaker-1",
+        "startMs": 0,
+        "endMs": 1_200,
+        "sourceTextHash": _source_hash(source),
+        "text": "\u684c\u9762\u5e94\u7528\u5e94\u652f\u6301\u63a5\u6536"
+        " 3 \u4e2a PDF \u6587\u4ef6\u3002",
+        "language": "zh-CN",
+    }
+    polish = _polished_segment_for_language(
+        source,
+        "The desktop app should accept 3 PDF files.",
+        language="en",
+    )
+
+    BusinessProcessingRunner(
+        provider=MappingLocalLLMProvider([translation, polish])
+    ).run(
+        document,
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(
+            translation_targets=("zh-CN",),
+            polish=True,
+        ),
+    )
+
+    translated = _read_json(
+        tmp_path / "business" / "translation-zh-CN.v1.json"
+    )
+    polished = _read_json(
+        tmp_path / "business" / "polished-transcript.v1.json"
+    )
+    assert document == original
+    assert translated["segments"][0]["humanLocked"] is True
+    assert polished["segments"][0]["humanLocked"] is True
+
+
+def test_model_cannot_change_the_immutable_human_lock(
+    tmp_path: Path,
+) -> None:
+    document = _reliability_document(1)
+    segments = document["segments"]
+    assert isinstance(segments, list)
+    segments[0]["humanLocked"] = True
+    provider = _ReliabilityTranslationProvider(batch_size=1)
+    original_generate = provider.generate_json
+
+    def changed_lock(**kwargs: object) -> dict[str, object]:
+        output = original_generate(**kwargs)
+        output["humanLocked"] = False
+        return output
+
+    provider.generate_json = changed_lock  # type: ignore[method-assign]
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(provider=provider).run(
+            document,
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_OUTPUT_INVALID"
+    assert "human lock" in error.value.details["cause"]["message"]
+    assert not (
+        tmp_path / "business" / "translation-zh-CN.v1.json"
+    ).exists()
+
+
+def test_duplicate_source_segment_ids_fail_before_model_invocation(
+    tmp_path: Path,
+) -> None:
+    document = _reliability_document(2)
+    segments = document["segments"]
+    assert isinstance(segments, list)
+    segments[1]["id"] = "segment-1"
+    provider = _ReliabilityTranslationProvider()
+
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(provider=provider).run(
+            document,
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_INPUT_INVALID"
+    assert error.value.details["duplicateSegmentIds"] == ["segment-1"]
+    assert not provider.batch_calls
+    assert not provider.single_calls
+
+
+@pytest.mark.parametrize(
+    ("network_policy", "endpoint"),
+    [
+        ("remote-allowed", None),
+        ("loopback-only", "https://example.com"),
+    ],
+)
+def test_business_processing_rejects_non_loopback_provider_before_any_call(
+    tmp_path: Path,
+    network_policy: str,
+    endpoint: str | None,
+) -> None:
+    provider = _ReliabilityTranslationProvider()
+    provider.network_policy = network_policy
+    if endpoint is not None:
+        provider.endpoint = endpoint
+
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(provider=provider).run(
+            _reliability_document(1),
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_PROVIDER_POLICY_INVALID"
+    assert error.value.details["reason"]
+    assert not provider.batch_calls
+    assert not provider.single_calls
+
+
+def test_source_mutation_during_model_call_fails_before_artifact_publication(
+    tmp_path: Path,
+) -> None:
+    document = _reliability_document(1)
+
+    class MutatingProvider(_ReliabilityTranslationProvider):
+        def generate_json(self, **kwargs: object) -> dict[str, object]:
+            segments = document["segments"]
+            assert isinstance(segments, list)
+            segments[0]["rawText"] = "tampered"
+            return super().generate_json(**kwargs)
+
+    provider = MutatingProvider(batch_size=1)
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(provider=provider).run(
+            document,
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_SOURCE_MUTATED"
+    assert error.value.details["expectedDocumentHash"]
+    assert error.value.details["actualDocumentHash"]
+    assert not (
+        tmp_path / "business" / "translation-zh-CN.v1.json"
+    ).exists()

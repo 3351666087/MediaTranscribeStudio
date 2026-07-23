@@ -4,7 +4,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -161,6 +161,55 @@ class ProductionWorkerCliTests(unittest.TestCase):
         build.assert_called_once()
         loop.assert_called_once()
         self.assertEqual(buffer.getvalue(), "")
+
+    def test_lazy_third_party_stdout_is_firewalled_from_jsonl(self) -> None:
+        protocol_output = io.StringIO()
+        diagnostic_output = io.StringIO()
+        composition = SimpleNamespace(service=FakeService())
+
+        class FakeProtocol:
+            def __init__(self, service, emitter, *, max_line_bytes):
+                del service, max_line_bytes
+                self.emitter = emitter
+
+        def noisy_loop(*, input_stream, protocol, service):
+            del input_stream, service
+            print("funasr version: synthetic")
+            protocol.emitter.emit(
+                {
+                    "schemaVersion": "1.0.0",
+                    "type": "test.protocol",
+                    "payload": {"status": "clean"},
+                }
+            )
+
+        with (
+            patch(
+                "backend.worker.ProductionConfig.load",
+                return_value=self.config,
+            ),
+            patch(
+                "backend.worker.run_production_preflight",
+                return_value=self.passed_report,
+            ),
+            patch(
+                "backend.worker.build_production_composition",
+                return_value=composition,
+            ),
+            patch("backend.worker.preload_production_runtime"),
+            patch("backend.worker.WorkerProtocol", FakeProtocol),
+            patch("backend.worker.run_jsonl_loop", side_effect=noisy_loop),
+            patch("backend.worker.apply_offline_environment"),
+            redirect_stdout(protocol_output),
+            redirect_stderr(diagnostic_output),
+        ):
+            exit_code = main(["--config", str(self.config_path)])
+
+        self.assertEqual(exit_code, 0)
+        event = self.output_line(protocol_output)
+        self.assertEqual(event["type"], "test.protocol")
+        self.assertEqual(event["payload"], {"status": "clean"})
+        self.assertIn("funasr version: synthetic", diagnostic_output.getvalue())
 
     def test_unexpected_startup_error_is_sanitized(self) -> None:
         buffer = io.StringIO()

@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
@@ -124,64 +125,70 @@ def _startup_error(error: BaseException) -> WorkerError:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_streams()
+    # Keep a private reference to the protocol stream, then route every
+    # ordinary Python ``print`` in this process to stderr. Model runtimes such
+    # as FunASR can emit banners lazily while a job is already running; without
+    # this process-wide firewall a single banner corrupts the strict JSONL
+    # transport. JsonlEmitter writes only to the captured protocol stream.
     emitter = JsonlEmitter(sys.stdout)
-    try:
-        config = _load_effective_config(args)
-        apply_offline_environment()
-        preflight = run_production_preflight(
-            config,
-            probe_runtime_imports=config.runtime.strict_startup_preflight,
-        )
+    with redirect_stdout(sys.stderr):
+        try:
+            config = _load_effective_config(args)
+            apply_offline_environment()
+            preflight = run_production_preflight(
+                config,
+                probe_runtime_imports=config.runtime.strict_startup_preflight,
+            )
 
-        if args.preflight:
+            if args.preflight:
+                emitter.emit(
+                    _control_event(
+                        "worker.preflight.completed",
+                        preflight.as_dict(),
+                    )
+                )
+                return 0 if preflight.passed else 2
+
+            if args.diagnose:
+                emitter.emit(
+                    _control_event(
+                        "worker.diagnostics.completed",
+                        production_diagnostics(config, preflight),
+                    )
+                )
+                return 0 if preflight.passed else 2
+
+            preflight.raise_if_failed()
+            preload_production_runtime(
+                include_pyannote=config.speaker.pyannote_mode != "disabled",
+            )
+            composition = build_production_composition(
+                config,
+                event_sink=emitter.emit,
+                preflight_report=preflight,
+                probe_runtime_imports=False,
+            )
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             emitter.emit(
                 _control_event(
-                    "worker.preflight.completed",
-                    preflight.as_dict(),
+                    "worker.startup.failed",
+                    _startup_error(exc).as_payload(),
                 )
             )
-            return 0 if preflight.passed else 2
+            return 2
 
-        if args.diagnose:
-            emitter.emit(
-                _control_event(
-                    "worker.diagnostics.completed",
-                    production_diagnostics(config, preflight),
-                )
-            )
-            return 0 if preflight.passed else 2
-
-        preflight.raise_if_failed()
-        preload_production_runtime(
-            include_pyannote=config.speaker.pyannote_mode != "disabled",
+        protocol = WorkerProtocol(
+            composition.service,
+            emitter,
+            max_line_bytes=config.runtime.max_line_bytes,
         )
-        composition = build_production_composition(
-            config,
-            event_sink=emitter.emit,
-            preflight_report=preflight,
-            probe_runtime_imports=False,
+        run_jsonl_loop(
+            input_stream=sys.stdin,
+            protocol=protocol,
+            service=composition.service,
         )
-    except BaseException as exc:
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            raise
-        emitter.emit(
-            _control_event(
-                "worker.startup.failed",
-                _startup_error(exc).as_payload(),
-            )
-        )
-        return 2
-
-    protocol = WorkerProtocol(
-        composition.service,
-        emitter,
-        max_line_bytes=config.runtime.max_line_bytes,
-    )
-    run_jsonl_loop(
-        input_stream=sys.stdin,
-        protocol=protocol,
-        service=composition.service,
-    )
     return 0
 
 

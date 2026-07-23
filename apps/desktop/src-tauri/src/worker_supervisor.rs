@@ -147,6 +147,24 @@ impl WorkerSupervisor {
         self.inner.event_tx.subscribe()
     }
 
+    /// Returns whether the current worker generation can route verified events
+    /// for `job_id`.
+    ///
+    /// This is intentionally a volatile transport capability check, not a
+    /// durable job-status API. The desktop job registry remains authoritative
+    /// for in-process identity and state, while a worker restart clears these
+    /// generation-scoped routes.
+    pub async fn routes_job_events(&self, job_id: &str) -> bool {
+        let state = self.inner.state.lock().await;
+        let Some(active) = state.active.as_ref().filter(|handle| handle.ready) else {
+            return false;
+        };
+        state
+            .jobs
+            .get(job_id)
+            .is_some_and(|cursor| cursor.generation == active.generation)
+    }
+
     pub async fn request(
         &self,
         command_type: &str,
@@ -702,6 +720,9 @@ impl Inner {
                     "Worker event sequence overflowed and the generation failed closed.",
                 )
             })?;
+            if is_terminal_event_type(&event.event_type) {
+                state.jobs.remove(&event.job_id);
+            }
         }
 
         let _ = self.event_tx.send(WorkerNotification::Event(WorkerEvent {
@@ -1108,6 +1129,10 @@ fn validate_event_type(event_type: &str) -> Result<(), WorkerError> {
         ));
     }
     Ok(())
+}
+
+fn is_terminal_event_type(event_type: &str) -> bool {
+    matches!(event_type, "job.failed" | "job.completed" | "job.cancelled")
 }
 
 fn validate_identifier(value: &str, field: &str) -> Result<(), WorkerError> {
@@ -1580,6 +1605,33 @@ mod tests {
         .to_string()
     }
 
+    fn accepted_job_start_line(request_id: &str, job_id: &str) -> String {
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "requestId": request_id,
+            "timestamp": "2026-07-22T12:00:00Z",
+            "type": "command.accepted",
+            "payload": {
+                "jobId": job_id,
+                "status": "queued"
+            }
+        })
+        .to_string()
+    }
+
+    fn event_line(event_id: &str, job_id: &str, sequence: u64, event_type: &str) -> String {
+        serde_json::json!({
+            "schemaVersion": SCHEMA_VERSION,
+            "eventId": event_id,
+            "jobId": job_id,
+            "sequence": sequence,
+            "timestamp": "2026-07-22T12:00:00Z",
+            "type": event_type,
+            "payload": {}
+        })
+        .to_string()
+    }
+
     fn request_id(line: &[u8]) -> String {
         let value: Value = serde_json::from_slice(line).expect("valid outbound JSONL");
         value["requestId"].as_str().expect("requestId").to_owned()
@@ -1762,6 +1814,76 @@ mod tests {
         let second_response = second.await.expect("second task").expect("second result");
         assert_eq!(first_response.payload["marker"], "first");
         assert_eq!(second_response.payload["marker"], "second");
+    }
+
+    #[tokio::test]
+    async fn terminal_event_retires_only_its_job_route() {
+        let mut harness = mock_supervisor().await;
+        for job_id in ["job-a", "job-b"] {
+            let inner = Arc::clone(&harness.supervisor.inner);
+            let generation = harness.generation;
+            let owned_job_id = job_id.to_owned();
+            let request = tokio::spawn(async move {
+                inner
+                    .request_generation(
+                        generation,
+                        "job.start",
+                        job_start_payload(&owned_job_id),
+                        ResponseKind::Accepted,
+                        Duration::from_secs(1),
+                    )
+                    .await
+            });
+            let line = harness.write_rx.recv().await.expect("job.start write");
+            let id = request_id(&line);
+            harness
+                .supervisor
+                .inner
+                .handle_output_line(generation, &accepted_job_start_line(&id, job_id))
+                .await
+                .expect("job.start acceptance");
+            request
+                .await
+                .expect("job.start request task")
+                .expect("job.start response");
+        }
+
+        assert!(harness.supervisor.routes_job_events("job-a").await);
+        assert!(harness.supervisor.routes_job_events("job-b").await);
+        harness
+            .supervisor
+            .inner
+            .handle_output_line(
+                harness.generation,
+                &event_line("evt-a-terminal", "job-a", 0, "job.completed"),
+            )
+            .await
+            .expect("terminal event");
+
+        assert!(!harness.supervisor.routes_job_events("job-a").await);
+        assert!(harness.supervisor.routes_job_events("job-b").await);
+        let late_error = harness
+            .supervisor
+            .inner
+            .handle_output_line(
+                harness.generation,
+                &event_line("evt-a-late", "job-a", 1, "warning"),
+            )
+            .await
+            .expect_err("events after a terminal event must be rejected");
+        assert_eq!(late_error.kind, WorkerErrorKind::Protocol);
+        assert!(late_error.message.contains("unregistered jobId"));
+
+        harness
+            .supervisor
+            .inner
+            .handle_output_line(
+                harness.generation,
+                &event_line("evt-b-progress", "job-b", 0, "warning"),
+            )
+            .await
+            .expect("the other job route must remain usable");
+        assert!(harness.supervisor.routes_job_events("job-b").await);
     }
 
     #[tokio::test]

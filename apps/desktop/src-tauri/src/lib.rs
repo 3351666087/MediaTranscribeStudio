@@ -1,5 +1,10 @@
+mod job_registry;
 mod worker_supervisor;
 
+use job_registry::{
+    DispatchPermit, IdempotencyKey, JobId, JobRegistry, RegisterOutcome, RegistryError,
+    RegistryJobStatus, MAX_DISPATCH_LIMIT,
+};
 use serde::{
     de::{Error as DeError, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
@@ -7,14 +12,14 @@ use serde::{
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, MutexGuard,
+        Arc, Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -27,11 +32,9 @@ const CONTRACT_VERSION: &str = "1.6.0";
 const JS_MAX_SAFE_INTEGER: usize = 9_007_199_254_740_991usize;
 const LOCAL_LLM_ENDPOINT_POLICY: &str = "loopback-only";
 const BUSINESS_PROMPT_VERSION: &str = "business-v1";
+const MAX_OUTPUT_CUSTOMIZATION_BYTES: usize = 256 * 1024;
 static NEXT_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static NEXT_MUTATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-const MEDIA_EXTENSIONS: &[&str] = &[
-    "mov", "mp4", "m4v", "mkv", "webm", "wav", "mp3", "m4a", "flac", "aac", "ogg",
-];
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,10 +89,11 @@ impl LocalLlmMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum JobStatus {
     Draft,
+    Registered,
     Queued,
     Running,
     ReviewRequired,
@@ -592,6 +596,8 @@ struct StudioSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateJobRequest {
+    #[serde(default)]
+    idempotency_key: Option<String>,
     title: String,
     media_path: PathBuf,
     output_directory: PathBuf,
@@ -609,6 +615,12 @@ struct CreateJobRequest {
     summary: bool,
     output_locale: String,
     business_prompt_version: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_output_customization"
+    )]
+    output_customization: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -616,7 +628,33 @@ struct CreateJobRequest {
 struct CreateJobResult {
     accepted: bool,
     job_id: String,
+    replayed: bool,
+    status: JobStatus,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobRuntimeStatus {
+    job_id: String,
+    status: JobStatus,
+    revision: u64,
+    accepted_by_worker: bool,
+    projected: bool,
+    in_flight: bool,
+    worker_event_route_registered: bool,
+    cancellable: bool,
+    volatile_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobSnapshotUpdate {
+    job_id: String,
+    status: JobStatus,
+    revision: u64,
+    projected: bool,
+    snapshot: StudioSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -648,11 +686,13 @@ struct ArtifactOpenResult {
     message: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AppState {
     snapshot: StudioSnapshot,
     output_root: Option<PathBuf>,
     worker_evidence: WorkerEvidenceLedger,
+    request_fingerprint: String,
+    worker_accepted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -706,12 +746,18 @@ struct ReferenceQualityEvidence {
     overlap_f1: f32,
 }
 
-struct StudioStore(Mutex<AppState>);
+struct StudioStore {
+    registry: JobRegistry<AppState>,
+    draft_snapshot: StudioSnapshot,
+    dispatch_permits: Mutex<HashMap<JobId, DispatchPermit>>,
+}
 
-struct JobCommandGate(tokio::sync::Mutex<()>);
+#[derive(Default)]
+struct JobCommandGate(Mutex<HashMap<JobId, Arc<tokio::sync::Mutex<()>>>>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PreparedJob {
+    idempotency_key: Option<String>,
     title: String,
     media_path: PathBuf,
     output_directory: PathBuf,
@@ -729,6 +775,21 @@ struct PreparedJob {
     summary: bool,
     output_locale: String,
     business_prompt_version: String,
+    output_customization: Option<Map<String, Value>>,
+}
+
+fn deserialize_optional_output_customization<'de, D>(
+    deserializer: D,
+) -> Result<Option<Map<String, Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Object(customization) => Ok(Some(customization)),
+        _ => Err(D::Error::custom(
+            "outputCustomization must be a JSON object when provided",
+        )),
+    }
 }
 
 fn validate_speaker_count(value: usize, field: &str) -> IpcResult<()> {
@@ -1049,6 +1110,29 @@ fn validate_business_processing(request: &CreateJobRequest) -> IpcResult<()> {
     Ok(())
 }
 
+fn validate_output_customization(
+    output_customization: &Option<Map<String, Value>>,
+) -> IpcResult<()> {
+    let Some(customization) = output_customization else {
+        return Ok(());
+    };
+    let encoded = serde_json::to_vec(customization).map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            format!("outputCustomization is not valid finite JSON: {error}"),
+        )
+    })?;
+    if encoded.len() > MAX_OUTPUT_CUSTOMIZATION_BYTES {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            format!(
+                "outputCustomization exceeds the {MAX_OUTPUT_CUSTOMIZATION_BYTES}-byte IPC limit."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_speaker_id(value: &str) -> IpcResult<()> {
     let sequence = value.strip_prefix("speaker-").ok_or_else(|| {
         IpcError::new(
@@ -1079,22 +1163,6 @@ fn canonical_media_file(path: &Path) -> IpcResult<PathBuf> {
         return Err(IpcError::new(
             IpcErrorCode::InvalidPath,
             "The media file must use an absolute path.",
-        ));
-    }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidPath,
-                "The media file must have a supported extension.",
-            )
-        })?;
-    if !MEDIA_EXTENSIONS.contains(&extension.as_str()) {
-        return Err(IpcError::new(
-            IpcErrorCode::InvalidPath,
-            "The media format is not in the allowlist.",
         ));
     }
     let canonical = fs::canonicalize(path).map_err(|_| {
@@ -1168,7 +1236,12 @@ fn writable_output_directory(path: &Path) -> IpcResult<PathBuf> {
 
 fn prepare_job(request: CreateJobRequest) -> IpcResult<PreparedJob> {
     validate_text(&request.title, "title", 80, false)?;
+    if let Some(key) = request.idempotency_key.as_deref() {
+        validate_text(key, "idempotencyKey", 1_024, false)?;
+        IdempotencyKey::new(key.trim().to_owned()).map_err(registry_ipc_error)?;
+    }
     validate_business_processing(&request)?;
+    validate_output_customization(&request.output_customization)?;
     request.speaker_policy.validate()?;
     let expected_label_count = request.speaker_policy.expected_label_count();
     let labels_are_complete = request.speaker_labels.len() == expected_label_count
@@ -1194,6 +1267,7 @@ fn prepare_job(request: CreateJobRequest) -> IpcResult<PreparedJob> {
     let media_path = canonical_media_file(&request.media_path)?;
     let output_directory = writable_output_directory(&request.output_directory)?;
     Ok(PreparedJob {
+        idempotency_key: request.idempotency_key.map(|key| key.trim().to_owned()),
         title: request.title.trim().to_owned(),
         media_path,
         output_directory,
@@ -1215,6 +1289,7 @@ fn prepare_job(request: CreateJobRequest) -> IpcResult<PreparedJob> {
         summary: request.summary,
         output_locale: request.output_locale,
         business_prompt_version: request.business_prompt_version,
+        output_customization: request.output_customization,
     })
 }
 
@@ -1391,6 +1466,12 @@ fn build_job_start_payload(
         "businessPromptVersion".to_owned(),
         Value::String(prepared.business_prompt_version.clone()),
     );
+    if let Some(output_customization) = &prepared.output_customization {
+        payload.insert(
+            "outputCustomization".to_owned(),
+            Value::Object(output_customization.clone()),
+        );
+    }
 
     match &prepared.speaker_policy {
         SpeakerCountPolicy::Auto {} => {
@@ -1452,6 +1533,20 @@ fn build_job_start_payload(
     }
 
     Ok(payload)
+}
+
+fn prepared_job_fingerprint(prepared: &PreparedJob) -> IpcResult<String> {
+    let fingerprint_output = prepared
+        .output_directory
+        .join(".media-transcribe-studio-idempotency");
+    let payload = build_job_start_payload(prepared, "idempotency-request", &fingerprint_output)?;
+    let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            format!("Unable to fingerprint the normalized task request: {error}"),
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn worker_ipc_error(context: &str, error: WorkerError) -> IpcError {
@@ -2199,13 +2294,12 @@ fn create_speaker_profiles(count: usize, labels: &[String]) -> IpcResult<Vec<Spe
     Ok(speakers)
 }
 
-fn commit_accepted_job_in_state(
-    state: &mut AppState,
-    prepared: PreparedJob,
-    job_id: String,
+fn build_registered_job_state(
+    prepared: &PreparedJob,
+    job_id: &str,
     worker_output_directory: PathBuf,
-) -> IpcResult<CreateJobResult> {
-    state.worker_evidence = WorkerEvidenceLedger::default();
+    request_fingerprint: String,
+) -> IpcResult<AppState> {
     let (speaker_count, speakers) = match &prepared.speaker_policy {
         SpeakerCountPolicy::Manual { count } => (
             Some(*count),
@@ -2213,43 +2307,75 @@ fn commit_accepted_job_in_state(
         ),
         SpeakerCountPolicy::Auto {} | SpeakerCountPolicy::Hybrid { .. } => (None, Vec::new()),
     };
-    state.snapshot.job = JobSummary {
-        id: job_id.clone(),
-        title: prepared.title,
+    let mut snapshot = default_snapshot();
+    snapshot.job = JobSummary {
+        id: job_id.to_owned(),
+        title: prepared.title.clone(),
         source_path: worker_path(&prepared.media_path, "sourcePath")?,
         duration_label: "Awaiting processing".to_owned(),
-        status: JobStatus::Queued,
+        status: JobStatus::Registered,
         progress: 0,
-        started_at: "Accepted by worker".to_owned(),
-        speaker_policy: prepared.speaker_policy,
+        started_at: "Registered in volatile desktop runtime".to_owned(),
+        speaker_policy: prepared.speaker_policy.clone(),
         speaker_count,
         speaker_detection: None,
         review_open_count: 0,
         active_strategy_id: prepared.strategy_id,
     };
-    state.snapshot.speakers = speakers;
-    state.snapshot.reviews.clear();
-    state.snapshot.artifacts.clear();
-    state.snapshot.diarization_quality = default_diarization_quality();
-    state.snapshot.performance = PerformanceMetrics::Unavailable {
+    snapshot.speakers = speakers;
+    snapshot.reviews.clear();
+    snapshot.artifacts.clear();
+    snapshot.diarization_quality = default_diarization_quality();
+    snapshot.performance = PerformanceMetrics::Unavailable {
         reason: "The task has not run, so model-stage and resource-sampling data are unavailable."
             .to_owned(),
     };
-    state.snapshot.pdf_quality = default_pdf_quality();
-    state.snapshot.events = vec![StudioEvent {
+    snapshot.pdf_quality = default_pdf_quality();
+    snapshot.events = vec![StudioEvent {
         id: format!("event-{job_id}"),
+        sequence: 0,
+        event_type: "job.registered".to_owned(),
+        stage_id: Some("media".to_owned()),
+        severity: Severity::Info,
+        timestamp: "Desktop runtime".to_owned(),
+        title: "Task identity registered".to_owned(),
+        detail: "The request is registered in volatile desktop memory. It is not yet accepted by the worker and is not durably persisted by Rust.".to_owned(),
+    }];
+    Ok(AppState {
+        snapshot,
+        output_root: Some(worker_output_directory),
+        worker_evidence: WorkerEvidenceLedger::default(),
+        request_fingerprint,
+        worker_accepted: false,
+    })
+}
+
+fn commit_accepted_job_in_state(state: &mut AppState, job_id: &str) -> IpcResult<CreateJobResult> {
+    validate_current_job(state, job_id)?;
+    if state.snapshot.job.status != JobStatus::Registered {
+        return Err(IpcError::new(
+            IpcErrorCode::Conflict,
+            "Only a newly registered task can commit worker acceptance.",
+        ));
+    }
+    state.snapshot.job.status = JobStatus::Queued;
+    state.snapshot.job.started_at = "Accepted by worker".to_owned();
+    state.worker_accepted = true;
+    state.snapshot.events.push(StudioEvent {
+        id: format!("event-{job_id}-accepted"),
         sequence: 1,
-        event_type: "job.started".to_owned(),
+        event_type: "job.accepted".to_owned(),
         stage_id: Some("media".to_owned()),
         severity: Severity::Success,
         timestamp: "Queued".to_owned(),
         title: "Task explicitly accepted by worker".to_owned(),
         detail: "The media file and output directory passed boundary validation, and the production worker returned accepted/queued.".to_owned(),
-    }];
-    state.output_root = Some(worker_output_directory);
+    });
     Ok(CreateJobResult {
         accepted: true,
-        job_id,
+        job_id: job_id.to_owned(),
+        replayed: false,
+        status: JobStatus::Queued,
         message: "The production worker explicitly accepted and queued the task.".to_owned(),
     })
 }
@@ -2268,6 +2394,28 @@ fn validate_current_job(state: &AppState, job_id: &str) -> IpcResult<()> {
 fn commit_cancelled_job_in_state(state: &mut AppState, job_id: &str) -> IpcResult<()> {
     validate_current_job(state, job_id)?;
     state.snapshot.job.status = JobStatus::Cancelled;
+    Ok(())
+}
+
+fn commit_failed_job_in_state(state: &mut AppState, job_id: &str, message: &str) -> IpcResult<()> {
+    validate_current_job(state, job_id)?;
+    state.snapshot.job.status = JobStatus::Failed;
+    state.snapshot.system.inference_worker = WorkerStatus::Missing;
+    let sequence = state
+        .snapshot
+        .events
+        .last()
+        .map_or(0, |event| event.sequence.saturating_add(1));
+    state.snapshot.events.push(StudioEvent {
+        id: format!("job-start-failure-{job_id}-{sequence}"),
+        sequence,
+        event_type: "job.failed".to_owned(),
+        stage_id: None,
+        severity: Severity::Error,
+        timestamp: "Worker supervisor".to_owned(),
+        title: "Task failed closed before or during worker acceptance".to_owned(),
+        detail: message.to_owned(),
+    });
     Ok(())
 }
 
@@ -2774,12 +2922,275 @@ fn open_artifact_in_state(state: &AppState, artifact_id: &str) -> IpcResult<Arti
     })
 }
 
-fn lock_store(store: &StudioStore) -> IpcResult<MutexGuard<'_, AppState>> {
-    store.0.lock().map_err(|_| {
+impl StudioStore {
+    fn new() -> Self {
+        Self {
+            registry: JobRegistry::with_dispatch_limit(MAX_DISPATCH_LIMIT)
+                .expect("the built-in desktop dispatch limit must be valid"),
+            draft_snapshot: default_snapshot(),
+            dispatch_permits: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn projected_state(&self) -> IpcResult<Option<AppState>> {
+        self.registry
+            .projected_snapshot()
+            .map(|snapshot| snapshot.map(|snapshot| snapshot.runtime_state))
+            .map_err(registry_ipc_error)
+    }
+
+    fn projected_job_id(&self) -> IpcResult<Option<JobId>> {
+        self.registry.projected_job_id().map_err(registry_ipc_error)
+    }
+
+    fn select_job(&self, job_id: &JobId) -> IpcResult<()> {
+        self.registry
+            .select_projection(job_id)
+            .map(|_| ())
+            .map_err(registry_ipc_error)
+    }
+
+    fn hold_dispatch_permit(&self, job_id: JobId, permit: DispatchPermit) -> IpcResult<()> {
+        use std::collections::hash_map::Entry;
+
+        let mut permits = self.dispatch_permits.lock().map_err(|_| {
+            IpcError::new(
+                IpcErrorCode::StateUnavailable,
+                "The volatile dispatch-permit ledger is unavailable.",
+            )
+        })?;
+        match permits.entry(job_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(permit);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(IpcError::new(
+                IpcErrorCode::Conflict,
+                format!("Task {job_id} already owns a volatile dispatch permit."),
+            )),
+        }
+    }
+
+    fn release_dispatch_permit(&self, job_id: &JobId) -> IpcResult<()> {
+        let permit = self
+            .dispatch_permits
+            .lock()
+            .map_err(|_| {
+                IpcError::new(
+                    IpcErrorCode::StateUnavailable,
+                    "The volatile dispatch-permit ledger is unavailable.",
+                )
+            })?
+            .remove(job_id);
+        if let Some(permit) = permit {
+            permit.release().map_err(registry_ipc_error)?;
+        }
+        Ok(())
+    }
+
+    fn discard_gate_if_unpublished(
+        &self,
+        gates: &JobCommandGate,
+        job_id: &JobId,
+        expected: &Arc<tokio::sync::Mutex<()>>,
+    ) -> IpcResult<()> {
+        match self.registry.status(job_id) {
+            Err(RegistryError::UnknownJob { .. }) => gates.remove_unpublished(job_id, expected),
+            Ok(_) => Ok(()),
+            Err(error) => Err(registry_ipc_error(error)),
+        }
+    }
+}
+
+impl JobCommandGate {
+    fn for_job(&self, job_id: &JobId) -> IpcResult<Arc<tokio::sync::Mutex<()>>> {
+        let mut gates = self.0.lock().map_err(|_| {
+            IpcError::new(
+                IpcErrorCode::StateUnavailable,
+                "The per-task command-gate registry is unavailable.",
+            )
+        })?;
+        Ok(Arc::clone(
+            gates
+                .entry(job_id.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        ))
+    }
+
+    fn remove_unpublished(
+        &self,
+        job_id: &JobId,
+        expected: &Arc<tokio::sync::Mutex<()>>,
+    ) -> IpcResult<()> {
+        let mut gates = self.0.lock().map_err(|_| {
+            IpcError::new(
+                IpcErrorCode::StateUnavailable,
+                "The per-task command-gate registry is unavailable.",
+            )
+        })?;
+        let Some(current) = gates.get(job_id) else {
+            return Err(IpcError::new(
+                IpcErrorCode::StateUnavailable,
+                format!("The unpublished command gate for candidate task {job_id} disappeared."),
+            ));
+        };
+        if !Arc::ptr_eq(current, expected) {
+            return Err(IpcError::new(
+                IpcErrorCode::StateUnavailable,
+                format!(
+                    "The unpublished command gate for candidate task {job_id} was unexpectedly replaced."
+                ),
+            ));
+        }
+        if Arc::strong_count(current) != 2 {
+            return Err(IpcError::new(
+                IpcErrorCode::StateUnavailable,
+                format!(
+                    "The unpublished command gate for candidate task {job_id} has unexpected external owners."
+                ),
+            ));
+        }
+        gates.remove(job_id);
+        Ok(())
+    }
+}
+
+fn registry_ipc_error(error: RegistryError) -> IpcError {
+    let code = match error {
+        RegistryError::InvalidJobId | RegistryError::InvalidIdempotencyKey => {
+            IpcErrorCode::InvalidRequest
+        }
+        RegistryError::UnknownJob { .. } => IpcErrorCode::NotFound,
+        RegistryError::DuplicateJob { .. }
+        | RegistryError::StaleJobToken { .. }
+        | RegistryError::InvalidStatusTransition { .. }
+        | RegistryError::DispatcherSaturated { .. }
+        | RegistryError::JobAlreadyDispatched { .. }
+        | RegistryError::StaleDispatchPermit { .. } => IpcErrorCode::Conflict,
+        #[cfg(test)]
+        RegistryError::EventTargetMismatch { .. } | RegistryError::StaleProjectionToken { .. } => {
+            IpcErrorCode::Conflict
+        }
+        RegistryError::InvalidDispatcherLimit { .. }
+        | RegistryError::ForeignToken { .. }
+        | RegistryError::SequenceExhausted { .. }
+        | RegistryError::StatePoisoned { .. }
+        | RegistryError::InvariantViolation { .. } => IpcErrorCode::StateUnavailable,
+    };
+    IpcError::new(code, error.to_string())
+}
+
+fn parse_job_id(value: &str) -> IpcResult<JobId> {
+    validate_text(value, "jobId", 256, false)?;
+    JobId::new(value.to_owned()).map_err(registry_ipc_error)
+}
+
+fn registry_status_for_job(status: JobStatus) -> RegistryJobStatus {
+    match status {
+        JobStatus::Draft | JobStatus::Registered => RegistryJobStatus::Registered,
+        JobStatus::Queued => RegistryJobStatus::Queued,
+        JobStatus::Running => RegistryJobStatus::Running,
+        JobStatus::ReviewRequired => RegistryJobStatus::ReviewRequired,
+        JobStatus::Completed => RegistryJobStatus::Completed,
+        JobStatus::Failed => RegistryJobStatus::Failed,
+        JobStatus::Cancelled => RegistryJobStatus::Cancelled,
+    }
+}
+
+fn projected_state(store: &StudioStore) -> IpcResult<AppState> {
+    store.projected_state()?.ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::StateUnavailable,
-            "The desktop backend state lock is unavailable.",
+            "No task is selected in the volatile desktop runtime.",
         )
+    })
+}
+
+fn job_state(store: &StudioStore, job_id: &JobId) -> IpcResult<AppState> {
+    store
+        .registry
+        .snapshot(job_id)
+        .map(|snapshot| snapshot.runtime_state)
+        .map_err(registry_ipc_error)
+}
+
+fn mutate_job_state<R>(
+    store: &StudioStore,
+    job_id: &JobId,
+    mutate: impl FnOnce(&mut AppState) -> IpcResult<R>,
+) -> IpcResult<R> {
+    let (_, token) = store
+        .registry
+        .snapshot_with_token(job_id)
+        .map_err(registry_ipc_error)?;
+    store
+        .registry
+        .try_mutate_runtime(&token, mutate)
+        .map_err(registry_ipc_error)?
+        .map(|(result, _)| result)
+}
+
+fn transition_job_state<R>(
+    store: &StudioStore,
+    job_id: &JobId,
+    next_status: RegistryJobStatus,
+    mutate: impl FnOnce(&mut AppState) -> IpcResult<R>,
+) -> IpcResult<R> {
+    let (_, token) = store
+        .registry
+        .snapshot_with_token(job_id)
+        .map_err(registry_ipc_error)?;
+    store
+        .registry
+        .try_transition_status_with(&token, next_status, mutate)
+        .map_err(registry_ipc_error)
+        .and_then(|result| result.map(|(value, _)| value))
+}
+
+fn fail_job_and_release(store: &StudioStore, job_id: &JobId, message: &str) -> IpcResult<()> {
+    let transition = transition_job_state(store, job_id, RegistryJobStatus::Failed, |state| {
+        commit_failed_job_in_state(state, job_id.as_str(), message)
+    });
+    let release = store.release_dispatch_permit(job_id);
+    match (transition, release) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(transition_error), Ok(())) => Err(transition_error),
+        (Ok(()), Err(release_error)) => Err(release_error),
+        (Err(transition_error), Err(release_error)) => Err(IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            format!(
+                "Task failure projection and dispatch-permit release both failed closed: {}; {}",
+                transition_error.message, release_error.message
+            ),
+        )),
+    }
+}
+
+fn primary_error_with_cleanup(primary: IpcError, cleanup: IpcResult<()>) -> IpcError {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup_error) => IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            format!(
+                "{} Cleanup also failed closed: {}",
+                primary.message, cleanup_error.message
+            ),
+        ),
+    }
+}
+
+fn job_snapshot_update(store: &StudioStore, job_id: &JobId) -> IpcResult<JobSnapshotUpdate> {
+    let registered = store
+        .registry
+        .snapshot(job_id)
+        .map_err(registry_ipc_error)?;
+    let projected = store.projected_job_id()?.as_ref() == Some(job_id);
+    Ok(JobSnapshotUpdate {
+        job_id: job_id.as_str().to_owned(),
+        status: registered.runtime_state.snapshot.job.status,
+        revision: registered.revision,
+        projected,
+        snapshot: registered.runtime_state.snapshot,
     })
 }
 
@@ -5797,26 +6208,21 @@ fn worker_event_presentation(event: &WorkerEvent) -> (Severity, String, String) 
     }
 }
 
-fn project_worker_event(store: &StudioStore, event: &WorkerEvent) -> IpcResult<StudioSnapshot> {
-    let (output_root, policy, evidence) = {
-        let state = lock_store(store)?;
-        if state.snapshot.job.id != event.job_id {
-            return Err(IpcError::new(
-                IpcErrorCode::Conflict,
-                "The worker event belongs to a task other than the active desktop task.",
-            ));
-        }
-        (
-            state.output_root.clone().ok_or_else(|| {
-                IpcError::new(
-                    IpcErrorCode::StateUnavailable,
-                    "The active task has no controlled output root for worker evidence.",
-                )
-            })?,
-            state.snapshot.job.speaker_policy.clone(),
-            state.worker_evidence.clone(),
+fn project_worker_event_in_state(state: &mut AppState, event: &WorkerEvent) -> IpcResult<()> {
+    if state.snapshot.job.id != event.job_id {
+        return Err(IpcError::new(
+            IpcErrorCode::Conflict,
+            "The worker event belongs to a different registered task.",
+        ));
+    }
+    let output_root = state.output_root.clone().ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            "The registered task has no controlled output root for worker evidence.",
         )
-    };
+    })?;
+    let policy = state.snapshot.job.speaker_policy.clone();
+    let evidence = state.worker_evidence.clone();
 
     let prepared_artifact = (event.event_type == "artifact.created")
         .then(|| prepare_artifact_projection(event, &output_root, &policy, &evidence))
@@ -5825,13 +6231,6 @@ fn project_worker_event(store: &StudioStore, event: &WorkerEvent) -> IpcResult<S
         .then(|| validate_review_required_event(event, &output_root, &evidence))
         .transpose()?;
 
-    let mut state = lock_store(store)?;
-    if state.snapshot.job.id != event.job_id {
-        return Err(IpcError::new(
-            IpcErrorCode::Conflict,
-            "The active task changed before the worker event could be projected.",
-        ));
-    }
     match event.event_type.as_str() {
         "job.started" => {
             state.snapshot.job.status = JobStatus::Running;
@@ -5884,7 +6283,7 @@ fn project_worker_event(store: &StudioStore, event: &WorkerEvent) -> IpcResult<S
                     "The artifact event was not verified before projection.",
                 )
             })?;
-            commit_artifact_projection(&mut state, artifact)?;
+            commit_artifact_projection(state, artifact)?;
         }
         "review.required" => {
             let worker_open_count = review_required_count.ok_or_else(|| {
@@ -5915,10 +6314,10 @@ fn project_worker_event(store: &StudioStore, event: &WorkerEvent) -> IpcResult<S
             }
         }
         "review.decision.persisted" => {
-            validate_persisted_human_decision_event(event, &state)?;
+            validate_persisted_human_decision_event(event, state)?;
         }
         "job.completed" => {
-            validate_job_completed_event(event, &state)?;
+            validate_job_completed_event(event, state)?;
             state.snapshot.job.status = JobStatus::Completed;
             state.snapshot.job.progress = 100;
             state.snapshot.system.inference_worker = WorkerStatus::Ready;
@@ -5964,50 +6363,153 @@ fn project_worker_event(store: &StudioStore, event: &WorkerEvent) -> IpcResult<S
         let excess = state.snapshot.events.len() - 512;
         state.snapshot.events.drain(..excess);
     }
-    Ok(state.snapshot.clone())
+    Ok(())
+}
+
+fn project_worker_event(store: &StudioStore, event: &WorkerEvent) -> IpcResult<JobSnapshotUpdate> {
+    let job_id = parse_job_id(&event.job_id)?;
+    let (registered, token) = store
+        .registry
+        .snapshot_with_token(&job_id)
+        .map_err(registry_ipc_error)?;
+    if registered.status == RegistryJobStatus::Registered {
+        return Err(IpcError::new(
+            IpcErrorCode::Conflict,
+            "Worker events cannot mutate a task before job.start acceptance is committed.",
+        ));
+    }
+
+    let mut next_state = registered.runtime_state;
+    project_worker_event_in_state(&mut next_state, event)?;
+    let next_status = registry_status_for_job(next_state.snapshot.job.status);
+    store
+        .registry
+        .transition_status_with(&token, next_status, |state| *state = next_state)
+        .map_err(registry_ipc_error)?;
+    if matches!(
+        next_status,
+        RegistryJobStatus::Completed | RegistryJobStatus::Failed | RegistryJobStatus::Cancelled
+    ) {
+        store.release_dispatch_permit(&job_id)?;
+    }
+    job_snapshot_update(store, &job_id)
 }
 
 fn worker_event_target_ready(store: &StudioStore, job_id: &str) -> IpcResult<bool> {
-    let state = lock_store(store)?;
-    Ok(state.snapshot.job.id == job_id && state.output_root.is_some())
+    let job_id = parse_job_id(job_id)?;
+    match store.registry.snapshot(&job_id) {
+        Ok(snapshot) => Ok(snapshot.status != RegistryJobStatus::Registered
+            && snapshot.runtime_state.output_root.is_some()),
+        Err(RegistryError::UnknownJob { .. }) => Ok(false),
+        Err(error) => Err(registry_ipc_error(error)),
+    }
 }
 
 fn project_worker_failure(
     store: &StudioStore,
     job_ids: &[String],
     message: &str,
-) -> IpcResult<Option<StudioSnapshot>> {
-    let mut state = lock_store(store)?;
-    if !job_ids
-        .iter()
-        .any(|job_id| job_id == &state.snapshot.job.id)
-    {
-        return Ok(None);
+) -> IpcResult<Vec<JobSnapshotUpdate>> {
+    let mut updates = Vec::new();
+    for value in job_ids {
+        let job_id = parse_job_id(value)?;
+        let status = match store.registry.status(&job_id) {
+            Ok(status) => status,
+            Err(RegistryError::UnknownJob { .. }) => continue,
+            Err(error) => return Err(registry_ipc_error(error)),
+        };
+        if matches!(
+            status,
+            RegistryJobStatus::Completed | RegistryJobStatus::Failed | RegistryJobStatus::Cancelled
+        ) {
+            continue;
+        }
+        transition_job_state(store, &job_id, RegistryJobStatus::Failed, |state| {
+            commit_failed_job_in_state(state, value, message)
+        })?;
+        store.release_dispatch_permit(&job_id)?;
+        updates.push(job_snapshot_update(store, &job_id)?);
     }
-    state.snapshot.job.status = JobStatus::Failed;
-    state.snapshot.system.inference_worker = WorkerStatus::Missing;
-    let event_id = format!("worker-failure-{}", state.snapshot.events.len() + 1);
-    let sequence = state
-        .snapshot
-        .events
-        .last()
-        .map_or(0, |event| event.sequence.saturating_add(1));
-    state.snapshot.events.push(StudioEvent {
-        id: event_id,
-        sequence,
-        event_type: "job.failed".to_owned(),
-        stage_id: None,
-        severity: Severity::Error,
-        timestamp: "Worker supervisor".to_owned(),
-        title: "Local worker failed closed".to_owned(),
-        detail: message.to_owned(),
-    });
-    Ok(Some(state.snapshot.clone()))
+    Ok(updates)
 }
 
 #[tauri::command]
 fn get_snapshot(state: State<'_, StudioStore>) -> IpcResult<StudioSnapshot> {
-    Ok(lock_store(&state)?.snapshot.clone())
+    Ok(state
+        .projected_state()?
+        .map(|state| state.snapshot)
+        .unwrap_or_else(|| state.draft_snapshot.clone()))
+}
+
+#[tauri::command]
+fn get_job_snapshot(state: State<'_, StudioStore>, job_id: String) -> IpcResult<StudioSnapshot> {
+    let job_id = parse_job_id(&job_id)?;
+    Ok(job_state(&state, &job_id)?.snapshot)
+}
+
+async fn runtime_status(
+    state: &StudioStore,
+    worker: &WorkerSupervisor,
+    job_id: &JobId,
+) -> IpcResult<JobRuntimeStatus> {
+    let snapshot = state
+        .registry
+        .snapshot(job_id)
+        .map_err(registry_ipc_error)?;
+    let projected = state.projected_job_id()?.as_ref() == Some(job_id);
+    let dispatcher = state
+        .registry
+        .dispatcher_snapshot()
+        .map_err(registry_ipc_error)?;
+    let worker_event_route_registered = worker.routes_job_events(job_id.as_str()).await;
+    let cancellable = matches!(
+        snapshot.status,
+        RegistryJobStatus::Queued | RegistryJobStatus::Running | RegistryJobStatus::ReviewRequired
+    ) && worker_event_route_registered;
+    Ok(JobRuntimeStatus {
+        job_id: job_id.as_str().to_owned(),
+        status: snapshot.runtime_state.snapshot.job.status,
+        revision: snapshot.revision,
+        accepted_by_worker: snapshot.runtime_state.worker_accepted,
+        projected,
+        in_flight: dispatcher
+            .active_job_ids
+            .iter()
+            .any(|active| active == job_id),
+        worker_event_route_registered,
+        cancellable,
+        volatile_only: true,
+    })
+}
+
+#[tauri::command]
+async fn get_job_status(
+    state: State<'_, StudioStore>,
+    worker: State<'_, WorkerSupervisor>,
+    job_id: String,
+) -> IpcResult<JobRuntimeStatus> {
+    let job_id = parse_job_id(&job_id)?;
+    runtime_status(&state, &worker, &job_id).await
+}
+
+#[tauri::command]
+async fn list_jobs(
+    state: State<'_, StudioStore>,
+    worker: State<'_, WorkerSupervisor>,
+) -> IpcResult<Vec<JobRuntimeStatus>> {
+    let job_ids = state.registry.job_ids().map_err(registry_ipc_error)?;
+    let mut statuses = Vec::with_capacity(job_ids.len());
+    for job_id in job_ids {
+        statuses.push(runtime_status(&state, &worker, &job_id).await?);
+    }
+    Ok(statuses)
+}
+
+#[tauri::command]
+fn select_job(state: State<'_, StudioStore>, job_id: String) -> IpcResult<StudioSnapshot> {
+    let job_id = parse_job_id(&job_id)?;
+    state.select_job(&job_id)?;
+    Ok(job_state(&state, &job_id)?.snapshot)
 }
 
 #[tauri::command]
@@ -6017,43 +6519,134 @@ async fn create_job(
     gate: State<'_, JobCommandGate>,
     request: CreateJobRequest,
 ) -> IpcResult<CreateJobResult> {
-    let _command_guard = gate.0.lock().await;
     let prepared = prepare_job(request)?;
-    let job_id = next_job_id();
+    let candidate_job_id = parse_job_id(&next_job_id())?;
+    let idempotency_key = IdempotencyKey::new(
+        prepared
+            .idempotency_key
+            .clone()
+            .unwrap_or_else(|| format!("auto:{}", candidate_job_id.as_str())),
+    )
+    .map_err(registry_ipc_error)?;
+    let request_fingerprint = prepared_job_fingerprint(&prepared)?;
     let worker_output_directory =
-        derive_worker_output_directory(&prepared.output_directory, &job_id)?;
-    let payload = build_job_start_payload(&prepared, &job_id, &worker_output_directory)?;
+        derive_worker_output_directory(&prepared.output_directory, candidate_job_id.as_str())?;
+    let runtime_state = build_registered_job_state(
+        &prepared,
+        candidate_job_id.as_str(),
+        worker_output_directory.clone(),
+        request_fingerprint.clone(),
+    )?;
+    let payload = build_job_start_payload(
+        &prepared,
+        candidate_job_id.as_str(),
+        &worker_output_directory,
+    )?;
+    let candidate_gate = gate.for_job(&candidate_job_id)?;
+    let _candidate_guard = candidate_gate.lock().await;
+    let registration = match state.registry.register_or_get(
+        candidate_job_id.clone(),
+        idempotency_key,
+        runtime_state,
+    ) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let primary = registry_ipc_error(error);
+            let cleanup =
+                state.discard_gate_if_unpublished(&gate, &candidate_job_id, &candidate_gate);
+            return Err(primary_error_with_cleanup(primary, cleanup));
+        }
+    };
+    if let RegisterOutcome::Existing { job_id, .. } = registration {
+        state.discard_gate_if_unpublished(&gate, &candidate_job_id, &candidate_gate)?;
+        let existing = state
+            .registry
+            .snapshot(&job_id)
+            .map_err(registry_ipc_error)?;
+        if existing.runtime_state.request_fingerprint != request_fingerprint {
+            return Err(IpcError::new(
+                IpcErrorCode::Conflict,
+                "The idempotency key is already bound to a different normalized task request.",
+            ));
+        }
+        state.select_job(&job_id)?;
+        let status = existing.runtime_state.snapshot.job.status;
+        return Ok(CreateJobResult {
+            accepted: existing.runtime_state.worker_accepted,
+            job_id: job_id.as_str().to_owned(),
+            replayed: true,
+            status,
+            message: "The idempotency key already exists in this volatile desktop session; job.start was not replayed.".to_owned(),
+        });
+    }
+    let job_id = registration.job_id().clone();
+    debug_assert_eq!(job_id, candidate_job_id);
+    if let Err(error) = state.select_job(&job_id) {
+        let cleanup = fail_job_and_release(&state, &job_id, &error.message);
+        return Err(primary_error_with_cleanup(error, cleanup));
+    }
+    let permit = match state.registry.try_acquire_dispatch(&job_id) {
+        Ok(permit) => permit,
+        Err(error) => {
+            let message = format!(
+                "The task was registered but not dispatched because the volatile desktop in-flight limit was reached: {error}"
+            );
+            let primary = registry_ipc_error(error);
+            let cleanup = fail_job_and_release(&state, &job_id, &message);
+            return Err(primary_error_with_cleanup(primary, cleanup));
+        }
+    };
+    if let Err(error) = state.hold_dispatch_permit(job_id.clone(), permit) {
+        let cleanup = fail_job_and_release(&state, &job_id, &error.message);
+        return Err(primary_error_with_cleanup(error, cleanup));
+    }
 
-    let response = worker
+    let response = match worker
         .request("job.start", payload, ResponseKind::Accepted)
         .await
-        .map_err(|error| worker_ipc_error("Unable to start the task", error))?;
-    if let Err(error) = validate_start_accepted(&response, &job_id) {
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let ipc_error = worker_ipc_error("Unable to start the task", error);
+            let cleanup = fail_job_and_release(&state, &job_id, &ipc_error.message);
+            return Err(primary_error_with_cleanup(ipc_error, cleanup));
+        }
+    };
+    if let Err(error) = validate_start_accepted(&response, job_id.as_str()) {
         worker
             .fail_closed(format!(
                 "The accepted job.start response failed desktop semantic validation: {}",
                 error.message
             ))
             .await;
-        return Err(error);
+        let cleanup = fail_job_and_release(&state, &job_id, &error.message);
+        return Err(primary_error_with_cleanup(error, cleanup));
     }
 
-    let mut store = lock_store(&state)?;
-    commit_accepted_job_in_state(
-        &mut store,
-        prepared,
-        job_id,
-        worker_output_directory,
-    )
-    .map_err(|error| {
-        IpcError::new(
-            error.code,
-            format!(
-                "The worker explicitly accepted the task, but the desktop could not commit local state. To prevent duplicate work, it will never automatically replay job.start: {}",
-                error.message
-            ),
-        )
-    })
+    let result = match transition_job_state(&state, &job_id, RegistryJobStatus::Queued, |runtime| {
+        commit_accepted_job_in_state(runtime, job_id.as_str())
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            let primary = IpcError::new(
+                error.code,
+                format!(
+                    "The worker explicitly accepted the task, but the desktop could not commit local state. To prevent duplicate work, it will never automatically replay job.start: {}",
+                    error.message
+                ),
+            );
+            worker
+                .fail_closed(format!(
+                    "job.start was accepted for {}, but desktop state acceptance could not be committed: {}",
+                    job_id.as_str(),
+                    primary.message
+                ))
+                .await;
+            let cleanup = fail_job_and_release(&state, &job_id, &primary.message);
+            return Err(primary_error_with_cleanup(primary, cleanup));
+        }
+    };
+    Ok(result)
 }
 
 #[tauri::command]
@@ -6063,19 +6656,48 @@ async fn cancel_job(
     gate: State<'_, JobCommandGate>,
     job_id: String,
 ) -> IpcResult<()> {
-    let _command_guard = gate.0.lock().await;
-    {
-        let store = lock_store(&state)?;
-        validate_current_job(&store, &job_id)?;
+    let job_id = parse_job_id(&job_id)?;
+    let command_gate = gate.for_job(&job_id)?;
+    let _command_guard = command_gate.lock().await;
+    let registered = state
+        .registry
+        .snapshot(&job_id)
+        .map_err(registry_ipc_error)?;
+    match registered.status {
+        RegistryJobStatus::Cancelled => return Ok(()),
+        RegistryJobStatus::Completed | RegistryJobStatus::Failed => {
+            return Err(IpcError::new(
+                IpcErrorCode::Conflict,
+                "A completed or failed task cannot be cancelled.",
+            ));
+        }
+        RegistryJobStatus::Registered => {
+            return Err(IpcError::new(
+                IpcErrorCode::Conflict,
+                "The task is registered but job.start acceptance is not committed yet.",
+            ));
+        }
+        RegistryJobStatus::Queued
+        | RegistryJobStatus::Running
+        | RegistryJobStatus::ReviewRequired => {}
+    }
+    if !worker.routes_job_events(job_id.as_str()).await {
+        return Err(IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            "The current worker generation has no verified event route for this task; cancellation cannot be claimed.",
+        ));
     }
 
     let mut payload = Map::new();
-    payload.insert("jobId".to_owned(), Value::String(job_id.clone()));
+    payload.insert(
+        "jobId".to_owned(),
+        Value::String(job_id.as_str().to_owned()),
+    );
     let response = worker
         .request("job.cancel", payload, ResponseKind::Accepted)
         .await
         .map_err(|error| worker_ipc_error("Unable to cancel the task", error))?;
-    let status = match validate_cancel_accepted(&response, &job_id) {
+    let status = match validate_cancel_accepted(&response, job_id.as_str()) {
         Ok(status) => status,
         Err(error) => {
             worker
@@ -6096,8 +6718,31 @@ async fn cancel_job(
         ));
     }
 
-    let mut store = lock_store(&state)?;
-    commit_cancelled_job_in_state(&mut store, &job_id)
+    if let Err(error) =
+        transition_job_state(&state, &job_id, RegistryJobStatus::Cancelled, |runtime| {
+            commit_cancelled_job_in_state(runtime, job_id.as_str())
+        })
+    {
+        worker
+            .fail_closed(format!(
+                "job.cancel was accepted for {}, but desktop cancellation state could not be committed: {}",
+                job_id.as_str(),
+                error.message
+            ))
+            .await;
+        return Err(error);
+    }
+    if let Err(error) = state.release_dispatch_permit(&job_id) {
+        worker
+            .fail_closed(format!(
+                "job.cancel was committed for {}, but the dispatch permit could not be released: {}",
+                job_id.as_str(),
+                error.message
+            ))
+            .await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -6107,11 +6752,15 @@ async fn update_speaker(
     gate: State<'_, JobCommandGate>,
     request: UpdateSpeakerRequest,
 ) -> IpcResult<SpeakerProfile> {
-    let _command_guard = gate.0.lock().await;
-    let prepared = {
-        let store = lock_store(&state)?;
-        prepare_speaker_rename(&store, request)?
-    };
+    let job_id = state.projected_job_id()?.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            "No task is selected for the speaker mutation.",
+        )
+    })?;
+    let command_gate = gate.for_job(&job_id)?;
+    let _command_guard = command_gate.lock().await;
+    let prepared = prepare_speaker_rename(&job_state(&state, &job_id)?, request)?;
     let response = worker
         .request(
             "speaker.rename",
@@ -6176,10 +6825,12 @@ async fn update_speaker(
             return Err(error);
         }
     };
-    let reconciliation = {
-        let store = lock_store(&state)?;
-        reconcile_mutation_files(&store, &prepared.job_id, &receipt, &queue)
-    };
+    let reconciliation = reconcile_mutation_files(
+        &job_state(&state, &job_id)?,
+        &prepared.job_id,
+        &receipt,
+        &queue,
+    );
     let reconciled = match reconciliation {
         Ok(reconciled) => reconciled,
         Err(error) => {
@@ -6193,10 +6844,9 @@ async fn update_speaker(
         }
     };
 
-    let committed = {
-        let mut store = lock_store(&state)?;
-        commit_speaker_rename_in_state(&mut store, &prepared, &receipt, reconciled)
-    };
+    let committed = mutate_job_state(&state, &job_id, |runtime| {
+        commit_speaker_rename_in_state(runtime, &prepared, &receipt, reconciled)
+    });
     match committed {
         Ok(speaker) => Ok(speaker),
         Err(error) => {
@@ -6224,11 +6874,15 @@ async fn apply_review_decision(
     gate: State<'_, JobCommandGate>,
     decision: ReviewDecision,
 ) -> IpcResult<ReviewSegment> {
-    let _command_guard = gate.0.lock().await;
-    let prepared = {
-        let store = lock_store(&state)?;
-        prepare_review_mutation(&store, decision)?
-    };
+    let job_id = state.projected_job_id()?.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::StateUnavailable,
+            "No task is selected for the review mutation.",
+        )
+    })?;
+    let command_gate = gate.for_job(&job_id)?;
+    let _command_guard = command_gate.lock().await;
+    let prepared = prepare_review_mutation(&job_state(&state, &job_id)?, decision)?;
     let response = worker
         .request(
             "review.submit",
@@ -6293,10 +6947,12 @@ async fn apply_review_decision(
             return Err(error);
         }
     };
-    let reconciliation = {
-        let store = lock_store(&state)?;
-        reconcile_mutation_files(&store, &prepared.job_id, &receipt, &queue)
-    };
+    let reconciliation = reconcile_mutation_files(
+        &job_state(&state, &job_id)?,
+        &prepared.job_id,
+        &receipt,
+        &queue,
+    );
     let reconciled = match reconciliation {
         Ok(reconciled) => reconciled,
         Err(error) => {
@@ -6310,10 +6966,9 @@ async fn apply_review_decision(
         }
     };
 
-    let committed = {
-        let mut store = lock_store(&state)?;
-        commit_review_mutation_in_state(&mut store, &prepared, &receipt, reconciled)
-    };
+    let committed = mutate_job_state(&state, &job_id, |runtime| {
+        commit_review_mutation_in_state(runtime, &prepared, &receipt, reconciled)
+    });
     match committed {
         Ok(review) => Ok(review),
         Err(error) => {
@@ -6339,8 +6994,7 @@ fn open_artifact(
     state: State<'_, StudioStore>,
     artifact_id: String,
 ) -> IpcResult<ArtifactOpenResult> {
-    let store = lock_store(&state)?;
-    open_artifact_in_state(&store, &artifact_id)
+    open_artifact_in_state(&projected_state(&state)?, &artifact_id)
 }
 
 fn default_strategies() -> Vec<ModelStrategy> {
@@ -6596,13 +7250,9 @@ fn default_snapshot() -> StudioSnapshot {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(StudioStore(Mutex::new(AppState {
-            snapshot: default_snapshot(),
-            output_root: None,
-            worker_evidence: WorkerEvidenceLedger::default(),
-        })))
+        .manage(StudioStore::new())
         .manage(WorkerSupervisor::new())
-        .manage(JobCommandGate(tokio::sync::Mutex::new(())))
+        .manage(JobCommandGate::default())
         .setup(|app| {
             let supervisor = app.state::<WorkerSupervisor>().inner().clone();
             let projection_supervisor = supervisor.clone();
@@ -6612,36 +7262,70 @@ pub fn run() {
                 loop {
                     match worker_events.recv().await {
                         Ok(WorkerNotification::Event(event)) => {
-                            let mut target_ready = false;
-                            for _ in 0..200 {
-                                let ready = {
-                                    let store = app_handle.state::<StudioStore>();
-                                    worker_event_target_ready(store.inner(), &event.job_id)
-                                };
-                                match ready {
-                                    Ok(true) => {
-                                        target_ready = true;
-                                        break;
-                                    }
-                                    Ok(false) => {
-                                        tokio::time::sleep(std::time::Duration::from_millis(5))
-                                            .await;
-                                    }
+                            let job_id = match parse_job_id(&event.job_id) {
+                                Ok(job_id) => job_id,
+                                Err(error) => {
+                                    projection_supervisor
+                                        .fail_closed(format!(
+                                            "Worker event contained an invalid desktop job identity: {}",
+                                            error.message
+                                        ))
+                                        .await;
+                                    continue;
+                                }
+                            };
+                            let command_gate = {
+                                let gates = app_handle.state::<JobCommandGate>();
+                                match gates.inner().for_job(&job_id) {
+                                    Ok(command_gate) => command_gate,
                                     Err(error) => {
                                         projection_supervisor
                                             .fail_closed(format!(
-                                                "Worker event target-state validation failed: {}",
+                                                "Worker event command-gate lookup failed: {}",
                                                 error.message
                                             ))
                                             .await;
-                                        break;
+                                        continue;
                                     }
                                 }
+                            };
+                            let _command_guard = command_gate.lock().await;
+                            let target_ready = {
+                                let store = app_handle.state::<StudioStore>();
+                                worker_event_target_ready(store.inner(), &event.job_id)
+                            };
+                            match target_ready {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    projection_supervisor
+                                        .fail_closed(format!(
+                                            "Worker event {} could not be associated with a committed registered desktop task.",
+                                            event.event_id
+                                        ))
+                                        .await;
+                                    continue;
+                                }
+                                Err(error) => {
+                                    projection_supervisor
+                                        .fail_closed(format!(
+                                            "Worker event target-state validation failed: {}",
+                                            error.message
+                                        ))
+                                        .await;
+                                    continue;
+                                }
                             }
-                            if !target_ready {
+                            if !projection_supervisor
+                                .routes_job_events(job_id.as_str())
+                                .await
+                                && !matches!(
+                                    event.event_type.as_str(),
+                                    "job.completed" | "job.failed" | "job.cancelled"
+                                )
+                            {
                                 projection_supervisor
                                     .fail_closed(format!(
-                                        "Worker event {} could not be associated with a committed active desktop task.",
+                                        "Worker event {} lost its generation-scoped route before desktop projection.",
                                         event.event_id
                                     ))
                                     .await;
@@ -6652,13 +7336,22 @@ pub fn run() {
                                 project_worker_event(store.inner(), &event)
                             };
                             match projection {
-                                Ok(snapshot) => {
-                                    if let Err(error) =
-                                        app_handle.emit("snapshot-updated", snapshot)
+                                Ok(update) => {
+                                    if let Err(error) = app_handle
+                                        .emit("job-snapshot-updated", update.clone())
                                     {
                                         eprintln!(
-                                            "Unable to emit projected worker snapshot: {error}"
+                                            "Unable to emit targeted worker snapshot: {error}"
                                         );
+                                    }
+                                    if update.projected {
+                                        if let Err(error) =
+                                            app_handle.emit("snapshot-updated", update.snapshot)
+                                        {
+                                            eprintln!(
+                                                "Unable to emit projected worker snapshot: {error}"
+                                            );
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -6678,26 +7371,67 @@ pub fn run() {
                         }) => {
                             let message =
                                 format!("Worker generation {generation} failed closed: {message}");
-                            let snapshot = {
-                                let store = app_handle.state::<StudioStore>();
-                                project_worker_failure(store.inner(), &job_ids, &message)
-                            };
-                            match snapshot {
-                                Ok(Some(snapshot)) => {
-                                    if let Err(error) =
-                                        app_handle.emit("snapshot-updated", snapshot)
+                            for job_id_value in job_ids {
+                                let job_id = match parse_job_id(&job_id_value) {
+                                    Ok(job_id) => job_id,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Unable to parse failed worker task identity: {}",
+                                            error.message
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let command_gate = {
+                                    let gates = app_handle.state::<JobCommandGate>();
+                                    match gates.inner().for_job(&job_id) {
+                                        Ok(command_gate) => command_gate,
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Unable to acquire failed task command gate: {}",
+                                                error.message
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                };
+                                let _command_guard = command_gate.lock().await;
+                                let updates = {
+                                    let store = app_handle.state::<StudioStore>();
+                                    project_worker_failure(
+                                        store.inner(),
+                                        std::slice::from_ref(&job_id_value),
+                                        &message,
+                                    )
+                                };
+                                let updates = match updates {
+                                    Ok(updates) => updates,
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Unable to project failed worker generation for {}: {}",
+                                            job_id.as_str(),
+                                            error.message
+                                        );
+                                        continue;
+                                    }
+                                };
+                                for update in updates {
+                                    if let Err(error) = app_handle
+                                        .emit("job-snapshot-updated", update.clone())
                                     {
                                         eprintln!(
-                                            "Unable to emit failed worker snapshot: {error}"
+                                            "Unable to emit targeted failed worker snapshot: {error}"
                                         );
                                     }
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    eprintln!(
-                                        "Unable to project failed worker generation: {}",
-                                        error.message
-                                    );
+                                    if update.projected {
+                                        if let Err(error) =
+                                            app_handle.emit("snapshot-updated", update.snapshot)
+                                        {
+                                            eprintln!(
+                                                "Unable to emit failed projected worker snapshot: {error}"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -6721,6 +7455,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_job_snapshot,
+            get_job_status,
+            list_jobs,
+            select_job,
             create_job,
             cancel_job,
             update_speaker,
@@ -6771,6 +7509,7 @@ mod tests {
         let output = root.join("output");
         fs::create_dir_all(&output).expect("create output");
         CreateJobRequest {
+            idempotency_key: None,
             title: "Dynamic-speaker meeting".to_owned(),
             media_path: media,
             output_directory: output,
@@ -6788,6 +7527,7 @@ mod tests {
             summary: false,
             output_locale: "en".to_owned(),
             business_prompt_version: BUSINESS_PROMPT_VERSION.to_owned(),
+            output_customization: None,
         }
     }
 
@@ -6808,7 +7548,31 @@ mod tests {
             snapshot,
             output_root: None,
             worker_evidence: WorkerEvidenceLedger::default(),
+            request_fingerprint: "test-request".to_owned(),
+            worker_accepted: false,
         }
+    }
+
+    fn registry_test_state(job_id: &str, status: JobStatus) -> AppState {
+        let mut state = state_with_speakers(1);
+        state.snapshot.job.id = job_id.to_owned();
+        state.snapshot.job.status = status;
+        state
+    }
+
+    fn register_store_job(store: &StudioStore, job_id: &str) -> JobId {
+        let job_id = JobId::new(job_id).expect("valid test job id");
+        let outcome = store
+            .registry
+            .register_or_get(
+                job_id.clone(),
+                IdempotencyKey::new(format!("request-{job_id}"))
+                    .expect("valid test idempotency key"),
+                registry_test_state(job_id.as_str(), JobStatus::Registered),
+            )
+            .expect("register test job");
+        assert!(matches!(outcome, RegisterOutcome::Created { .. }));
+        job_id
     }
 
     fn pending_review(id: &str) -> ReviewSegment {
@@ -6850,7 +7614,10 @@ mod tests {
         let prepared = prepare_job(request)?;
         let worker_output_directory =
             derive_worker_output_directory(&prepared.output_directory, job_id)?;
-        commit_accepted_job_in_state(state, prepared, job_id.to_owned(), worker_output_directory)
+        let fingerprint = prepared_job_fingerprint(&prepared)?;
+        *state =
+            build_registered_job_state(&prepared, job_id, worker_output_directory, fingerprint)?;
+        commit_accepted_job_in_state(state, job_id)
     }
 
     fn worker_response(kind: ResponseKind, job_id: &str, status: &str) -> WorkerResponse {
@@ -7514,7 +8281,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_and_unsupported_media() {
+    fn rejects_missing_media_and_defers_format_support_to_content_probe() {
         let root = temp_workspace("bad-media");
         let mut missing = valid_manual_request(&root, 3);
         missing.media_path = root.join("missing.mov");
@@ -7525,15 +8292,14 @@ mod tests {
             IpcErrorCode::NotFound
         ));
 
-        let mut unsupported = valid_manual_request(&root, 3);
-        unsupported.media_path = root.join("meeting.exe");
-        File::create(&unsupported.media_path).expect("create unsupported media");
-        assert!(matches!(
-            prepare_job(unsupported)
-                .expect_err("unsupported media must fail")
-                .code,
-            IpcErrorCode::InvalidPath
-        ));
+        for name in ["meeting.uncommon", "extensionless"] {
+            let mut content_probed = valid_manual_request(&root, 3);
+            content_probed.media_path = root.join(name);
+            File::create(&content_probed.media_path).expect("create media candidate");
+            let prepared = prepare_job(content_probed)
+                .expect("native intake must defer format support to the worker content probe");
+            assert!(prepared.media_path.is_file());
+        }
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -7627,6 +8393,143 @@ mod tests {
             "speakerLabels": []
         });
         assert!(serde_json::from_value::<CreateJobRequest>(unknown_field).is_err());
+    }
+
+    #[test]
+    fn output_customization_serde_accepts_only_json_objects() {
+        let root = temp_workspace("output-customization-serde");
+        let base =
+            serde_json::to_value(valid_manual_request(&root, 3)).expect("serialize valid request");
+        assert!(
+            base.get("outputCustomization").is_none(),
+            "an absent customization must stay absent rather than serialize as null"
+        );
+
+        let expected = Map::from_iter([
+            (
+                "reportStyle".to_owned(),
+                Value::String("editorial".to_owned()),
+            ),
+            (
+                "subtitle".to_owned(),
+                serde_json::json!({
+                    "preset": "youtube",
+                    "fontSize": 48,
+                    "burnIn": true
+                }),
+            ),
+        ]);
+        let mut valid = base.clone();
+        valid.as_object_mut().expect("request object").insert(
+            "outputCustomization".to_owned(),
+            Value::Object(expected.clone()),
+        );
+        let request =
+            serde_json::from_value::<CreateJobRequest>(valid).expect("object must deserialize");
+        assert_eq!(request.output_customization.as_ref(), Some(&expected));
+
+        for invalid in [
+            Value::Null,
+            Value::Array(Vec::new()),
+            Value::String("editorial".to_owned()),
+            Value::from(1),
+            Value::Bool(true),
+        ] {
+            let mut candidate = base.clone();
+            candidate
+                .as_object_mut()
+                .expect("request object")
+                .insert("outputCustomization".to_owned(), invalid);
+            assert!(
+                serde_json::from_value::<CreateJobRequest>(candidate).is_err(),
+                "non-object outputCustomization must fail closed"
+            );
+        }
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn output_customization_is_forwarded_exactly_and_omitted_when_absent() {
+        let root = temp_workspace("output-customization-payload");
+        let expected = Map::from_iter([
+            (
+                "pdf".to_owned(),
+                serde_json::json!({
+                    "theme": "aurora",
+                    "fontFamily": "Noto Sans CJK SC",
+                    "qualityGate": {
+                        "enabled": true,
+                        "minimumScore": 92
+                    }
+                }),
+            ),
+            (
+                "subtitles".to_owned(),
+                serde_json::json!([
+                    {"format": "srt"},
+                    {"format": "ass", "preset": "youtube"}
+                ]),
+            ),
+        ]);
+        let mut request = valid_manual_request(&root, 3);
+        request.output_customization = Some(expected.clone());
+        let prepared = prepare_job(request).expect("prepare customization request");
+        let worker_output =
+            derive_worker_output_directory(&prepared.output_directory, "job-custom-output")
+                .expect("derive worker output");
+        let payload = build_job_start_payload(&prepared, "job-custom-output", &worker_output)
+            .expect("build worker payload");
+        assert_eq!(
+            payload.get("outputCustomization"),
+            Some(&Value::Object(expected))
+        );
+
+        let without_customization =
+            prepare_job(valid_manual_request(&root, 3)).expect("prepare default request");
+        let default_output =
+            derive_worker_output_directory(&without_customization.output_directory, "job-default")
+                .expect("derive default worker output");
+        let default_payload =
+            build_job_start_payload(&without_customization, "job-default", &default_output)
+                .expect("build default worker payload");
+        assert!(!default_payload.contains_key("outputCustomization"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn output_customization_participates_in_idempotency_fingerprint() {
+        let root = temp_workspace("output-customization-fingerprint");
+        let base = prepare_job(valid_manual_request(&root, 3)).expect("prepare base request");
+        let base_fingerprint = prepared_job_fingerprint(&base).expect("base fingerprint");
+
+        let mut customized_request = valid_manual_request(&root, 3);
+        customized_request.output_customization = Some(Map::from_iter([(
+            "pdf".to_owned(),
+            serde_json::json!({"theme": "aurora"}),
+        )]));
+        let customized = prepare_job(customized_request).expect("prepare customized request");
+        let customized_fingerprint =
+            prepared_job_fingerprint(&customized).expect("customized fingerprint");
+
+        assert_ne!(base_fingerprint, customized_fingerprint);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn output_customization_rejects_payloads_over_ipc_limit() {
+        let root = temp_workspace("output-customization-limit");
+        let mut request = valid_manual_request(&root, 3);
+        request.output_customization = Some(Map::from_iter([(
+            "oversized".to_owned(),
+            Value::String("x".repeat(MAX_OUTPUT_CUSTOMIZATION_BYTES)),
+        )]));
+
+        let error = prepare_job(request).expect_err("oversized customization must fail");
+        assert!(matches!(error.code, IpcErrorCode::InvalidRequest));
+        assert!(error.message.contains("IPC limit"));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
@@ -7908,6 +8811,132 @@ mod tests {
             );
         }
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn command_gates_are_stable_per_job_and_independent_across_jobs() {
+        let gates = JobCommandGate::default();
+        let job_a = JobId::new("job-a").expect("job a");
+        let job_b = JobId::new("job-b").expect("job b");
+        let first_a = gates.for_job(&job_a).expect("first job a gate");
+        let second_a = gates.for_job(&job_a).expect("second job a gate");
+        let first_b = gates.for_job(&job_b).expect("job b gate");
+
+        assert!(Arc::ptr_eq(&first_a, &second_a));
+        assert!(!Arc::ptr_eq(&first_a, &first_b));
+        let guard_a = first_a.lock().await;
+        assert!(
+            second_a.try_lock().is_err(),
+            "same-job commands must serialize"
+        );
+        let guard_b = first_b
+            .try_lock()
+            .expect("different-job commands must remain independent");
+        drop((guard_b, guard_a));
+        let _second_guard = second_a
+            .try_lock()
+            .expect("same-job gate must become available after release");
+    }
+
+    #[test]
+    fn replay_candidate_gates_are_discarded_without_removing_published_job_gates() {
+        let store = StudioStore::new();
+        let gates = JobCommandGate::default();
+        let unpublished = JobId::new("job-unpublished").expect("unpublished job");
+        let unpublished_gate = gates.for_job(&unpublished).expect("candidate gate");
+        store
+            .discard_gate_if_unpublished(&gates, &unpublished, &unpublished_gate)
+            .expect("discard unpublished gate");
+        assert!(!gates
+            .0
+            .lock()
+            .expect("gate registry")
+            .contains_key(&unpublished));
+
+        let published = register_store_job(&store, "job-published");
+        let published_gate = gates.for_job(&published).expect("published gate");
+        store
+            .discard_gate_if_unpublished(&gates, &published, &published_gate)
+            .expect("published gate must be retained");
+        let retained = gates
+            .for_job(&published)
+            .expect("retained published command gate");
+        assert!(Arc::ptr_eq(&published_gate, &retained));
+    }
+
+    #[test]
+    fn dispatch_ledger_conflict_preserves_existing_permit_and_releases_rejected_one() {
+        let store = StudioStore::new();
+        let job_a = register_store_job(&store, "job-a");
+        let job_b = register_store_job(&store, "job-b");
+        let permit_a = store
+            .registry
+            .try_acquire_dispatch(&job_a)
+            .expect("job a permit");
+        store
+            .hold_dispatch_permit(job_a.clone(), permit_a)
+            .expect("hold job a permit");
+        let permit_b = store
+            .registry
+            .try_acquire_dispatch(&job_b)
+            .expect("job b permit");
+
+        let error = store
+            .hold_dispatch_permit(job_a.clone(), permit_b)
+            .expect_err("occupied ledger key must reject a replacement");
+        assert!(matches!(error.code, IpcErrorCode::Conflict));
+        let dispatcher = store
+            .registry
+            .dispatcher_snapshot()
+            .expect("dispatcher snapshot");
+        assert_eq!(dispatcher.in_use, 1);
+        assert_eq!(dispatcher.active_job_ids, vec![job_a.clone()]);
+        assert!(store
+            .dispatch_permits
+            .lock()
+            .expect("dispatch ledger")
+            .contains_key(&job_a));
+
+        store
+            .release_dispatch_permit(&job_a)
+            .expect("release retained permit");
+        assert_eq!(
+            store
+                .registry
+                .dispatcher_snapshot()
+                .expect("released dispatcher snapshot")
+                .in_use,
+            0
+        );
+    }
+
+    #[test]
+    fn worker_acceptance_history_survives_later_failure() {
+        let store = StudioStore::new();
+        let job_id = register_store_job(&store, "job-accepted-history");
+        let registered = store
+            .registry
+            .snapshot(&job_id)
+            .expect("registered snapshot");
+        assert!(!registered.runtime_state.worker_accepted);
+        assert_eq!(registered.status, RegistryJobStatus::Registered);
+
+        transition_job_state(&store, &job_id, RegistryJobStatus::Queued, |runtime| {
+            commit_accepted_job_in_state(runtime, job_id.as_str())
+        })
+        .expect("commit worker acceptance");
+        let accepted = store.registry.snapshot(&job_id).expect("accepted snapshot");
+        assert!(accepted.runtime_state.worker_accepted);
+        assert_eq!(accepted.status, RegistryJobStatus::Queued);
+
+        transition_job_state(&store, &job_id, RegistryJobStatus::Failed, |runtime| {
+            commit_failed_job_in_state(runtime, job_id.as_str(), "controlled later failure")
+        })
+        .expect("commit later failure");
+        let failed = store.registry.snapshot(&job_id).expect("failed snapshot");
+        assert!(failed.runtime_state.worker_accepted);
+        assert_eq!(failed.status, RegistryJobStatus::Failed);
+        assert_eq!(failed.runtime_state.snapshot.job.status, JobStatus::Failed);
     }
 
     #[test]
@@ -8838,6 +9867,8 @@ mod tests {
             snapshot: default_snapshot(),
             output_root: Some(root.clone()),
             worker_evidence: WorkerEvidenceLedger::default(),
+            request_fingerprint: "test-request".to_owned(),
+            worker_accepted: false,
         };
         assert!(matches!(
             open_artifact_in_state(&state, "missing")
@@ -8873,6 +9904,8 @@ mod tests {
             snapshot,
             output_root: Some(prepared.output_directory),
             worker_evidence: WorkerEvidenceLedger::default(),
+            request_fingerprint: "test-request".to_owned(),
+            worker_accepted: false,
         };
         let result = open_artifact_in_state(&state, "artifact-pdf").expect("safe artifact");
         assert_eq!(

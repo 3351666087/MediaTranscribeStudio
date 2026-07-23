@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from backend import (
     JobCancelled,
     JsonlEmitter,
     LocalLLMProvider,
     MappingLocalLLMProvider,
     PathPolicy,
+    WorkerError,
     WorkerProtocol,
     WorkerService,
 )
@@ -22,6 +25,7 @@ from test_worker_support import (
     FakeTranscriptionAdapter,
     result_mapping,
 )
+from test_output_recipe import recipe_payload
 
 
 def _service(
@@ -94,6 +98,55 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
         assert request.business_config.output_locale == "en-US"
         assert request.language == "ja-JP"
         assert request.local_llm_endpoint == "http://127.0.0.1:11434"
+        service.shutdown()
+
+
+def test_start_payload_accepts_strict_output_recipe_and_derives_pdf() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+        )
+        request = service.parse_start_payload(
+            {
+                "jobId": "output-recipe-parse",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "outputCustomization": recipe_payload(),
+            }
+        )
+
+        assert request.output_recipe is not None
+        assert request.output_recipe.render_pdf
+        assert request.render_pdf
+        service.shutdown()
+
+
+def test_start_payload_rejects_render_pdf_recipe_conflict() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+        )
+        with pytest.raises(WorkerError) as raised:
+            service.parse_start_payload(
+                {
+                    "jobId": "output-recipe-conflict",
+                    "sourcePath": "source.wav",
+                    "outputDirectory": "job",
+                    "speakerCountMode": "manual",
+                    "speakerCount": 1,
+                    "renderPdf": False,
+                    "outputCustomization": recipe_payload(),
+                }
+            )
+
+        assert raised.value.code == "INVALID_REQUEST"
+        assert raised.value.details["resolvedRenderPdf"] is True
         service.shutdown()
 
 

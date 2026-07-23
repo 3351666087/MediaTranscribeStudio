@@ -75,6 +75,13 @@ from .runtime_preload import (
     preload_production_runtime,
     production_runtime_modules,
 )
+from .output_recipe import (
+    CompiledOutputCustomization,
+    OutputRecipe,
+    OutputRecipeError,
+    compile_output_customizations,
+    parse_output_recipe,
+)
 from .service import WorkerService
 
 __all__ = [
@@ -128,15 +135,20 @@ __all__ = [
     "UnavailableRendererAdapter",
     "UnavailableTranscriptionAdapter",
     "OllamaLocalProvider",
+    "OutputRecipe",
+    "OutputRecipeError",
+    "CompiledOutputCustomization",
     "WorkerError",
     "WorkerProtocol",
     "WorkerService",
     "apply_offline_environment",
     "build_production_composition",
+    "compile_output_customizations",
     "canonical_speaker_ids",
     "offline_environment",
     "production_diagnostics",
     "preload_production_runtime",
+    "parse_output_recipe",
     "production_runtime_modules",
     "run_jsonl_loop",
     "run_production_preflight",

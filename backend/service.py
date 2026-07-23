@@ -44,6 +44,7 @@ from .models import (
     TranscriptionResult,
     validate_job_id,
 )
+from .output_recipe import OutputRecipeError, parse_output_recipe
 from .paths import PathPolicy
 from .persistence import (
     atomic_write_json,
@@ -180,6 +181,7 @@ class WorkerService:
             "speakerCountBounds",
             "speakerCountPrior",
             "renderPdf",
+            "outputCustomization",
             "title",
             "language",
             "localLlmMode",
@@ -203,9 +205,29 @@ class WorkerService:
         source = self.path_policy.resolve_source(payload.get("sourcePath"))
         output = self.path_policy.resolve_output(payload.get("outputDirectory"))
         policy = SpeakerCountPolicy.from_payload(payload)
+        render_pdf_supplied = "renderPdf" in payload
         render_pdf = payload.get("renderPdf", False)
         if not isinstance(render_pdf, bool):
             raise invalid_request("renderPdf must be a boolean")
+        output_recipe = None
+        if "outputCustomization" in payload:
+            try:
+                output_recipe = parse_output_recipe(
+                    payload["outputCustomization"]
+                )
+            except OutputRecipeError as exc:
+                raise invalid_request(
+                    "outputCustomization is invalid",
+                    reason=str(exc),
+                ) from exc
+            recipe_render_pdf = output_recipe.render_pdf
+            if render_pdf_supplied and render_pdf != recipe_render_pdf:
+                raise invalid_request(
+                    "renderPdf conflicts with outputCustomization",
+                    renderPdf=render_pdf,
+                    resolvedRenderPdf=recipe_render_pdf,
+                )
+            render_pdf = recipe_render_pdf
         title_raw = payload.get("title")
         title = None
         if title_raw is not None:
@@ -317,6 +339,7 @@ class WorkerService:
             local_llm_model=local_llm_model,
             local_llm_endpoint=endpoint,
             business_config=business_config,
+            output_recipe=output_recipe,
         )
 
     def register(self, request: StartJobRequest) -> JobRecord:
@@ -682,6 +705,16 @@ class WorkerService:
                 "outputDirectory": str(record.request.output_directory),
                 "speakerCountPolicy": record.request.speaker_policy.as_dict(),
                 "renderPdf": record.request.render_pdf,
+                "outputCustomization": (
+                    record.request.output_recipe.canonical_dict()
+                    if record.request.output_recipe is not None
+                    else None
+                ),
+                "outputCustomizationSha256": (
+                    record.request.output_recipe.deterministic_hash()
+                    if record.request.output_recipe is not None
+                    else None
+                ),
                 "cancellationRequested": record.cancellation.is_set(),
                 "reviewOpenCount": record.review_open_count,
                 "qualityStatus": record.quality_status,
@@ -1765,6 +1798,18 @@ class WorkerService:
                 "outputDirectory": str(record.request.output_directory),
                 "speakerCountPolicy": record.request.speaker_policy.as_dict(),
                 "language": record.request.language,
+                "outputCustomization": (
+                    {
+                        "sha256": (
+                            record.request.output_recipe.deterministic_hash()
+                        ),
+                        "recipe": (
+                            record.request.output_recipe.canonical_dict()
+                        ),
+                    }
+                    if record.request.output_recipe is not None
+                    else None
+                ),
                 "business": {
                     "status": record.business_status,
                     "config": record.request.business_config.as_dict(),

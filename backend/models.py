@@ -13,6 +13,7 @@ from typing import Any
 from .business_processing import BusinessProcessingConfig
 from .errors import WorkerError, invalid_request
 from .language import normalize_language_tag
+from .output_recipe import OutputRecipe
 
 
 PROTOCOL_VERSION = "1.0.0"
@@ -703,6 +704,7 @@ class StartJobRequest:
     business_config: BusinessProcessingConfig = field(
         default_factory=BusinessProcessingConfig
     )
+    output_recipe: OutputRecipe | None = None
 
 
 @dataclass(frozen=True)

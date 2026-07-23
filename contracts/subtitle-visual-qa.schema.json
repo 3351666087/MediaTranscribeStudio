@@ -1,0 +1,1241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/subtitle-visual-qa/1.0.0",
+  "title": "MediaTranscribeStudio Subtitle Representative-Frame Visual QA",
+  "description": "Deterministic request/result contract for fail-closed visual QA over already-rendered representative frames, subtitle geometry, sampled pixels, font/glyph evidence, speaker colors, and authentic word timing. This contract does not claim that a font is installed or embedded unless SHA-256-bound verification evidence is supplied.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/result"
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^\\S(?:.*\\S)?$"
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9A-Fa-f]{6}$"
+    },
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      }
+    },
+    "fontEvidenceMethod": {
+      "type": "string",
+      "enum": [
+        "not-provided",
+        "renderer-glyph-map",
+        "font-cmap-and-shaping",
+        "directwrite-enumeration",
+        "fontconfig-scan",
+        "libass-render-report",
+        "manual-pixel-audit",
+        "container-font-inspection"
+      ]
+    },
+    "positiveFontEvidenceMethod": {
+      "type": "string",
+      "enum": [
+        "renderer-glyph-map",
+        "font-cmap-and-shaping",
+        "directwrite-enumeration",
+        "fontconfig-scan",
+        "libass-render-report",
+        "manual-pixel-audit",
+        "container-font-inspection"
+      ]
+    },
+    "installationClaim": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "verificationMethod",
+            "evidenceArtifactSha256",
+            "fontArtifactSha256"
+          ],
+          "properties": {
+            "status": {
+              "const": "not-asserted"
+            },
+            "verificationMethod": {
+              "const": "not-provided"
+            },
+            "evidenceArtifactSha256": {
+              "type": "null"
+            },
+            "fontArtifactSha256": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "verificationMethod",
+            "evidenceArtifactSha256",
+            "fontArtifactSha256"
+          ],
+          "properties": {
+            "status": {
+              "const": "verified-installed"
+            },
+            "verificationMethod": {
+              "$ref": "#/$defs/positiveFontEvidenceMethod"
+            },
+            "evidenceArtifactSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "fontArtifactSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "embeddingClaim": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "verificationMethod",
+            "evidenceArtifactSha256",
+            "fontArtifactSha256"
+          ],
+          "properties": {
+            "status": {
+              "const": "not-asserted"
+            },
+            "verificationMethod": {
+              "const": "not-provided"
+            },
+            "evidenceArtifactSha256": {
+              "type": "null"
+            },
+            "fontArtifactSha256": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "verificationMethod",
+            "evidenceArtifactSha256",
+            "fontArtifactSha256"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "verified-embedded",
+                "verified-not-embedded"
+              ]
+            },
+            "verificationMethod": {
+              "$ref": "#/$defs/positiveFontEvidenceMethod"
+            },
+            "evidenceArtifactSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "fontArtifactSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "fontEvidence": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "requestedFamilies",
+        "resolvedFamily",
+        "resolutionVerified",
+        "glyphCoverageVerified",
+        "verificationMethod",
+        "evidenceArtifactSha256",
+        "expectedRenderableCodePoints",
+        "coveredRenderableCodePoints",
+        "missingCodePoints",
+        "tofuGlyphCount",
+        "installation",
+        "embedding"
+      ],
+      "properties": {
+        "requestedFamilies": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "resolvedFamily": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320,
+              "pattern": "^\\S(?:.*\\S)?$"
+            }
+          ]
+        },
+        "resolutionVerified": {
+          "type": "boolean"
+        },
+        "glyphCoverageVerified": {
+          "type": "boolean"
+        },
+        "verificationMethod": {
+          "$ref": "#/$defs/fontEvidenceMethod"
+        },
+        "evidenceArtifactSha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "expectedRenderableCodePoints": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "coveredRenderableCodePoints": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "missingCodePoints": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^U\\+[0-9A-F]{4,6}$"
+          }
+        },
+        "tofuGlyphCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "installation": {
+          "$ref": "#/$defs/installationClaim"
+        },
+        "embedding": {
+          "$ref": "#/$defs/embeddingClaim"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resolutionVerified": {
+                "const": true
+              }
+            },
+            "required": [
+              "resolutionVerified"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolvedFamily": {
+                "type": "string",
+                "minLength": 1
+              },
+              "verificationMethod": {
+                "$ref": "#/$defs/positiveFontEvidenceMethod"
+              },
+              "evidenceArtifactSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "glyphCoverageVerified": {
+                "const": true
+              }
+            },
+            "required": [
+              "glyphCoverageVerified"
+            ]
+          },
+          "then": {
+            "properties": {
+              "verificationMethod": {
+                "$ref": "#/$defs/positiveFontEvidenceMethod"
+              },
+              "evidenceArtifactSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "contrastSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sampleId",
+        "backgroundClass",
+        "foregroundRgb",
+        "backgroundRgb",
+        "foregroundPixelCount",
+        "backgroundPixelCount",
+        "sampledFromRenderedFrame",
+        "sampleArtifactSha256"
+      ],
+      "properties": {
+        "sampleId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "backgroundClass": {
+          "type": "string",
+          "enum": [
+            "dark",
+            "light"
+          ]
+        },
+        "foregroundRgb": {
+          "$ref": "#/$defs/color"
+        },
+        "backgroundRgb": {
+          "$ref": "#/$defs/color"
+        },
+        "foregroundPixelCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000
+        },
+        "backgroundPixelCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000
+        },
+        "sampledFromRenderedFrame": {
+          "type": "boolean"
+        },
+        "sampleArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "cueInstance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cueId",
+        "bounds",
+        "inkBounds",
+        "clippedPixelCount",
+        "edgeTouchingPixelCount",
+        "overflowDetected",
+        "fontEvidence",
+        "contrastSamples"
+      ],
+      "properties": {
+        "cueId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "bounds": {
+          "$ref": "#/$defs/rect"
+        },
+        "inkBounds": {
+          "$ref": "#/$defs/rect"
+        },
+        "clippedPixelCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "edgeTouchingPixelCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "overflowDetected": {
+          "type": "boolean"
+        },
+        "fontEvidence": {
+          "$ref": "#/$defs/fontEvidence"
+        },
+        "contrastSamples": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/contrastSample"
+          }
+        }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "frameId",
+        "timestampMs",
+        "widthPx",
+        "heightPx",
+        "imageSha256",
+        "instances"
+      ],
+      "properties": {
+        "frameId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "timestampMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800000
+        },
+        "widthPx": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 32768
+        },
+        "heightPx": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 32768
+        },
+        "imageSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "instances": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/cueInstance"
+          }
+        }
+      }
+    },
+    "timedWord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "startMs",
+        "endMs"
+      ],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800000
+        },
+        "endMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800000
+        }
+      }
+    },
+    "wordTimingEvidence": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source",
+            "verified",
+            "evidenceArtifactSha256",
+            "cueTextSha256",
+            "words"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "enum": [
+                "forced-aligner",
+                "native-word-timestamps",
+                "human-authored",
+                "segment-interpolation",
+                "synthetic-even-split"
+              ]
+            },
+            "verified": {
+              "type": "boolean"
+            },
+            "evidenceArtifactSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "cueTextSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "words": {
+              "type": "array",
+              "maxItems": 100000,
+              "items": {
+                "$ref": "#/$defs/timedWord"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cueId",
+        "startMs",
+        "endMs",
+        "text",
+        "speakerId",
+        "styleId",
+        "renderedLines",
+        "karaokeMode",
+        "wordTimingEvidence"
+      ],
+      "properties": {
+        "cueId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 604800000
+        },
+        "endMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 604800000
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100000,
+          "pattern": "^\\S(?:.|\\n)*\\S$|^\\S$"
+        },
+        "speakerId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "styleId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "renderedLines": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10000,
+            "pattern": "^\\S(?:.*\\S)?$"
+          }
+        },
+        "karaokeMode": {
+          "type": "string",
+          "enum": [
+            "none",
+            "word-progress"
+          ]
+        },
+        "wordTimingEvidence": {
+          "$ref": "#/$defs/wordTimingEvidence"
+        }
+      }
+    },
+    "speaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "speakerId",
+        "color"
+      ],
+      "properties": {
+        "speakerId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        }
+      }
+    },
+    "safeAreaPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leftRatio",
+        "rightRatio",
+        "topRatio",
+        "bottomRatio"
+      ],
+      "properties": {
+        "leftRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.25
+        },
+        "rightRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.25
+        },
+        "topRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.25
+        },
+        "bottomRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.25
+        }
+      }
+    },
+    "contrastPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimumRatio",
+        "minimumForegroundPixels",
+        "minimumBackgroundPixels",
+        "requiredBackgroundClasses",
+        "darkMaximumLuminance",
+        "lightMinimumLuminance"
+      ],
+      "properties": {
+        "minimumRatio": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 21
+        },
+        "minimumForegroundPixels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "minimumBackgroundPixels": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "requiredBackgroundClasses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "dark",
+              "light"
+            ]
+          }
+        },
+        "darkMaximumLuminance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "lightMinimumLuminance": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "layoutPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxLines",
+        "maxCharactersPerLine",
+        "maxReadingSpeed",
+        "maximumOverlapAreaPx"
+      ],
+      "properties": {
+        "maxLines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6
+        },
+        "maxCharactersPerLine": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 240
+        },
+        "maxReadingSpeed": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "maximumOverlapAreaPx": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "safeArea",
+        "contrast",
+        "layout",
+        "speakerColor",
+        "karaoke"
+      ],
+      "properties": {
+        "safeArea": {
+          "$ref": "#/$defs/safeAreaPolicy"
+        },
+        "contrast": {
+          "$ref": "#/$defs/contrastPolicy"
+        },
+        "layout": {
+          "$ref": "#/$defs/layoutPolicy"
+        },
+        "speakerColor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "minimumDeltaE2000"
+          ],
+          "properties": {
+            "minimumDeltaE2000": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            }
+          }
+        },
+        "karaoke": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requireVerifiedWordTiming"
+          ],
+          "properties": {
+            "requireVerifiedWordTiming": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schemaVersion",
+        "analysisId",
+        "renderArtifact",
+        "policy",
+        "sampling",
+        "speakers",
+        "cues",
+        "frames"
+      ],
+      "properties": {
+        "kind": {
+          "const": "subtitle-visual-qa-request"
+        },
+        "schemaVersion": {
+          "const": "1.0.0"
+        },
+        "analysisId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "renderArtifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifactSha256",
+            "renderer",
+            "rendererVersion",
+            "renderConfigurationSha256"
+          ],
+          "properties": {
+            "artifactSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "renderer": {
+              "$ref": "#/$defs/identifier"
+            },
+            "rendererVersion": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320,
+              "pattern": "^\\S(?:.*\\S)?$"
+            },
+            "renderConfigurationSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "policy": {
+          "$ref": "#/$defs/policy"
+        },
+        "sampling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy",
+            "selectionArtifactSha256",
+            "expectedFrameIds"
+          ],
+          "properties": {
+            "strategy": {
+              "$ref": "#/$defs/identifier"
+            },
+            "selectionArtifactSha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "expectedFrameIds": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/identifier"
+              }
+            }
+          }
+        },
+        "speakers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/speaker"
+          }
+        },
+        "cues": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000000,
+          "items": {
+            "$ref": "#/$defs/cue"
+          }
+        },
+        "frames": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {
+            "$ref": "#/$defs/frame"
+          }
+        }
+      }
+    },
+    "violation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate",
+        "code",
+        "message",
+        "evidencePath",
+        "frameId",
+        "cueId",
+        "styleId",
+        "measured",
+        "threshold"
+      ],
+      "properties": {
+        "gate": {
+          "type": "string",
+          "enum": [
+            "samplingEvidence",
+            "safeArea",
+            "clipping",
+            "contrast",
+            "fontGlyph",
+            "lineReading",
+            "speakerColor",
+            "visualOverlap",
+            "karaokeAuthenticity"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "evidencePath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "frameId": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "cueId": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "styleId": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "measured": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ]
+        },
+        "threshold": {
+          "type": [
+            "number",
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "gateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "checked",
+        "violations"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "checked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/violation"
+          }
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "schemaVersion",
+        "analysisId",
+        "passed",
+        "failClosed",
+        "inputSha256",
+        "gateOrder",
+        "gates",
+        "metrics",
+        "fontTruth",
+        "failureCodes"
+      ],
+      "properties": {
+        "kind": {
+          "const": "subtitle-visual-qa-result"
+        },
+        "schemaVersion": {
+          "const": "1.0.0"
+        },
+        "analysisId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "failClosed": {
+          "const": true
+        },
+        "inputSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "gateOrder": {
+          "const": [
+            "samplingEvidence",
+            "safeArea",
+            "clipping",
+            "contrast",
+            "fontGlyph",
+            "lineReading",
+            "speakerColor",
+            "visualOverlap",
+            "karaokeAuthenticity"
+          ]
+        },
+        "gates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "samplingEvidence",
+            "safeArea",
+            "clipping",
+            "contrast",
+            "fontGlyph",
+            "lineReading",
+            "speakerColor",
+            "visualOverlap",
+            "karaokeAuthenticity"
+          ],
+          "properties": {
+            "samplingEvidence": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "safeArea": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "clipping": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "contrast": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "fontGlyph": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "lineReading": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "speakerColor": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "visualOverlap": {
+              "$ref": "#/$defs/gateResult"
+            },
+            "karaokeAuthenticity": {
+              "$ref": "#/$defs/gateResult"
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "framesExpected",
+            "framesEvaluated",
+            "cuesEvaluated",
+            "cueInstancesEvaluated",
+            "contrastSamplesEvaluated",
+            "minimumContrastRatio",
+            "maximumReadingSpeed",
+            "minimumSpeakerDeltaE2000",
+            "maximumOverlapAreaPx",
+            "verifiedWordTimingCues",
+            "backgroundClassesCovered"
+          ],
+          "properties": {
+            "framesExpected": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "framesEvaluated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cuesEvaluated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "cueInstancesEvaluated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "contrastSamplesEvaluated": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "minimumContrastRatio": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 21
+            },
+            "maximumReadingSpeed": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "minimumSpeakerDeltaE2000": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "maximumOverlapAreaPx": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "verifiedWordTimingCues": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "backgroundClassesCovered": {
+              "type": "array",
+              "maxItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "dark",
+                  "light"
+                ]
+              }
+            }
+          }
+        },
+        "fontTruth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "claimPolicy",
+            "evidenceInstances",
+            "installation",
+            "embedding"
+          ],
+          "properties": {
+            "claimPolicy": {
+              "const": "positive-claims-require-sha256-bound-evidence"
+            },
+            "evidenceInstances": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "installation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "verified",
+                "notAsserted"
+              ],
+              "properties": {
+                "verified": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "notAsserted": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "embedding": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "verified",
+                "notAsserted"
+              ],
+              "properties": {
+                "verified": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "notAsserted": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "failureCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          }
+        }
+      }
+    }
+  }
+}

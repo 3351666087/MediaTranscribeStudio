@@ -98,7 +98,7 @@
 
 ## 6. 验证与交付
 
-- [x] Python 单元/契约测试通过：33 tests，schema 验证 7 个。
+- [x] 版本化契约校验通过；校验器当前覆盖仓库中的 23 个 schema 和明确必需集合，不再硬编码过时的“恰好 7 个 schema”。
 - [ ] TypeScript lint、typecheck、unit、component 和 E2E 全部通过。
 - [ ] Rust fmt、clippy 和 tests 全部通过。
 - [ ] Maven tests 与动态人数 Java PDF 金样测试全部通过。
@@ -210,6 +210,7 @@
 - [x] 独立复核 production CAM++/ERes2NetV2/pyannote 生命周期、OOM 和配置迁移切片；相关 Dynamic-N/production 门禁共 `193 passed, 48 subtests passed`，`compileall` 与定向 `git diff --check` 通过。
 - [x] 独立复核并提交 Ultimate parity 原始字节、Git attributes/filter、RFC3339 授权时间顺序、manifest 决策字节 TOCTOU、隐藏 index flags 与授权合取加固切片；`49 passed`，manifest validation、`py_compile`、定向 `git diff --check` 通过，两轮修复后独立复审结论为“无阻断项”。
 - [x] 本地通过 TypeScript 多任务 UI 的 lint、typecheck、unit/component 和 production build；`npm run lint`、`npm run typecheck`、`npm test -- --run`（31 files / 375 tests）与 `npm run build` 全部通过，并补充精确 job ID 切换、非当前任务取消、批量部分失败隔离和 Tauri/mock 严格运行时契约覆盖。
+- [x] 对用户 MOV/M4A 建立与模型输出无关的全时段分层样本：每个源各 8 个 60 秒窗口，覆盖开头、中段、结尾、固定种子有声随机窗和 3 个声学变化窗；MOV/M4A 的窗口覆盖率分别为 `0.174916468` / `0.12568405`，选择算法、种子、源时间戳、活动率、声学变化和派生音频哈希均保存在 `.runtime_cache/sample-library/long-media-20260724/long-media-samples.resolved.v1.json`。
 - [ ] 通过 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
 - [ ] 未知人数真实 `20260723_123047(1).m4a` 完成整段终态、全时段分层抽样、自动人数、角色分离、人工真值和分域性能验收。
 - [ ] 真实 MOV 完成全时段分层抽样，并仅在人工确认五人覆盖的窗口/整段上运行 auto 与 manual=5，对比人数稳定性、speaker confusion、审查量、RTF、RAM/VRAM 和缓存指标。
@@ -228,7 +229,7 @@
 - [ ] 真实多人会话扩展到普通话、粤语、日语、韩语、英语、西班牙语、法语、德语、阿拉伯语、印地语、葡萄牙语等不同语系与代码切换场景；每种语言都必须有真实 turn/overlap 真值，不能用单人拼接样本替代多人质量门禁。
 - [ ] 覆盖清晰近讲、远场会议、电话带宽、车内/户外、音乐/电视背景、混响、强噪声、不同年龄/性别音色、地区口音、代码切换、快速轮换、打断、串话和重叠说话，并区分真实录音、真实录音派生扰动与合成压力样本。
 - [ ] 覆盖 WAV、FLAC、MP3、M4A/AAC、OGG/Opus、MOV、MP4、MKV/WebM，以及未知扩展名和无扩展名；扩展名仅作提示，最终以本机 FFmpeg 内容探测和解码结果为准。
-- [ ] 单个迭代样本默认控制在 10–90 秒；长媒体采用全时段分层抽样（开头、中段、结尾、固定随机种子有声窗口、声学变化点/重叠候选），并保存窗口选择算法、种子、源时间戳与覆盖率；固定前 60 秒只能做接入烟雾测试，禁止用于说话人数或分离质量结论。
+- [x] 单个迭代样本默认控制在 10–90 秒；长媒体构建器已对两个用户源采用全时段分层抽样（开头、中段、结尾、固定随机种子有声窗口、声学变化点），保存算法、种子、源时间戳与覆盖率，并明确 `selectionUsesModelScores=false`。当前尚未接入独立 overlap detector 参与长媒体选窗；固定前 60 秒继续只作接入烟雾测试，禁止用于说话人数或分离质量结论。
 - [ ] 基于参考 RTTM/turn 标注选择 `N=5` 等人数窗口：先在整段真值中定位确实覆盖目标人数的候选，再按预先登记的随机规则取样；窗口选择不得查看模型得分，避免为了得到好结果而挑片。找不到满足条件的窗口时必须更换源样本，不能把人工人数强设为真值。
 - [ ] 按指标保存和校验真值资格：人数指标要求 speaker set，DER/JER、speaker confusion 和边界指标要求 turn/overlap 标注，WER/CER 要求覆盖完整音频窗口的逐字稿；某项真值缺失时只禁用该项评分，不得用另一项真值替代或宣称通过。
 - [ ] 建立互斥的开发集、回归集和 held-out 集；必须先按数据集、原始录音和说话人分组再切分，同一录音、同一说话人或任何派生/转码/扰动版本不得跨集合泄漏，调参后必须重新跑从未参与阈值选择的 held-out。
@@ -257,6 +258,7 @@
 
 - [x] 为正常有人声和无人声输入持久化版本化 `voice-activity.v1.json`：包含媒体时长、VAD 候选、语音总时长与占比、模型/配置/源哈希和终态；区分 `no-speech-candidates-detected`、`no-lexical-speech-detected` 与 `transcribable-speech-detected`。前两类由服务保存证据后以 `completed_no_speech` 成功终止，不进入说话人、翻译、润色、字幕或 PDF，也不伪造空 transcript；VAD 的 0 窗口属于推理正常完成而非模型故障。内部校验拒绝重叠窗口、哈希/job 不匹配、覆盖率造假和分类矛盾；契约校验器已从过时的“恰好 7 个 schema”改为检查 23 个现有 schema 及明确必需集合。聚焦回归为 `156 passed, 77 subtests passed`，契约校验通过。
 - [x] 生产 ASR 输入按声学说话人切点和独立语言时长切点共同分窗，每个语言识别窗口严格不超过 `12000 ms`；同一 speaker turn 内的多个语言窗口分别保存 Qwen 原始语言候选，文档级多语种结果汇总为 `mul`。
+- [x] 用 MPS 严格生产配置完成两个用户长媒体的 16 个全时段分层窗口：`16/16` 技术执行完成、失败 `0`、超时 `0`、强制清理进程 `0`，全部保存人声、逐字稿、流水线指标和复核队列；最长实际语言窗为 `11940 ms`，满足 `12000 ms` 上限。16 例均检测到可转写语音并输出 `zh`，自动人数分布为 `N=1:5 / N=2:3 / N=3:3 / N=6:2 / N=7:2 / N=8:1`，但 `16/16` 均为 `review.required`，合计 281 项、平均 17.5625 项，且全部缺少人数/turn/ASR 真值，因此只证明技术闭环可执行，不证明人数、DER/JER、语言或转写质量通过。无原文审计汇总位于 `.runtime_cache/sample-library/long-media-20260724/results/mps-v1/long-media-run-summary.v1.json`，可由 `tools/summarize_sample_run.py` 重新生成并校验 job/hash 关联和语言窗上限；聚焦测试 `3 passed`。
 - [ ] 使用有逐段语言真值的真实代码切换语料验证同一说话人在 `en/zh/es` 等语言间切换；逐段报告 language ID accuracy、切换点误差、WER/CER 和 `und`/复核率，当前仅有确定性单元回归，不得标为真实质量通过。
 - [ ] 使用有 RTTM/turn、speaker-language 和逐字稿真值的真实多人多语语料验证“不同说话人使用不同语言”与“多个说话人各自切换语言”；说话人、语言和文本必须在同一时间轴联合评分，不能用单人拼接样本冒充真实多人门禁。
 - [ ] 使用真实媒体扩大人声存在性与语言识别验证集：至少覆盖清晰语音、远场、电话、强噪声、音乐背景、纯音乐、环境声、静音、短促非词汇声、重叠说话和代码切换；当前已完成契约与确定性回归，但纯音乐/环境声等真实负样本的误报/漏报率尚未评分，支持集外语言也必须单列且禁止计入支持语言准确率。

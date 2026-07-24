@@ -160,7 +160,9 @@ def _language_quality(
         asr = evidence.get("asr") if isinstance(evidence, dict) else None
         if not isinstance(asr, dict):
             continue
-        detected_root = _language_root(asr.get("language"))
+        detected_root = _language_root(
+            segment.get("language", asr.get("language"))
+        )
         if detected_root is not None:
             detected.append(detected_root)
         requested_root = _language_root(asr.get("requestedLanguage"))

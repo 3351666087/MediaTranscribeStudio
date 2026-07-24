@@ -96,6 +96,8 @@ _BCP47_BY_QWEN_LANGUAGE = {
     "romanian": "ro",
     "hungarian": "hu",
     "macedonian": "mk",
+    "swahili": "sw",
+    "oromo": "om",
 }
 
 

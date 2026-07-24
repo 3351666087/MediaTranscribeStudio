@@ -1018,7 +1018,7 @@ class LocalQwen3AsrAdapter:
     """Qwen3-ASR-1.7B runner using explicit local model directories only."""
 
     adapter_id = "Qwen3-ASR-1.7B"
-    version = "1.2.0"
+    version = "1.3.0"
 
     def __init__(
         self,

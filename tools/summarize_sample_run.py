@@ -393,8 +393,8 @@ def _case_summary(
             )
 
     selection = _mapping(
-        case.get("windowSelection"),
-        field=f"{case_id}.windowSelection",
+        case.get("windowSelection", case.get("selection")),
+        field=f"{case_id}.selection",
     )
     truth = _mapping(
         case.get("truthEligibility"),
@@ -408,11 +408,46 @@ def _case_summary(
     return {
         "caseId": case_id,
         "sourceId": case.get("sourceId"),
+        "expectedLexicalSpeech": case.get("expectedLexicalSpeech"),
         "windowSelection": {
             "reason": selection.get("reason"),
-            "startMs": selection.get("startMs"),
-            "endMs": selection.get("endMs"),
-            "durationMs": selection.get("durationMs"),
+            "startMs": selection.get(
+                "startMs",
+                (
+                    round(float(selection["startSeconds"]) * 1000)
+                    if isinstance(selection.get("startSeconds"), (int, float))
+                    else None
+                ),
+            ),
+            "endMs": selection.get(
+                "endMs",
+                (
+                    round(
+                        (
+                            float(selection["startSeconds"])
+                            + float(selection["durationSeconds"])
+                        )
+                        * 1000
+                    )
+                    if isinstance(selection.get("startSeconds"), (int, float))
+                    and isinstance(
+                        selection.get("durationSeconds"),
+                        (int, float),
+                    )
+                    else None
+                ),
+            ),
+            "durationMs": selection.get(
+                "durationMs",
+                (
+                    round(float(selection["durationSeconds"]) * 1000)
+                    if isinstance(
+                        selection.get("durationSeconds"),
+                        (int, float),
+                    )
+                    else None
+                ),
+            ),
             "audioActivityRatio": selection.get("audioActivityRatio"),
         },
         "truthEligibility": dict(truth),
@@ -510,6 +545,16 @@ def summarize_run(
         for metric, eligible in row["truthEligibility"].items():
             if eligible is True:
                 truth_eligible_counts[metric] += 1
+    lexical_negative_rows = [
+        row
+        for row in summaries
+        if row["expectedLexicalSpeech"] is False
+    ]
+    lexical_false_positives = sum(
+        row["voiceActivity"]["classification"]
+        == "transcribable-speech-detected"
+        for row in lexical_negative_rows
+    )
 
     all_observed = all(row["runner"]["status"] == "observed" for row in summaries)
     all_zero_exit = all(row["runner"]["exitCode"] == 0 for row in summaries)
@@ -571,6 +616,13 @@ def summarize_run(
                 round(cache_hits / cache_requests, 9) if cache_requests else None
             ),
             "truthEligibleCaseCounts": dict(sorted(truth_eligible_counts.items())),
+            "lexicalSpeechNegativeCases": len(lexical_negative_rows),
+            "lexicalSpeechFalsePositiveCount": lexical_false_positives,
+            "lexicalSpeechFalsePositiveRate": (
+                lexical_false_positives / len(lexical_negative_rows)
+                if lexical_negative_rows
+                else None
+            ),
         },
         "gates": {
             "technicalExecutionPassed": (
@@ -586,13 +638,26 @@ def summarize_run(
                 for row in summaries
             ),
             "referenceQualityScored": quality_scored,
+            "lexicalSpeechNegativeGatePassed": (
+                lexical_false_positives == 0
+                if lexical_negative_rows
+                else None
+            ),
             "qualityConclusion": (
-                "quality_scored"
-                if quality_scored
+                (
+                    "lexical_speech_negative_gate_passed"
+                    if lexical_false_positives == 0
+                    else "lexical_speech_negative_gate_failed"
+                )
+                if lexical_negative_rows
                 else (
-                    "not_scored_despite_reference_truth"
-                    if truth_available
-                    else "not_scored_missing_reference_truth"
+                    "quality_scored"
+                    if quality_scored
+                    else (
+                        "not_scored_despite_reference_truth"
+                        if truth_available
+                        else "not_scored_missing_reference_truth"
+                    )
                 )
             ),
         },

@@ -169,6 +169,7 @@ def test_summarizes_content_free_audit_and_separate_gates(
         "allCasesRequireReview": True,
         "languageWindowLimitPassed": True,
         "referenceQualityScored": False,
+        "lexicalSpeechNegativeGatePassed": None,
         "qualityConclusion": "not_scored_missing_reference_truth",
     }
     serialized = json.dumps(summary)
@@ -209,3 +210,55 @@ def test_rejects_cross_job_artifact_link(
             results_root=results,
             outputs_root=outputs,
         )
+
+
+def test_summarizes_no_speech_negative_without_transcript(
+    tmp_path: Path,
+) -> None:
+    manifest, results, outputs = _fixture(tmp_path)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    case = manifest_value["cases"][0]
+    case["expectedLexicalSpeech"] = False
+    case["selection"] = {
+        "startSeconds": 1,
+        "durationSeconds": 5,
+    }
+    del case["windowSelection"]
+    _write(manifest, manifest_value)
+    result_path = results / "sample-a-result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["terminal_type"] = "job.completed"
+    _write(result_path, result)
+    output = outputs / "sample-a"
+    voice_path = output / "voice-activity.v1.json"
+    voice = json.loads(voice_path.read_text(encoding="utf-8"))
+    voice["classification"] = "no-speech-candidates-detected"
+    voice["speechWindowCount"] = 0
+    voice["speechDurationMs"] = 0
+    voice["speechRatio"] = 0
+    _write(voice_path, voice)
+    (output / "transcript-document.v2.json").unlink()
+    (output / "pipeline-metrics.v1.json").unlink()
+    (output / "review" / "review-queue.json").unlink()
+
+    summary = summarize_run(
+        manifest_path=manifest,
+        results_root=results,
+        outputs_root=outputs,
+    )
+
+    assert summary["cases"][0]["windowSelection"] == {
+        "reason": None,
+        "startMs": 1000,
+        "endMs": 6000,
+        "durationMs": 5000,
+        "audioActivityRatio": None,
+    }
+    assert summary["aggregate"]["lexicalSpeechNegativeCases"] == 1
+    assert summary["aggregate"]["lexicalSpeechFalsePositiveCount"] == 0
+    assert summary["aggregate"]["lexicalSpeechFalsePositiveRate"] == 0
+    assert summary["gates"]["lexicalSpeechNegativeGatePassed"] is True
+    assert (
+        summary["gates"]["qualityConclusion"]
+        == "lexical_speech_negative_gate_passed"
+    )

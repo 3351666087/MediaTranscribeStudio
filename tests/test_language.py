@@ -116,6 +116,10 @@ class QwenLanguageContractTests(unittest.TestCase):
             ),
             ("pt", "pt-BR"),
         )
+        self.assertEqual(
+            normalize_qwen_language_candidates(["Swahili", "Oromo"]),
+            ("sw", "om"),
+        )
         self.assertEqual(normalize_qwen_language_candidates(None), ())
 
     def test_duration_weighted_reconciliation(self) -> None:

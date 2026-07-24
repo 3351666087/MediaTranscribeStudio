@@ -149,10 +149,11 @@ def test_language_quality_scores_only_automatic_detection(
                         "startMs": 0,
                         "endMs": 1000,
                         "speakerId": "speaker-1",
+                        "language": "fr",
                         "displayText": "bonjour",
                         "evidence": {
                             "asr": {
-                                "language": "fr",
+                                "language": "stale",
                                 "requestedLanguage": "auto",
                             }
                         },
@@ -161,6 +162,7 @@ def test_language_quality_scores_only_automatic_detection(
                         "startMs": 1000,
                         "endMs": 2000,
                         "speakerId": "speaker-1",
+                        "language": "und",
                         "displayText": "encore",
                         "evidence": {
                             "asr": {

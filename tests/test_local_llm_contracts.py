@@ -40,7 +40,7 @@ def test_business_contract_schemas_are_valid_json_and_versioned() -> None:
         schema = json.loads(path.read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["title"] == title
-        assert schema["$id"].endswith("/1.0.0")
+        assert schema["$id"].endswith("/1.1.0")
         assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
 
@@ -52,7 +52,7 @@ def test_runtime_validator_enforces_the_public_summary_schema() -> None:
         "timeRange": {"startMs": 0, "endMs": 1_000},
     }
     artifact = {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "variant": "summary",
         "inputHash": "a" * 64,
         "model": "qwen3.5:4b",
@@ -63,6 +63,8 @@ def test_runtime_validator_enforces_the_public_summary_schema() -> None:
             "networkPolicy": "loopback-only",
         },
         "temperature": 0,
+        "applicationPolicy": "suggestion-only",
+        "requiresHumanApproval": True,
         "status": "completed",
         "language": "en",
         "executiveSummary": "Summary.",

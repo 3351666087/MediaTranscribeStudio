@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mediatranscribestudio.local/contracts/business-processing-request/1.0.0",
+  "$id": "https://mediatranscribestudio.local/contracts/business-processing-request/1.1.0",
   "title": "MediaTranscribeStudio Business Processing Request",
   "description": "A local-only request for immutable translation, polishing, and summary variants.",
   "type": "object",
@@ -16,7 +16,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "translationTargets": {
       "type": "array",

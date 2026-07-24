@@ -346,6 +346,8 @@ def test_runner_creates_translation_polish_summary_and_manifest(
 
     assert translation["status"] == "completed"
     assert translation["targetLanguage"] == "en"
+    assert translation["applicationPolicy"] == "suggestion-only"
+    assert translation["requiresHumanApproval"] is True
     assert translation["segments"][0]["speakerId"] == "speaker-1"
     assert translation["segments"][0]["startMs"] == 0
     assert polish["language"] == "zh-CN"
@@ -353,6 +355,8 @@ def test_runner_creates_translation_polish_summary_and_manifest(
     assert polish["requiresHumanApproval"] is True
     assert polish["diff"] == []
     assert summary["actionItems"][0]["evidenceSegmentIds"] == ["segment-2"]
+    assert summary["applicationPolicy"] == "suggestion-only"
+    assert summary["requiresHumanApproval"] is True
     assert summary["keyPoints"][0]["timeRange"] == {
         "startMs": 0,
         "endMs": 1200,
@@ -367,6 +371,9 @@ def test_runner_creates_translation_polish_summary_and_manifest(
     }
     assert summary["promptVersion"] == BUSINESS_PROMPT_VERSION
     assert manifest["rawTranscriptImmutable"] is True
+    assert manifest["sourceDocumentHash"] == canonical_json_sha256(original)
+    assert manifest["applicationPolicy"] == "suggestion-only"
+    assert manifest["requiresHumanApproval"] is True
     assert len(manifest["artifacts"]) == 3
 
 

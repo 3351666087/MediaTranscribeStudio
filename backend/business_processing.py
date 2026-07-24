@@ -41,9 +41,9 @@ from .persistence import (
     validate_strict_json,
 )
 
-BUSINESS_SCHEMA_VERSION = "1.0.0"
+BUSINESS_SCHEMA_VERSION = "1.1.0"
 BUSINESS_PROMPT_VERSION = "business-v2"
-_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v4"
+_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v5"
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _SPEAKER_ID_PATTERN = re.compile(r"^speaker-[1-9][0-9]*$")
 _TRANSLATION_PROGRESS_KIND = "translation-segment-progress"
@@ -684,6 +684,8 @@ def _base_provenance(
             "networkPolicy": network_policy,
         },
         "temperature": 0.0,
+        "applicationPolicy": "suggestion-only",
+        "requiresHumanApproval": True,
     }
 
 
@@ -3313,7 +3315,10 @@ class BusinessProcessingRunner:
         manifest = {
             "schemaVersion": BUSINESS_SCHEMA_VERSION,
             "documentId": document_snapshot.get("documentId"),
+            "sourceDocumentHash": source_document_hash,
             "rawTranscriptImmutable": True,
+            "applicationPolicy": "suggestion-only",
+            "requiresHumanApproval": True,
             "artifacts": [str(path) for path in artifacts],
             "config": config.as_dict(),
             "completeness": {

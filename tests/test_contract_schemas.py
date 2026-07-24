@@ -145,7 +145,7 @@ def _semantic_arbitration(language: str) -> dict[str, Any]:
 
 def _business_request(language: str) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "translationTargets": [language],
         "polish": True,
         "summary": True,
@@ -157,13 +157,15 @@ def _business_request(language: str) -> dict[str, Any]:
 
 def _translation_output(language: str) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "variant": f"translation:{language}",
         "inputHash": SHA256,
         "model": "qwen3.5:4b",
         "promptVersion": "translation-v1",
         "provider": _provider(),
         "temperature": 0,
+        "applicationPolicy": "suggestion-only",
+        "requiresHumanApproval": True,
         "status": "completed",
         "sourceLanguage": "en",
         "targetLanguage": language,
@@ -183,7 +185,7 @@ def _translation_output(language: str) -> dict[str, Any]:
 
 def _polish_output(language: str) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "variant": "polish",
         "inputHash": SHA256,
         "model": "qwen3.5:4b",
@@ -220,13 +222,15 @@ def _summary_output(language: str) -> dict[str, Any]:
         },
     }
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "variant": "summary",
         "inputHash": SHA256,
         "model": "qwen3.5:4b",
         "promptVersion": "summary-v1",
         "provider": _provider(),
         "temperature": 0,
+        "applicationPolicy": "suggestion-only",
+        "requiresHumanApproval": True,
         "status": "completed",
         "language": language,
         "executiveSummary": "Evidence-grounded summary.",

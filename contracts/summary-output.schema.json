@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mediatranscribestudio.local/contracts/summary-output/1.0.0",
+  "$id": "https://mediatranscribestudio.local/contracts/summary-output/1.1.0",
   "title": "MediaTranscribeStudio Evidence-Grounded Summary Variant",
   "description": "A local-model summary whose actionable claims point back to immutable transcript segments.",
   "type": "object",
@@ -13,6 +13,8 @@
     "promptVersion",
     "provider",
     "temperature",
+    "applicationPolicy",
+    "requiresHumanApproval",
     "status",
     "language",
     "executiveSummary",
@@ -22,7 +24,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "variant": {
       "const": "summary"
@@ -45,6 +47,12 @@
     },
     "temperature": {
       "const": 0
+    },
+    "applicationPolicy": {
+      "const": "suggestion-only"
+    },
+    "requiresHumanApproval": {
+      "const": true
     },
     "status": {
       "const": "completed"

@@ -210,6 +210,7 @@
       "evaluationSplit": "development",
       "scenario": ["synthetic-mixture", "en-es", "exact-switch-timing"],
       "expectedLanguages": ["en", "es"],
+      "maxDurationSeconds": 40,
       "transcriptField": "transcription_tagged",
       "switchIndex": 0
     },
@@ -221,6 +222,7 @@
       "evaluationSplit": "regression",
       "scenario": ["synthetic-mixture", "en-pt", "exact-switch-timing"],
       "expectedLanguages": ["en", "pt"],
+      "maxDurationSeconds": 40,
       "transcriptField": "transcription_tagged",
       "switchIndex": 0
     },
@@ -232,6 +234,7 @@
       "evaluationSplit": "held-out",
       "scenario": ["synthetic-mixture", "en-it", "exact-switch-timing"],
       "expectedLanguages": ["en", "it"],
+      "maxDurationSeconds": 40,
       "transcriptField": "transcription_tagged",
       "switchIndex": 0
     },
@@ -243,6 +246,7 @@
       "evaluationSplit": "development",
       "scenario": ["synthetic-mixture", "en-de", "exact-switch-timing"],
       "expectedLanguages": ["en", "de"],
+      "maxDurationSeconds": 40,
       "transcriptField": "transcription_tagged",
       "switchIndex": 0
     },
@@ -254,6 +258,7 @@
       "evaluationSplit": "held-out",
       "scenario": ["synthetic-mixture", "en-fr", "exact-switch-timing"],
       "expectedLanguages": ["en", "fr"],
+      "maxDurationSeconds": 40,
       "transcriptField": "transcription_tagged",
       "switchIndex": 0
     }

@@ -1,8 +1,11 @@
+import json
 from pathlib import Path
 
 import pytest
 
 from tools.build_code_switch_sample_library import (
+    _load_cached_dataset_evidence,
+    _load_cached_source_row,
     load_manifest,
     parse_liva_turns,
     parse_liva_turns_with_issues,
@@ -57,6 +60,11 @@ def test_checked_in_manifest_covers_real_multispeaker_and_timed_switches() -> No
         "de",
         "fr",
     }
+    assert {
+        case["maxDurationSeconds"]
+        for case in cases
+        if case["acquisition"]["kind"] == "switch-window"
+    } == {40}
 
 
 def test_liva_parser_preserves_overlap_and_speaker_identity() -> None:
@@ -128,6 +136,104 @@ def test_tagged_parser_rejects_gap_that_would_fake_timing_truth() -> None:
             "<en><start:0.00>first<end:10.00>"
             "<es><start:11.00>segundo<end:20.00>"
         )
+
+
+def test_case_duration_cap_cannot_exceed_manifest_limit(
+    tmp_path: Path,
+) -> None:
+    value = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    value["cases"][0]["maxDurationSeconds"] = (
+        value["maxDurationSeconds"] + 1
+    )
+    manifest = tmp_path / "invalid-code-switch-manifest.json"
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(
+        GlobalSampleLibraryError,
+        match="maxDurationSeconds must be between",
+    ):
+        load_manifest(manifest)
+
+
+def test_cached_source_row_is_bound_to_dataset_revision_and_locator(
+    tmp_path: Path,
+) -> None:
+    manifest = load_manifest(MANIFEST)
+    case = manifest["cases"][0]
+    source = next(
+        item for item in manifest["sources"] if item["id"] == case["sourceId"]
+    )
+    metadata = tmp_path / "source-metadata" / f"{case['id']}.json"
+    metadata.parent.mkdir(parents=True)
+    payload = {
+        "dataset": source["dataset"],
+        "revision": source["revision"],
+        "config": case["acquisition"]["config"],
+        "split": case["acquisition"]["split"],
+        "rowIndex": case["acquisition"]["rowIndex"],
+        "row": {
+            "transcription": "cached text",
+            "audioAsset": "https://example.invalid/pinned.wav",
+        },
+    }
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    cached = _load_cached_source_row(
+        tmp_path,
+        case["id"],
+        source=source,
+        case=case,
+    )
+    assert cached is not None
+    row, path = cached
+    assert path == metadata
+    assert row["transcription"] == "cached text"
+    assert row["audio"] == [{"src": "https://example.invalid/pinned.wav"}]
+
+    payload["revision"] = "0" * 40
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        GlobalSampleLibraryError,
+        match="does not match the pinned row",
+    ):
+        _load_cached_source_row(
+            tmp_path,
+            case["id"],
+            source=source,
+            case=case,
+        )
+
+
+def test_cached_dataset_evidence_is_bound_to_pinned_source(
+    tmp_path: Path,
+) -> None:
+    manifest = load_manifest(MANIFEST)
+    source = manifest["sources"][0]
+    evidence = tmp_path / "source-evidence" / f"{source['id']}.json"
+    evidence.parent.mkdir(parents=True)
+    payload = {
+        "schemaVersion": "1.0.0",
+        "verifiedAt": "2026-07-24T12:00:00+00:00",
+        "source": {
+            **source,
+            "lastModified": "2026-07-24T11:00:00.000Z",
+        },
+    }
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    cached = _load_cached_dataset_evidence(tmp_path, source=source)
+    assert cached is not None
+    value, path = cached
+    assert path == evidence
+    assert value["revision"] == source["revision"]
+
+    payload["source"]["license"] = "apache-2.0"
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        GlobalSampleLibraryError,
+        match="does not match the pinned source",
+    ):
+        _load_cached_dataset_evidence(tmp_path, source=source)
 
 
 def test_code_switch_quality_separates_document_and_timing_evidence() -> None:

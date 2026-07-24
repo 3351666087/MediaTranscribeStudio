@@ -28,6 +28,7 @@ from tools.global_sample_library import GlobalSampleLibraryError
 DEFAULT_MANIFEST = ROOT / "sample_library" / "code-switch-manifest.v1.json"
 DEFAULT_OUTPUT = ROOT / ".runtime_cache" / "sample-library" / "code-switch"
 RESOLVED_NAME = "code-switch-sample-library.resolved.v1.json"
+SOURCE_EVIDENCE_SCHEMA_VERSION = "1.0.0"
 USER_AGENT = "MediaTranscribeStudio-code-switch-samples/1.0"
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,95}$")
@@ -174,6 +175,16 @@ def load_manifest(path: Path) -> dict[str, Any]:
         case_ids.add(case_id)
         if case.get("sourceId") not in source_ids:
             raise GlobalSampleLibraryError(f"cases[{index}].sourceId is not declared")
+        case_maximum = case.get("maxDurationSeconds", maximum)
+        if (
+            isinstance(case_maximum, bool)
+            or not isinstance(case_maximum, (int, float))
+            or not 10 <= float(case_maximum) <= float(maximum)
+        ):
+            raise GlobalSampleLibraryError(
+                f"cases[{index}].maxDurationSeconds must be between 10 and "
+                "the manifest maximum"
+            )
         acquisition = case.get("acquisition")
         if not isinstance(acquisition, dict) or set(acquisition) != {
             "kind",
@@ -256,6 +267,11 @@ def _dataset_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
         raise GlobalSampleLibraryError(
             f"{source['dataset']} no longer declares {source['license']}"
         )
+    last_modified = value.get("lastModified")
+    if not isinstance(last_modified, str) or not last_modified.strip():
+        raise GlobalSampleLibraryError(
+            f"{source['dataset']} does not expose a last-modified timestamp"
+        )
     return {
         key: source[key]
         for key in (
@@ -267,7 +283,109 @@ def _dataset_evidence(source: Mapping[str, Any]) -> dict[str, Any]:
             "attribution",
             "recordingType",
         )
-    } | {"lastModified": value.get("lastModified")}
+    } | {"lastModified": last_modified}
+
+
+def _source_evidence_path(output_root: Path, source_id: str) -> Path:
+    return output_root / "source-evidence" / f"{source_id}.json"
+
+
+def _validate_dataset_evidence(
+    value: Any,
+    *,
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = {
+        key: source[key]
+        for key in (
+            "id",
+            "dataset",
+            "revision",
+            "license",
+            "homepage",
+            "attribution",
+            "recordingType",
+        )
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != set(expected) | {"lastModified"}
+        or any(value.get(key) != item for key, item in expected.items())
+        or not isinstance(value.get("lastModified"), str)
+        or not value["lastModified"].strip()
+    ):
+        raise GlobalSampleLibraryError(
+            f"{source['id']} cached dataset evidence does not match the pinned source"
+        )
+    return dict(value)
+
+
+def _load_cached_dataset_evidence(
+    output_root: Path,
+    *,
+    source: Mapping[str, Any],
+) -> tuple[dict[str, Any], Path] | None:
+    path = _source_evidence_path(output_root, str(source["id"]))
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GlobalSampleLibraryError(
+            f"{source['id']} cached dataset evidence is unreadable"
+        ) from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schemaVersion", "verifiedAt", "source"}
+        or value.get("schemaVersion") != SOURCE_EVIDENCE_SCHEMA_VERSION
+        or not isinstance(value.get("verifiedAt"), str)
+        or not value["verifiedAt"].strip()
+    ):
+        raise GlobalSampleLibraryError(
+            f"{source['id']} cached dataset evidence is invalid"
+        )
+    return _validate_dataset_evidence(value.get("source"), source=source), path
+
+
+def _write_dataset_evidence(
+    output_root: Path,
+    *,
+    source: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> Path:
+    path = _source_evidence_path(output_root, str(source["id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schemaVersion": SOURCE_EVIDENCE_SCHEMA_VERSION,
+        "verifiedAt": datetime.now(UTC).isoformat(),
+        "source": _validate_dataset_evidence(evidence, source=source),
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _resolve_dataset_evidence(
+    output_root: Path,
+    *,
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    cached = _load_cached_dataset_evidence(output_root, source=source)
+    if cached is None:
+        evidence = _dataset_evidence(source)
+        path = _write_dataset_evidence(
+            output_root,
+            source=source,
+            evidence=evidence,
+        )
+    else:
+        evidence, path = cached
+    return evidence | {
+        "evidencePath": str(path.relative_to(output_root)),
+        "evidenceSha256": _sha256(path),
+    }
 
 
 def _viewer_row(source: Mapping[str, Any], case: Mapping[str, Any]) -> dict[str, Any]:
@@ -527,6 +645,44 @@ def _source_row_path(output_root: Path, case_id: str) -> Path:
     return output_root / "source-metadata" / f"{case_id}.json"
 
 
+def _load_cached_source_row(
+    output_root: Path,
+    case_id: str,
+    *,
+    source: Mapping[str, Any],
+    case: Mapping[str, Any],
+) -> tuple[dict[str, Any], Path] | None:
+    path = _source_row_path(output_root, case_id)
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise GlobalSampleLibraryError(
+            f"{case_id} cached source metadata is unreadable"
+        ) from exc
+    expected = {
+        "dataset": source["dataset"],
+        "revision": source["revision"],
+        "config": case["acquisition"]["config"],
+        "split": case["acquisition"]["split"],
+        "rowIndex": case["acquisition"]["rowIndex"],
+    }
+    if (
+        not isinstance(value, dict)
+        or any(value.get(key) != item for key, item in expected.items())
+        or not isinstance(value.get("row"), dict)
+    ):
+        raise GlobalSampleLibraryError(
+            f"{case_id} cached source metadata does not match the pinned row"
+        )
+    row = dict(value["row"])
+    audio_asset = row.pop("audioAsset", None)
+    if isinstance(audio_asset, str) and audio_asset:
+        row["audio"] = [{"src": audio_asset}]
+    return row, path
+
+
 def _write_source_row(
     output_root: Path,
     case_id: str,
@@ -612,15 +768,24 @@ def _build_case(
     output_root: Path,
     maximum_seconds: float,
 ) -> dict[str, Any]:
-    row = _viewer_row(source, case)
     case_id = str(case["id"])
-    source_row_path = _write_source_row(
+    cached = _load_cached_source_row(
         output_root,
         case_id,
         source=source,
         case=case,
-        row=row,
     )
+    if cached is None:
+        row = _viewer_row(source, case)
+        source_row_path = _write_source_row(
+            output_root,
+            case_id,
+            source=source,
+            case=case,
+            row=row,
+        )
+    else:
+        row, source_row_path = cached
     source_audio = output_root / "sources" / f"{case_id}.source"
     source_audio.parent.mkdir(parents=True, exist_ok=True)
     if not source_audio.is_file():
@@ -632,6 +797,9 @@ def _build_case(
         )
     output = output_root / "audio" / f"{case_id}.wav"
     kind = case["acquisition"]["kind"]
+    case_maximum_seconds = float(
+        case.get("maxDurationSeconds", maximum_seconds)
+    )
     transcript_field = str(case["transcriptField"])
     transcript = row.get(transcript_field)
     if not isinstance(transcript, str) or not transcript.strip():
@@ -719,7 +887,7 @@ def _build_case(
         window = select_switch_window(
             chunks,
             switch_index=int(case["switchIndex"]),
-            maximum_seconds=maximum_seconds,
+            maximum_seconds=case_maximum_seconds,
         )
         _ffmpeg_audio(
             source_audio,
@@ -769,7 +937,7 @@ def _build_case(
         probe["codec"] != "pcm_s16le"
         or probe["sampleRate"] != 16_000
         or probe["channels"] != 1
-        or not 0 < probe["durationSeconds"] <= maximum_seconds + 0.05
+        or not 0 < probe["durationSeconds"] <= case_maximum_seconds + 0.05
     ):
         raise GlobalSampleLibraryError(f"{case_id} normalized audio is invalid")
     return _base_case(
@@ -787,7 +955,10 @@ def build_library(manifest_path: Path, output_root: Path) -> Path:
     manifest = load_manifest(manifest_path)
     output_root.mkdir(parents=True, exist_ok=True)
     source_by_id = {source["id"]: source for source in manifest["sources"]}
-    sources = [_dataset_evidence(source) for source in manifest["sources"]]
+    sources = [
+        _resolve_dataset_evidence(output_root, source=source)
+        for source in manifest["sources"]
+    ]
     cases: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     for case in manifest["cases"]:

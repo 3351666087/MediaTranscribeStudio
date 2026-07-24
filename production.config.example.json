@@ -47,6 +47,8 @@
     "maxSecondaryFraction": 0.25,
     "maxCountUncertaintyCandidates": 8,
     "autoCountConfidenceThreshold": 0.75,
+    "maxLanguageWindowMs": 12000,
+    "languageSplitSearchMs": 1000,
     "eres2netDecisionMargin": 0.05,
     "pyannoteMode": "fallback",
     "localLlmMode": "disabled",

@@ -247,6 +247,8 @@ class ProductionSpeakerPolicy:
     auto_count_confidence_threshold: float = 0.75
     count_stability_runs: int = 3
     eigengap_landmark_limit: int = 256
+    max_language_window_ms: int = 12_000
+    language_split_search_ms: int = 1_000
     eres2net_decision_margin: float = 0.05
     pyannote_mapping_margin_threshold: float = 0.05
     pyannote_primary_dominance_threshold: float = 0.60
@@ -587,6 +589,8 @@ class ProductionConfig:
                 "autoCountConfidenceThreshold",
                 "countStabilityRuns",
                 "eigengapLandmarkLimit",
+                "maxLanguageWindowMs",
+                "languageSplitSearchMs",
                 "eres2netDecisionMargin",
                 "pyannoteMappingMarginThreshold",
                 "pyannotePrimaryDominanceThreshold",
@@ -711,6 +715,18 @@ class ProductionConfig:
                 minimum=2,
                 maximum=4096,
             ),
+            max_language_window_ms=_integer(
+                raw_speaker.get("maxLanguageWindowMs", 12_000),
+                field="speaker.maxLanguageWindowMs",
+                minimum=1_000,
+                maximum=120_000,
+            ),
+            language_split_search_ms=_integer(
+                raw_speaker.get("languageSplitSearchMs", 1_000),
+                field="speaker.languageSplitSearchMs",
+                minimum=1,
+                maximum=10_000,
+            ),
             eres2net_decision_margin=_number(
                 raw_speaker.get("eres2netDecisionMargin", 0.05),
                 field="speaker.eres2netDecisionMargin",
@@ -752,6 +768,14 @@ class ProductionConfig:
         if speaker.max_secondary_fraction >= 1.0:
             raise ProductionConfigError(
                 "speaker.maxSecondaryFraction must be less than 1.0"
+            )
+        if (
+            speaker.max_language_window_ms
+            <= speaker.language_split_search_ms + 700
+        ):
+            raise ProductionConfigError(
+                "speaker.maxLanguageWindowMs must exceed "
+                "languageSplitSearchMs by more than 700 ms"
             )
         if speaker.pyannote_mode != "disabled" and models.pyannote is None:
             raise ProductionConfigError(
@@ -933,6 +957,8 @@ class ProductionConfig:
             "eigengapLandmarkLimit": (
                 self.speaker.eigengap_landmark_limit
             ),
+            "maxLanguageWindowMs": self.speaker.max_language_window_ms,
+            "languageSplitSearchMs": self.speaker.language_split_search_ms,
             "pyannoteMappingMarginThreshold": (
                 self.speaker.pyannote_mapping_margin_threshold
             ),

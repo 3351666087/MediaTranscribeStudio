@@ -246,6 +246,21 @@
 - [x] 完成 Pyannote 匿名轨道到 canonical `speaker-N` 的严格证据链验收：共享校验器逐项核对全局时长加权声学矩阵、Hungarian 一对一映射、最优/次优 margin、dominance、canonical turns、human lock、人数变化和 blocker；伪造权重、时长、margin、dominance 或 blocker 均 fail closed。真实 `N=2` 重跑自动人数为 2，11 段含 4 条可追溯 speaker revision 和 27 条 canonical turn，报告中 4 份 `speakerMapping` 均无悬空引用；Java renderer `3.0.0` 生成 3 页真实报告，质量分 `97.87`、13 个硬门槛全部通过。证据位于 `.runtime_cache/sample-library/global/results/real-n2-pyannote-map-v2/quality-report.v1.json` 与 `.runtime_cache/outputs/global-sample-library/real-n2-pyannote-map-report-direct-lxgw/`。
 - [x] 修复 PDF 字体配置漂移：生产配置、Pyannote 评估配置和示例统一使用 renderer 唯一允许的内置 `LXGW WenKai`，配置加载阶段提前拒绝 `MTS CJK` 等无效请求值；更新后的 Pyannote 严格生产 preflight 全部通过。
 - [x] 隔离 Pyannote 4 生产运行时：主 `media-asr` 环境移除 Pyannote 4 并固定 NumPy `1.26.4`、torchmetrics `0.11.4`，独立 `media-pyannote` 环境固定 Pyannote Audio `4.0.4`、NumPy `2.4.6`、Torch/Torchaudio `2.10.0`；两边 `pip check` 均通过，主环境无法导入 `pyannote.audio`，严格 preflight 的 22 项检查全部通过且 Pyannote import 明确来自 `executables.pyannotePython`。真实 VoxConverse 90 秒生产重跑在主进程不加载 Pyannote 的情况下完成，人数和 DER/JER/confusion/overlap 与隔离前 canonical 结果一致，证据位于 `.runtime_cache/sample-library/global/results/real-n2-pyannote-isolated-v2/quality-report.v1.json` 与 `.runtime_cache/outputs/global-sample-library/real-n2-pyannote-isolated-v2/`；冷启动流水线 RTF `1.057901456`、峰值 RAM `1311.78125 MB`，边界与复核量仍按独立未通过项处理。
+- [x] 在 ASR 前加入最长 `12000 ms` 的语言识别窗口，并在目标切点前后搜索范围内优先使用 PCM 能量谷；CAM++ 适配器升级为 `2.2.0`，缓存身份包含 `maxLanguageWindowMs=12000` 与 `languageSplitSearchMs=1000`。证据分别保存 `speakerChangeSplitsMs`、`languageDurationSplitsMs` 和最终 `appliedSplitsMs`，仅因语言时长拆分的片段继续共享同一个 speaker turn，不能被误报为换人。聚焦回归覆盖同一说话人 `en → zh → es`、多人分别使用 `en/zh`、严格窗口上限和能量谷定位，结果为 `114 passed, 48 subtests passed`。
 - [ ] 复核或替换 `minds_en_us_034` 的 ASR 参考：当前参考只覆盖 joint-account 句而音频后半段仍有明显语音，必须先确认数据集漏标或 ASR 幻觉，未经确认不得用其 `WER/CER=1.5333` 调参或判定门禁失败。
 - [ ] 在真实 `N=2` 达到分域阈值后扩展到真实 `N=3/5/8` 与派生 `N=13`，输出人数误差、DER/JER、confusion、overlap、边界、RTF、人工复核量和资源分桶；任一失败域不得由其他指标抵消。
 - [ ] 在全球样本矩阵上完成自动人数、手动人数、hybrid 上下界、字幕三格式、真实视频 soft-mux/burn-in、Java PDF 与 Design Pack 全链路回归，并按语言、地区、人数和声学场景生成分桶报告。
+
+### 7.10 任意媒体的人声、多语种与交付闭环
+
+> “任意媒体”表示所有可由本机 FFmpeg 安全探测和解码的输入都必须得到明确、可审计的终态，不表示当前模型已经覆盖世界上所有语言。当前 Qwen3-ASR 模型声明支持 30 种语言和 22 种中文方言；超出支持集、语言置信不足或模型无法判定时必须输出 `und`/人工复核或明确失败，禁止猜测语言、伪造文本或宣称全球语言全覆盖。
+
+- [ ] 为正常有人声和无人声输入都持久化 `voice-activity.v1.json`：包含媒体时长、语音/非语音判定、VAD 窗口、语音总时长与占比、模型/配置/源哈希和终态；纯音乐、环境声、静音及仅有非词汇人声必须得到成功的“无可转录人声”终态，不能只以 `NO_SPEECH_DETECTED` 异常代替业务结果。
+- [x] 生产 ASR 输入按声学说话人切点和独立语言时长切点共同分窗，每个语言识别窗口严格不超过 `12000 ms`；同一 speaker turn 内的多个语言窗口分别保存 Qwen 原始语言候选，文档级多语种结果汇总为 `mul`。
+- [ ] 使用有逐段语言真值的真实代码切换语料验证同一说话人在 `en/zh/es` 等语言间切换；逐段报告 language ID accuracy、切换点误差、WER/CER 和 `und`/复核率，当前仅有确定性单元回归，不得标为真实质量通过。
+- [ ] 使用有 RTTM/turn、speaker-language 和逐字稿真值的真实多人多语语料验证“不同说话人使用不同语言”与“多个说话人各自切换语言”；说话人、语言和文本必须在同一时间轴联合评分，不能用单人拼接样本冒充真实多人门禁。
+- [ ] 扩大人声存在性与语言识别验证集：至少覆盖清晰语音、远场、电话、强噪声、音乐背景、纯音乐、环境声、静音、短促非词汇声、重叠说话和代码切换；支持集外语言必须单列，禁止计入支持语言准确率。
+- [ ] 对真实完成的多语转写逐条运行本地翻译、保守润色和摘要，验证目标语言完整性、数字/专名/时间/说话人不变量、semantic drift、失败重试、断点恢复和人工批准状态；`qwen3.5:4b` 仍是 suggestion-only，未达到阈值前不得自动应用。
+- [ ] 对同一批真实视频生成 SRT、WebVTT、ASS，验证 cue 覆盖、时间单调性、换行、安全区、说话人标签和多语字体；随后真实执行 sidecar、soft-mux 与 burn-in，并用 ffprobe、解封装哈希、代表帧像素检查和视觉 QA 验证，不得只检查输出计划。
+- [ ] 对同一批闭环结果生成 Java-only PDF 和可复核报告，验证逐段语言、翻译/润色来源、说话人映射、字幕交付、质量分桶、失败域和样本许可证均真实呈现；最后运行 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
+- [ ] 建立闭环发布汇总：每个样本从探测、人声判断、VAD、语言、ASR、说话人、重叠、翻译、润色、字幕、视频交付到 PDF/报告均有哈希相连的产物链；任何一步失败都保留原始媒体和已完成证据、标记具体失败域，禁止用“部分产物存在”宣称整套闭环通过。

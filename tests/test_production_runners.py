@@ -26,6 +26,7 @@ from backend.production_runners import (
     LocalPyannoteAuditAdapter,
     LocalQwen3AsrAdapter,
 )
+from backend.speaker_change_detection import EnergyValley
 from backend.speaker_pipeline import (
     OverlapDecision,
     PreparedAudio,
@@ -1270,6 +1271,143 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         self.assertNotIn(FakePcmTimeline.marker, json.dumps(refined.as_dict()))
         load_audio.assert_called_once_with(prepared.audio_path)
+
+    def test_language_windows_use_energy_valleys_and_detect_code_switches(
+        self,
+    ) -> None:
+        prepared = PreparedAudio(
+            duration_ms=30_000,
+            source_fingerprint="9" * 64,
+            normalization_profile="mono-16khz-f32-v1",
+            windows=(
+                SpeechWindow(
+                    "vad-code-switch",
+                    0,
+                    30_000,
+                    metadata={"turnId": "turn-code-switch"},
+                ),
+            ),
+            stage_durations_ms={
+                "decode": 0.0,
+                "normalize": 0.0,
+                "vad": 0.0,
+                "boundary": 0.0,
+            },
+            audio_path=str(self.audio),
+        )
+        pcm = FakePcmTimeline(480_000)
+
+        class StableCamModel:
+            def generate(self, *, input, batch_size, disable_pbar):
+                return [
+                    {"spk_embedding": [[1.0, 0.0]]}
+                    for _item in input
+                ]
+
+        class CodeSwitchQwenModel:
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                results = []
+                for index, (clip, _rate) in enumerate(audio):
+                    center_ms = (clip.start + clip.end) * 1000 / 32_000
+                    detected = (
+                        "English"
+                        if center_ms < 10_000
+                        else "Chinese"
+                        if center_ms < 22_000
+                        else "Spanish"
+                    )
+                    results.append(
+                        SimpleNamespace(
+                            text=f"code-switch-{index + 1}",
+                            language=detected,
+                            time_stamps=None,
+                        )
+                    )
+                return results
+
+        cam = LocalFunAsrCamPlusAdapter(
+            model_path=self.cam_model,
+            model_factory=lambda **_kwargs: StableCamModel(),
+            device="cpu",
+        )
+        qwen = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **_kwargs: CodeSwitchQwenModel(),
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+        valleys = (
+            EnergyValley(11_200, 0.80, "language-valley-1"),
+            EnergyValley(22_000, 0.90, "language-valley-2"),
+        )
+        with (
+            mock.patch.object(
+                production_runners,
+                "_load_audio",
+                return_value=(pcm, 16_000),
+            ),
+            mock.patch.object(
+                cam,
+                "_energy_valleys",
+                return_value=valleys,
+            ),
+            mock.patch.object(
+                cam,
+                "_automatic_splits",
+                return_value=(),
+            ),
+        ):
+            refined = cam.refine_windows(prepared, self.context)
+            hypotheses = qwen.transcribe_batch(
+                refined,
+                refined.windows,
+                self.context,
+                requested_language="auto",
+            )
+
+        self.assertEqual(
+            [
+                (window.start_ms, window.end_ms)
+                for window in refined.windows
+            ],
+            [(0, 11_200), (11_200, 22_000), (22_000, 30_000)],
+        )
+        self.assertTrue(
+            all(
+                window.end_ms - window.start_ms <= 12_000
+                for window in refined.windows
+            )
+        )
+        self.assertEqual(
+            {window.metadata["turnId"] for window in refined.windows},
+            {"turn-code-switch"},
+        )
+        self.assertEqual(
+            [item.evidence["language"] for item in hypotheses],
+            ["en", "zh", "es"],
+        )
+        evidence = refined.windows[0].metadata[
+            "speakerChangeRefinement"
+        ]
+        self.assertEqual(evidence["speakerChangeSplitsMs"], [])
+        self.assertEqual(
+            evidence["languageDurationSplitsMs"],
+            [11_200, 22_000],
+        )
+        self.assertEqual(evidence["appliedSplitsMs"], [11_200, 22_000])
+        self.assertEqual(
+            [
+                item["localizer"]
+                for item in evidence["languageSplitEvidence"]
+            ],
+            ["energy-valley", "energy-valley"],
+        )
 
     def test_cam_plus_refinement_keeps_review_only_evidence_without_split(
         self,

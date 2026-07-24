@@ -93,6 +93,8 @@ def build_production_composition(
     embedding = factories.embedding(
         model_path=config.models.cam_plus,
         device=config.runtime.cam_plus_device,
+        max_language_window_ms=config.speaker.max_language_window_ms,
+        language_split_search_ms=config.speaker.language_split_search_ms,
     )
     secondary = factories.secondary(
         model_path=config.models.eres2net_v2,

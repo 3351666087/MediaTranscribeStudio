@@ -1411,8 +1411,8 @@ class LocalFunAsrCamPlusAdapter:
     """
 
     adapter_id = "CAM++"
-    version = "2.1.0"
-    refinement_method = "cam-plus-multiresolution-viterbi-ready-v2"
+    version = "2.2.0"
+    refinement_method = "cam-plus-multiresolution-language-window-v3"
 
     def __init__(
         self,
@@ -1426,6 +1426,8 @@ class LocalFunAsrCamPlusAdapter:
         context_step_ms: int = 1_200,
         merge_radius_ms: int = 250,
         min_resulting_interval_ms: int = 700,
+        max_language_window_ms: int = 12_000,
+        language_split_search_ms: int = 1_000,
         model_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.model_path = _local_model_path(model_path, "CAM++ model")
@@ -1439,6 +1441,8 @@ class LocalFunAsrCamPlusAdapter:
         self.context_step_ms = int(context_step_ms)
         self.merge_radius_ms = int(merge_radius_ms)
         self.min_resulting_interval_ms = int(min_resulting_interval_ms)
+        self.max_language_window_ms = int(max_language_window_ms)
+        self.language_split_search_ms = int(language_split_search_ms)
         for field_name in (
             "fine_window_ms",
             "fine_step_ms",
@@ -1446,9 +1450,20 @@ class LocalFunAsrCamPlusAdapter:
             "context_step_ms",
             "merge_radius_ms",
             "min_resulting_interval_ms",
+            "max_language_window_ms",
+            "language_split_search_ms",
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name} must be positive")
+        if (
+            self.max_language_window_ms
+            <= self.language_split_search_ms
+            + self.min_resulting_interval_ms
+        ):
+            raise ValueError(
+                "max_language_window_ms must exceed "
+                "language_split_search_ms + min_resulting_interval_ms"
+            )
         self._model_factory = model_factory
         self._model_instance: Any = None
         self._load_lock = threading.Lock()
@@ -1467,6 +1482,8 @@ class LocalFunAsrCamPlusAdapter:
             "contextStepMs": self.context_step_ms,
             "mergeRadiusMs": self.merge_radius_ms,
             "minResultingIntervalMs": self.min_resulting_interval_ms,
+            "maxLanguageWindowMs": self.max_language_window_ms,
+            "languageSplitSearchMs": self.language_split_search_ms,
             "embeddingBatchSize": self.embedding_batch_size,
         }
 
@@ -1799,6 +1816,97 @@ class LocalFunAsrCamPlusAdapter:
                 del selected[conflict_index]
         return tuple(int(item[1].split_ms) for item in selected)
 
+    def _language_duration_splits(
+        self,
+        source: SpeechWindow,
+        speaker_change_splits: Sequence[int],
+        energy_valleys: Sequence[EnergyValley],
+    ) -> tuple[tuple[int, ...], tuple[Mapping[str, Any], ...]]:
+        """Bound ASR language windows without inventing speaker changes."""
+
+        speaker_boundaries = (
+            source.start_ms,
+            *speaker_change_splits,
+            source.end_ms,
+        )
+        split_points: list[int] = []
+        split_evidence: list[Mapping[str, Any]] = []
+        for span_start, span_end in zip(
+            speaker_boundaries,
+            speaker_boundaries[1:],
+        ):
+            cursor = span_start
+            while span_end - cursor > self.max_language_window_ms:
+                latest_split = min(
+                    cursor + self.max_language_window_ms,
+                    span_end - self.min_resulting_interval_ms,
+                )
+                target_split = max(
+                    cursor + self.min_resulting_interval_ms,
+                    latest_split - self.language_split_search_ms,
+                )
+                earliest_split = max(
+                    cursor + self.min_resulting_interval_ms,
+                    target_split - self.language_split_search_ms,
+                )
+                candidates = [
+                    marker
+                    for marker in energy_valleys
+                    if earliest_split
+                    <= marker.timestamp_ms
+                    <= latest_split
+                ]
+                selected = (
+                    min(
+                        candidates,
+                        key=lambda marker: (
+                            abs(marker.timestamp_ms - target_split),
+                            -marker.confidence,
+                            marker.timestamp_ms,
+                            marker.marker_id,
+                        ),
+                    )
+                    if candidates
+                    else None
+                )
+                split_ms = (
+                    selected.timestamp_ms
+                    if selected is not None
+                    else target_split
+                )
+                if split_ms <= cursor or split_ms >= span_end:
+                    raise WorkerError(
+                        "LANGUAGE_WINDOW_SPLIT_INVALID",
+                        "language window refinement could not make progress",
+                        details={"sourceWindowId": source.window_id},
+                    )
+                split_points.append(split_ms)
+                split_evidence.append(
+                    {
+                        "targetMs": target_split,
+                        "splitMs": split_ms,
+                        "searchStartMs": earliest_split,
+                        "searchEndMs": latest_split,
+                        "localizer": (
+                            "energy-valley"
+                            if selected is not None
+                            else "deterministic-duration-cap"
+                        ),
+                        **(
+                            {
+                                "energyValleyMarkerId": selected.marker_id,
+                                "energyValleyConfidence": (
+                                    selected.confidence
+                                ),
+                            }
+                            if selected is not None
+                            else {}
+                        ),
+                    }
+                )
+                cursor = split_ms
+        return tuple(split_points), tuple(split_evidence)
+
     def refine_windows(
         self,
         prepared: PreparedAudio,
@@ -1913,12 +2021,36 @@ class LocalFunAsrCamPlusAdapter:
                     pcm_timeline=pcm_timeline,
                     config=detection_config,
                 )
-            automatic_splits = self._automatic_splits(source, plans)
+            speaker_change_splits = self._automatic_splits(source, plans)
+            (
+                language_duration_splits,
+                language_split_evidence,
+            ) = self._language_duration_splits(
+                source,
+                speaker_change_splits,
+                energy_valleys,
+            )
+            applied_splits = tuple(
+                sorted(
+                    {
+                        *speaker_change_splits,
+                        *language_duration_splits,
+                    }
+                )
+            )
             evidence = {
                 "version": self.version,
                 "method": self.refinement_method,
                 "pcmBufferId": pcm_buffer_id,
-                "automaticSplitsMs": list(automatic_splits),
+                "automaticSplitsMs": list(speaker_change_splits),
+                "speakerChangeSplitsMs": list(speaker_change_splits),
+                "languageDurationSplitsMs": list(language_duration_splits),
+                "appliedSplitsMs": list(applied_splits),
+                "maxLanguageWindowMs": self.max_language_window_ms,
+                "languageSplitSearchMs": self.language_split_search_ms,
+                "languageSplitEvidence": [
+                    dict(item) for item in language_split_evidence
+                ],
                 "reviewRequired": any(
                     plan.review_required for plan in plans.values()
                 ),
@@ -1929,10 +2061,10 @@ class LocalFunAsrCamPlusAdapter:
             }
             boundaries = (
                 source.start_ms,
-                *automatic_splits,
+                *applied_splits,
                 source.end_ms,
             )
-            if not automatic_splits:
+            if not applied_splits:
                 metadata = dict(source.metadata)
                 metadata.setdefault(
                     "sourceVadWindowId",
@@ -1948,23 +2080,62 @@ class LocalFunAsrCamPlusAdapter:
                 metadata["speakerChangeRefinement"] = evidence
                 refined.append(replace(source, metadata=metadata))
                 continue
+            speaker_boundaries = (
+                source.start_ms,
+                *speaker_change_splits,
+                source.end_ms,
+            )
+            source_turn_id = (
+                str(source.metadata["turnId"]).strip()
+                if isinstance(source.metadata.get("turnId"), str)
+                and str(source.metadata["turnId"]).strip()
+                else f"turn:{source.window_id}:{source.start_ms}-{source.end_ms}"
+            )
             for index, (start_ms, end_ms) in enumerate(
                 zip(boundaries, boundaries[1:]),
                 start=1,
             ):
+                speaker_span = next(
+                    (
+                        (speaker_start, speaker_end)
+                        for speaker_start, speaker_end in zip(
+                            speaker_boundaries,
+                            speaker_boundaries[1:],
+                        )
+                        if speaker_start <= start_ms
+                        and end_ms <= speaker_end
+                    ),
+                    None,
+                )
+                if speaker_span is None:
+                    raise WorkerError(
+                        "LANGUAGE_WINDOW_SPLIT_INVALID",
+                        "refined language window crossed a speaker boundary",
+                        details={"sourceWindowId": source.window_id},
+                    )
+                turn_id = (
+                    source_turn_id
+                    if not speaker_change_splits
+                    else (
+                        f"turn:{source.window_id}:"
+                        f"{speaker_span[0]}-{speaker_span[1]}"
+                    )
+                )
                 metadata = dict(source.metadata)
                 metadata.update(
                     {
                         "sourceVadWindowId": source.window_id,
-                        "turnId": (
-                            f"turn:{source.window_id}:{start_ms}-{end_ms}"
-                        ),
+                        "turnId": turn_id,
                         "speakerChangeRefinement": evidence,
                     }
                 )
                 refined.append(
                     SpeechWindow(
-                        window_id=f"{source.window_id}.sc{index:02d}",
+                        window_id=(
+                            f"{source.window_id}."
+                            f"{'rf' if language_duration_splits else 'sc'}"
+                            f"{index:02d}"
+                        ),
                         start_ms=start_ms,
                         end_ms=end_ms,
                         boundary_conflict=source.boundary_conflict,

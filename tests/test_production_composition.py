@@ -114,6 +114,8 @@ class ProductionCompositionTests(unittest.TestCase):
                 "maxClusteringWorkItems": 234_567,
                 "countStabilityRuns": 5,
                 "eigengapLandmarkLimit": 128,
+                "maxLanguageWindowMs": 11_000,
+                "languageSplitSearchMs": 900,
                 "pyannoteMappingMarginThreshold": 0.07,
                 "pyannotePrimaryDominanceThreshold": 0.65,
                 "pyannoteMode": pyannote_mode,
@@ -141,6 +143,8 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(config.speaker.max_clustering_work_items, 234_567)
         self.assertEqual(config.speaker.count_stability_runs, 5)
         self.assertEqual(config.speaker.eigengap_landmark_limit, 128)
+        self.assertEqual(config.speaker.max_language_window_ms, 11_000)
+        self.assertEqual(config.speaker.language_split_search_ms, 900)
         self.assertEqual(config.speaker.pyannote_mapping_margin_threshold, 0.07)
         self.assertEqual(
             config.speaker.pyannote_primary_dominance_threshold,
@@ -325,6 +329,14 @@ class ProductionCompositionTests(unittest.TestCase):
             str(self.pyannote_python),
         )
         self.assertEqual(preparation.calls[0][1]["device"], "cpu")
+        self.assertEqual(
+            embedding.calls[0][1]["max_language_window_ms"],
+            11_000,
+        )
+        self.assertEqual(
+            embedding.calls[0][1]["language_split_search_ms"],
+            900,
+        )
 
     def test_real_config_builds_real_speaker_pipeline_config(self) -> None:
         config = self.load(pyannote_mode="fallback")

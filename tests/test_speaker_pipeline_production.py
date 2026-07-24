@@ -2171,6 +2171,39 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             [segment.language for segment in result.segments],
             ["en", "zh"],
         )
+        self.assertEqual(
+            [segment.speaker_id for segment in result.segments],
+            ["speaker-1", "speaker-2"],
+        )
+
+    def test_one_speaker_can_switch_languages_across_windows(self) -> None:
+        asr = FakeAsrAdapter(
+            language_by_window_id={
+                "window-1": "English",
+                "window-2": "Chinese",
+                "window-3": "Spanish",
+            }
+        )
+        pipeline, _, _, _, _ = self.pipeline(
+            1,
+            windows=3,
+            asr=asr,
+        )
+
+        result = pipeline.transcribe(
+            self.request(1, "manual", language="auto"),
+            self.context(),
+        )
+
+        self.assertEqual(result.language, "mul")
+        self.assertEqual(
+            [segment.language for segment in result.segments],
+            ["en", "zh", "es"],
+        )
+        self.assertEqual(
+            {segment.speaker_id for segment in result.segments},
+            {"speaker-1"},
+        )
 
     def test_secondary_verifier_is_selective_and_records_full_telemetry(self) -> None:
         secondary = FakeSecondaryVerifier()

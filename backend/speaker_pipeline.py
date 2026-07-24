@@ -44,6 +44,10 @@ from .speaker_sequence_decoder import (
     SpeakerEmission,
     decode_speaker_sequence,
 )
+from .voice_activity import (
+    build_voice_activity,
+    with_voice_activity_classification,
+)
 
 
 _PREPARATION_STAGES = ("decode", "normalize", "vad", "boundary")
@@ -6523,6 +6527,33 @@ class SpeakerPipeline:
         prepared, prepare_cache, prepare_elapsed = self._prepare(
             request, context, source_fingerprint
         )
+        voice_activity = build_voice_activity(
+            job_id=request.job_id,
+            source_sha256=prepared.source_fingerprint,
+            media_duration_ms=prepared.duration_ms,
+            normalization_profile=prepared.normalization_profile,
+            provider=_adapter_identity(self.preparation_adapter),
+            windows=tuple(
+                {
+                    "id": window.window_id,
+                    "startMs": window.start_ms,
+                    "endMs": window.end_ms,
+                }
+                for window in prepared.windows
+            ),
+            minimum_window_ms=max(
+                1,
+                int(
+                    getattr(
+                        self.preparation_adapter,
+                        "minimum_window_ms",
+                        1,
+                    )
+                ),
+            ),
+            classification="transcribable-speech-detected",
+            has_transcribable_speech=True,
+        )
         metrics.set_duration_ms(prepared.duration_ms)
         for stage, cache_stats in prepare_cache.items():
             metrics.record_cache(stage, **cache_stats)
@@ -6614,12 +6645,20 @@ class SpeakerPipeline:
             asrRejectedNonLexicalWindowCount=len(rejected_asr),
         )
         if not lexical_pairs:
+            no_lexical_voice_activity = (
+                with_voice_activity_classification(
+                    voice_activity,
+                    classification="no-lexical-speech-detected",
+                    has_transcribable_speech=False,
+                )
+            )
             raise WorkerError(
-                "ASR_NO_LEXICAL_SPEECH",
+                "NO_TRANSCRIBABLE_SPEECH",
                 "No lexical speech remained after auditable ASR retries",
                 details={
                     "sourceWindowCount": len(prepared.windows),
                     "rejectedWindowCount": len(rejected_asr),
+                    "voiceActivity": no_lexical_voice_activity,
                 },
             )
         if rejected_asr:
@@ -6836,6 +6875,11 @@ class SpeakerPipeline:
             speaker_count_estimate=estimate,
             models=tuple(models),
             pipeline_metrics=metrics.as_dict(),
+            voice_activity=with_voice_activity_classification(
+                voice_activity,
+                classification="transcribable-speech-detected",
+                has_transcribable_speech=True,
+            ),
         )
 
 

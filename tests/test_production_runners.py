@@ -2427,6 +2427,49 @@ class ProductionRunnerTests(unittest.TestCase):
             [(0, 900), (1000, 1900)],
         )
 
+    def test_funasr_empty_vad_returns_auditable_no_speech_evidence(
+        self,
+    ) -> None:
+        class EmptyVadModel:
+            def generate(self, **kwargs):
+                return [{"value": []}]
+
+        def normalize(source_path, output_path, context):
+            context.raise_if_cancelled()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_path, output_path)
+
+        adapter = FfmpegFunAsrPreparationAdapter(
+            vad_model_path=self.vad_model,
+            ffmpeg_executable=Path(__file__),
+            model_factory=lambda **_kwargs: EmptyVadModel(),
+        )
+        with (
+            mock.patch.object(adapter, "_normalize", side_effect=normalize),
+            mock.patch.object(
+                production_runners,
+                "_load_audio",
+                return_value=(FakePcmTimeline(32_000), 16_000),
+            ),
+            self.assertRaises(WorkerError) as captured,
+        ):
+            adapter.prepare(
+                self.audio,
+                normalization_profile="mono-16khz-f32-v1",
+                context=self.context,
+            )
+
+        self.assertEqual(captured.exception.code, "NO_SPEECH_DETECTED")
+        activity = captured.exception.details["voiceActivity"]
+        self.assertEqual(
+            activity["classification"],
+            "no-speech-candidates-detected",
+        )
+        self.assertFalse(activity["hasSpeechCandidates"])
+        self.assertFalse(activity["hasTranscribableSpeech"])
+        self.assertEqual(activity["mediaDurationMs"], 2_000)
+        self.assertEqual(activity["speechRatio"], 0.0)
+
     def test_funasr_vad_is_cpu_isolated_observable_and_stdout_silent(
         self,
     ) -> None:

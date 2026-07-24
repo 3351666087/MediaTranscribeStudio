@@ -30,6 +30,7 @@ from backend.persistence import (
 )
 from backend.persistence import canonical_json_sha256, sha256_file
 from backend.subtitles import SubtitleFormat, SubtitleOutputMode
+from backend.voice_activity import build_voice_activity
 from test_worker_support import (
     FakeDynamicRenderer,
     FakeTranscriptionAdapter,
@@ -187,6 +188,33 @@ class _UnexpectedFailureTranscriptionAdapter(FakeTranscriptionAdapter):
     def transcribe(self, request, context):
         del request, context
         raise AssertionError("private diagnostic detail")
+
+
+class _NoSpeechTranscriptionAdapter:
+    adapter_id = "no-speech-fixture"
+    version = "1"
+
+    def transcribe(self, request, context):
+        context.raise_if_cancelled()
+        source_sha256 = hashlib.sha256(
+            request.source_path.read_bytes()
+        ).hexdigest()
+        voice_activity = build_voice_activity(
+            job_id=request.job_id,
+            source_sha256=source_sha256,
+            media_duration_ms=2_000,
+            normalization_profile="mono-16khz-f32-v1",
+            provider={"id": self.adapter_id, "version": self.version},
+            windows=(),
+            minimum_window_ms=120,
+            classification="no-speech-candidates-detected",
+            has_transcribable_speech=False,
+        )
+        raise WorkerError(
+            "NO_SPEECH_DETECTED",
+            "fixture found no speech",
+            details={"voiceActivity": voice_activity},
+        )
 
 
 class _PlannedRenderer(FakeDynamicRenderer):
@@ -397,6 +425,46 @@ def test_unexpected_job_failure_logs_traceback_but_sanitizes_public_error(
         )
         assert "private diagnostic detail" in caplog.text
         assert "Traceback (most recent call last)" in caplog.text
+        service.shutdown()
+
+
+def test_no_speech_completes_with_voice_activity_artifact() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        events: list[dict[str, Any]] = []
+        service = _service(
+            root,
+            adapter=_NoSpeechTranscriptionAdapter(),
+            event_sink=events.append,
+        )
+
+        started = service.start(
+            {
+                "jobId": "no-speech-success",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "auto",
+                "translationTargets": [],
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "completed"
+        assert final["stage"] == "completed_no_speech"
+        assert final["qualityStatus"] == "no-transcribable-speech"
+        artifact_path = Path(final["voiceActivityArtifactPath"])
+        assert artifact_path.is_file()
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        assert artifact["classification"] == "no-speech-candidates-detected"
+        assert artifact["hasTranscribableSpeech"] is False
+        assert not (artifact_path.parent / "transcript-document.v2.json").exists()
+        completed = next(
+            event for event in events if event["type"] == "job.completed"
+        )
+        assert completed["payload"]["hasTranscribableSpeech"] is False
+        assert completed["payload"]["disposition"] == (
+            "no-speech-candidates-detected"
+        )
         service.shutdown()
 
 

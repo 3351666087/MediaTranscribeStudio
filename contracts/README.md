@@ -71,6 +71,8 @@ JSON Schema alone:
    timestamps.
 9. Artifact paths are relative to the job output directory, and verified
    artifacts include real SHA-256 digests.
+10. Voice-activity classifications agree with their VAD windows, exact speech
+    coverage, source hash, and transcribable-speech disposition.
 
 ## Contract inventory
 
@@ -89,6 +91,7 @@ JSON Schema alone:
 | `semantic-arbitration.schema.json` | Constrained semantic proposal for human or deterministic arbitration. |
 | `summary-output.schema.json` | Evidence-grounded summary artifact. |
 | `translation-output.schema.json` | Versioned translation artifact with validated language metadata. |
+| `voice-activity.schema.json` | Auditable speech-candidate, lexical-speech, and no-speech terminal evidence. |
 
 `validate_contracts.py` provides repository-side schema validation support.
 

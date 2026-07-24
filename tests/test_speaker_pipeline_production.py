@@ -1836,7 +1836,17 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 self.context("all-non-lexical"),
             )
 
-        self.assertEqual(captured.exception.code, "ASR_NO_LEXICAL_SPEECH")
+        self.assertEqual(
+            captured.exception.code,
+            "NO_TRANSCRIBABLE_SPEECH",
+        )
+        voice_activity = captured.exception.details["voiceActivity"]
+        self.assertEqual(
+            voice_activity["classification"],
+            "no-lexical-speech-detected",
+        )
+        self.assertTrue(voice_activity["hasSpeechCandidates"])
+        self.assertFalse(voice_activity["hasTranscribableSpeech"])
         self.assertEqual(asr.release_calls, 1)
         self.assertEqual(cam.calls, [])
 

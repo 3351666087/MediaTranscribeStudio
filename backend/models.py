@@ -14,6 +14,7 @@ from .business_processing import BusinessProcessingConfig
 from .errors import WorkerError, invalid_request
 from .language import normalize_language_tag
 from .output_recipe import OutputRecipe
+from .voice_activity import validate_voice_activity
 
 
 PROTOCOL_VERSION = "1.0.0"
@@ -594,6 +595,7 @@ class TranscriptionResult:
     speaker_count_estimate: SpeakerCountEstimate | None = None
     models: tuple[Mapping[str, Any], ...] = ()
     pipeline_metrics: Mapping[str, Any] | None = None
+    voice_activity: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -607,6 +609,12 @@ class TranscriptionResult:
                 "transcription result language must be a valid persisted BCP-47 language tag",
             ) from exc
         object.__setattr__(self, "language", normalized)
+        if self.voice_activity is not None:
+            object.__setattr__(
+                self,
+                "voice_activity",
+                validate_voice_activity(self.voice_activity),
+            )
 
     @classmethod
     def from_mapping(cls, value: Any) -> "TranscriptionResult":
@@ -650,6 +658,15 @@ class TranscriptionResult:
                 "ADAPTER_RESULT_INVALID",
                 "pipelineMetrics must be an object when provided",
             )
+        voice_activity = value.get("voiceActivity")
+        if voice_activity is not None and not isinstance(
+            voice_activity,
+            Mapping,
+        ):
+            raise WorkerError(
+                "ADAPTER_RESULT_INVALID",
+                "voiceActivity must be an object when provided",
+            )
         segments = tuple(
             TranscriptSegment.from_mapping(item, index)
             for index, item in enumerate(raw_segments)
@@ -685,6 +702,11 @@ class TranscriptionResult:
             models=tuple(dict(item) for item in models),
             pipeline_metrics=(
                 dict(pipeline_metrics) if pipeline_metrics is not None else None
+            ),
+            voice_activity=(
+                validate_voice_activity(voice_activity)
+                if voice_activity is not None
+                else None
             ),
         )
 

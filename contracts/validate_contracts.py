@@ -15,6 +15,18 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA_VERSION = "1.0.0"
+REQUIRED_SCHEMAS = frozenset(
+    {
+        "artifact-manifest.schema.json",
+        "business-processing-request.schema.json",
+        "job-event.schema.json",
+        "pdf-quality-report.schema.json",
+        "pdf-render-request.schema.json",
+        "pdf-render-result.schema.json",
+        "report-document.schema.json",
+        "voice-activity.schema.json",
+    }
+)
 EXPECTED_FACETS = [
     "AESTHETIC-COHERENCE",
     "AESTHETIC-DISTINCTION",
@@ -53,16 +65,28 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def validate_schema_documents() -> None:
     schema_paths = sorted(ROOT.glob("*.schema.json"))
-    if len(schema_paths) != 7:
-        raise ContractError(f"expected 7 schemas, found {len(schema_paths)}")
+    names = {path.name for path in schema_paths}
+    missing = sorted(REQUIRED_SCHEMAS - names)
+    if missing:
+        raise ContractError(
+            f"required schemas are missing: {', '.join(missing)}"
+        )
     for path in schema_paths:
         schema = load_json(path)
         if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
             raise ContractError(f"{path.name}: unexpected meta-schema")
-        if not str(schema.get("$id", "")).endswith(f"/{SCHEMA_VERSION}"):
-            raise ContractError(f"{path.name}: $id must end in /{SCHEMA_VERSION}")
-        if schema.get("type") != "object":
-            raise ContractError(f"{path.name}: root type must be object")
+        schema_id = str(schema.get("$id", ""))
+        if not schema_id.startswith(
+            "https://mediatranscribestudio.local/contracts/"
+        ):
+            raise ContractError(f"{path.name}: $id is missing or invalid")
+        if (
+            schema.get("type") != "object"
+            and not isinstance(schema.get("oneOf"), list)
+        ):
+            raise ContractError(
+                f"{path.name}: root must be an object or oneOf union"
+            )
 
 
 def validate_report_document(document: dict[str, Any]) -> None:
@@ -185,7 +209,8 @@ def main() -> int:
     validate_report_document(load_json(args.document))
     if args.render_request:
         validate_render_request(load_json(args.render_request))
-    print(f"validated 7 schemas and {args.document}")
+    schema_count = len(tuple(ROOT.glob("*.schema.json")))
+    print(f"validated {schema_count} schemas and {args.document}")
     return 0
 
 

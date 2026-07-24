@@ -51,6 +51,7 @@ from .speaker_pipeline import (
     ReviewProposal,
     SpeechWindow,
 )
+from .voice_activity import build_voice_activity
 
 VadStageObserver = Callable[[Mapping[str, Any]], None]
 _THIRD_PARTY_STDOUT_LOCK = threading.Lock()
@@ -945,11 +946,6 @@ class FfmpegFunAsrPreparationAdapter:
                 if min(end_ms, duration_ms) - start_ms
                 >= self.minimum_window_ms
             ]
-            if not intervals:
-                raise WorkerError(
-                    "NO_SPEECH_DETECTED",
-                    "FunASR VAD found no speech windows",
-                )
         except Exception as exc:
             self._observe_stage(
                 "inference",
@@ -967,7 +963,32 @@ class FfmpegFunAsrPreparationAdapter:
             audioDurationMs=duration_ms,
             sampleRate=sample_rate,
             speechWindowCount=len(intervals),
+            classification=(
+                "speech-candidates-detected"
+                if intervals
+                else "no-speech-candidates-detected"
+            ),
         )
+        if not intervals:
+            voice_activity = build_voice_activity(
+                job_id=context.job_id,
+                source_sha256=source_fingerprint,
+                media_duration_ms=duration_ms,
+                normalization_profile=normalization_profile,
+                provider={
+                    "id": self.adapter_id,
+                    "version": self.version,
+                },
+                windows=(),
+                minimum_window_ms=self.minimum_window_ms,
+                classification="no-speech-candidates-detected",
+                has_transcribable_speech=False,
+            )
+            raise WorkerError(
+                "NO_SPEECH_DETECTED",
+                "FunASR VAD found no speech windows",
+                details={"voiceActivity": voice_activity},
+            )
         vad_ms = (time.perf_counter() - vad_started) * 1000.0
         windows = tuple(
             SpeechWindow(

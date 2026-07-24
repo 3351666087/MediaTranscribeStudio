@@ -75,6 +75,7 @@ from .persistence import (
     validate_strict_json,
 )
 from .transcript_exports import export_transcript
+from .voice_activity import validate_voice_activity
 from .review import (
     assert_raw_text_unchanged,
     merge_speakers,
@@ -120,6 +121,7 @@ class JobRecord:
     media_probe_result: MediaProbeResult | None = None
     media_probe_artifact: MediaProbeArtifact | None = None
     media_probe_artifact_path: str | None = None
+    voice_activity_artifact_path: str | None = None
     output_execution_plans: tuple[OutputExecutionPlan, ...] = ()
     output_plan_paths: list[str] = field(default_factory=list)
     output_plan_hashes: list[str] = field(default_factory=list)
@@ -773,6 +775,9 @@ class WorkerService:
                 "renderManifestPath": record.render_manifest_path,
                 "pipelineMetricsPath": record.pipeline_metrics_path,
                 "mediaProbeArtifactPath": record.media_probe_artifact_path,
+                "voiceActivityArtifactPath": (
+                    record.voice_activity_artifact_path
+                ),
                 "outputPlanPaths": list(record.output_plan_paths),
                 "outputPlanHashes": list(record.output_plan_hashes),
                 "outputManifestPath": record.output_manifest_path,
@@ -2447,12 +2452,30 @@ class WorkerService:
                     "adapterVersion": self.transcription_adapter.version,
                 },
             )
-            raw_result = self.transcription_adapter.transcribe(record.request, context)
+            try:
+                raw_result = self.transcription_adapter.transcribe(
+                    record.request,
+                    context,
+                )
+            except WorkerError as exc:
+                if exc.code in {
+                    "NO_SPEECH_DETECTED",
+                    "NO_TRANSCRIBABLE_SPEECH",
+                }:
+                    self._complete_no_speech(record, exc, context)
+                    return
+                raise
             result = (
                 raw_result
                 if isinstance(raw_result, TranscriptionResult)
                 else TranscriptionResult.from_mapping(raw_result)
             )
+            if result.voice_activity is not None:
+                self._persist_voice_activity(
+                    record,
+                    result.voice_activity,
+                    context,
+                )
             context.raise_if_cancelled()
             self._transition(record, JobStatus.RUNNING, "validation")
             count, estimate = resolve_speaker_count(
@@ -2791,6 +2814,105 @@ class WorkerService:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _persist_voice_activity(
+        self,
+        record: JobRecord,
+        value: Mapping[str, Any],
+        context: AdapterContext,
+    ) -> Path:
+        context.raise_if_cancelled()
+        normalized = validate_voice_activity(value)
+        if normalized["jobId"] != record.request.job_id:
+            raise WorkerError(
+                "VOICE_ACTIVITY_INVALID",
+                "voice activity jobId does not match the active job",
+            )
+        expected_source_sha256 = (
+            record.media_probe_artifact.source_sha256
+            if record.media_probe_artifact is not None
+            else self._artifact_sha256(record.request.source_path)
+        )
+        if normalized["sourceSha256"] != expected_source_sha256:
+            raise WorkerError(
+                "VOICE_ACTIVITY_INVALID",
+                "voice activity source hash does not match the input media",
+            )
+        path = record.request.output_directory / "voice-activity.v1.json"
+        atomic_write_json(path, normalized)
+        verified_path = self.path_policy.verify_artifact(
+            path,
+            record.request.output_directory,
+        )
+        record.voice_activity_artifact_path = str(verified_path)
+        if str(verified_path) not in record.artifact_paths:
+            record.artifact_paths.append(str(verified_path))
+        self._emit(
+            record,
+            "artifact.created",
+            {
+                "artifactType": "voice-activity-v1",
+                "path": str(verified_path),
+                "sha256": canonical_json_sha256(normalized),
+            },
+        )
+        return verified_path
+
+    def _complete_no_speech(
+        self,
+        record: JobRecord,
+        error: WorkerError,
+        context: AdapterContext,
+    ) -> None:
+        raw_voice_activity = error.details.get("voiceActivity")
+        if not isinstance(raw_voice_activity, MappingABC):
+            raise WorkerError(
+                "VOICE_ACTIVITY_INVALID",
+                "no-speech completion requires voice activity evidence",
+            )
+        normalized = validate_voice_activity(raw_voice_activity)
+        if normalized["hasTranscribableSpeech"] is not False:
+            raise WorkerError(
+                "VOICE_ACTIVITY_INVALID",
+                "no-speech completion cannot claim transcribable speech",
+            )
+        self._persist_voice_activity(record, normalized, context)
+        with record.lock:
+            if record.business_status in {"pending", "running"}:
+                record.business_status = "not-applicable-no-speech"
+            record.quality_status = "no-transcribable-speech"
+            if record.request.output_recipe is not None:
+                record.output_publication_status = (
+                    "not-applicable-no-speech"
+                )
+        self._transition(
+            record,
+            JobStatus.COMPLETED,
+            "completed_no_speech",
+        )
+        self._emit(
+            record,
+            "stage.completed",
+            {
+                "stage": "transcription",
+                "outcome": normalized["classification"],
+                "hasTranscribableSpeech": False,
+            },
+        )
+        self._emit(
+            record,
+            "job.completed",
+            {
+                "status": "completed",
+                "disposition": normalized["classification"],
+                "hasTranscribableSpeech": False,
+                "artifactPaths": list(record.artifact_paths),
+                "business": self._business_event_payload(record),
+                "outputPublication": (
+                    self._output_publication_event_payload(record)
+                ),
+            },
+        )
+
     def _transition(
         self, record: JobRecord, status: JobStatus, stage: str
     ) -> None:
@@ -2963,6 +3085,9 @@ class WorkerService:
                 "reviewOpenCount": record.review_open_count,
                 "pipelineMetricsPath": record.pipeline_metrics_path,
                 "mediaProbeArtifactPath": record.media_probe_artifact_path,
+                "voiceActivityArtifactPath": (
+                    record.voice_activity_artifact_path
+                ),
                 "outputPlanPaths": list(record.output_plan_paths),
                 "outputPlanHashes": list(record.output_plan_hashes),
                 "outputManifestPath": record.output_manifest_path,

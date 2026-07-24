@@ -98,6 +98,7 @@ _BCP47_BY_QWEN_LANGUAGE = {
     "macedonian": "mk",
     "swahili": "sw",
     "oromo": "om",
+    "tagalog": "tl",
 }
 
 

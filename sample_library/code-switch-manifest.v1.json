@@ -1,0 +1,261 @@
+{
+  "schemaVersion": "1.0.0",
+  "libraryId": "mts-code-switch-speech-v1",
+  "maxDurationSeconds": 90,
+  "generatedRoot": ".runtime_cache/sample-library/code-switch",
+  "sources": [
+    {
+      "id": "ascend",
+      "dataset": "DynamicSuperb/CodeSwitchingSpeechIdentification_ASCEND",
+      "revision": "e44f58901a4e43719f949f8d61b1d6eb891d287d",
+      "license": "cc-by-sa-4.0",
+      "homepage": "https://huggingface.co/datasets/DynamicSuperb/CodeSwitchingSpeechIdentification_ASCEND",
+      "attribution": "ASCEND code-switching speech derivative published by DynamicSuperb; CC BY-SA 4.0.",
+      "recordingType": "real-recording"
+    },
+    {
+      "id": "ko-ja",
+      "dataset": "thetaone-ai/Korean-Japanese-Code-Switching-Speech",
+      "revision": "a6cbbb132bb4910c877a2c6fcb044316958578df",
+      "license": "apache-2.0",
+      "homepage": "https://huggingface.co/datasets/thetaone-ai/Korean-Japanese-Code-Switching-Speech",
+      "attribution": "Korean-Japanese Code-Switching Speech by Paik, Shin, and Lee; Apache 2.0.",
+      "recordingType": "real-recording"
+    },
+    {
+      "id": "liva",
+      "dataset": "liva-ai/code-switching-asr",
+      "revision": "51b5d0b419e4e96cbc658603fc728a76b53be5fc",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/liva-ai/code-switching-asr",
+      "attribution": "Code-Switching ASR collected and reviewed by Liva AI; CC BY 4.0.",
+      "recordingType": "real-recording"
+    },
+    {
+      "id": "fleurs-switch",
+      "dataset": "BrunoHays/english-en-x-code-switching-main-lang",
+      "revision": "ad098678e8286728108092b0adebd2474a22d0ac",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/BrunoHays/english-en-x-code-switching-main-lang",
+      "attribution": "Synthetic English-X mixtures derived from Google FLEURS by BrunoHays; CC BY 4.0.",
+      "recordingType": "synthetic-mixture"
+    }
+  ],
+  "cases": [
+    {
+      "id": "ascend-zh-en-row001",
+      "sourceId": "ascend",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 1},
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "zh-en", "intra-utterance"],
+      "expectedLanguages": ["zh", "en"],
+      "transcriptField": "transcription",
+      "switchCountField": "label"
+    },
+    {
+      "id": "ascend-zh-en-row030",
+      "sourceId": "ascend",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 30},
+      "region": "East Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "zh-en", "rapid-code-switching"],
+      "expectedLanguages": ["zh", "en"],
+      "transcriptField": "transcription",
+      "switchCountField": "label"
+    },
+    {
+      "id": "ascend-zh-en-row049",
+      "sourceId": "ascend",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 49},
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "zh-en", "rapid-code-switching"],
+      "expectedLanguages": ["zh", "en"],
+      "transcriptField": "transcription",
+      "switchCountField": "label"
+    },
+    {
+      "id": "ko-ja-korean-word-row000",
+      "sourceId": "ko-ja",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 0},
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "ko-ja", "word-switch"],
+      "expectedLanguages": ["ko", "ja"],
+      "transcriptField": "text",
+      "mainLanguageField": "main_language",
+      "switchLevelField": "cs_level"
+    },
+    {
+      "id": "ko-ja-korean-phrase-row002",
+      "sourceId": "ko-ja",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 2},
+      "region": "East Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "ko-ja", "phrase-switch"],
+      "expectedLanguages": ["ko", "ja"],
+      "transcriptField": "text",
+      "mainLanguageField": "main_language",
+      "switchLevelField": "cs_level"
+    },
+    {
+      "id": "ko-ja-korean-sentence-row006",
+      "sourceId": "ko-ja",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 6},
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "ko-ja", "sentence-switch"],
+      "expectedLanguages": ["ko", "ja"],
+      "transcriptField": "text",
+      "mainLanguageField": "main_language",
+      "switchLevelField": "cs_level"
+    },
+    {
+      "id": "ko-ja-japanese-word-row009",
+      "sourceId": "ko-ja",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 9},
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "ko-ja", "word-switch"],
+      "expectedLanguages": ["ko", "ja"],
+      "transcriptField": "text",
+      "mainLanguageField": "main_language",
+      "switchLevelField": "cs_level"
+    },
+    {
+      "id": "ko-ja-japanese-phrase-row010",
+      "sourceId": "ko-ja",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 10},
+      "region": "East Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "ko-ja", "phrase-switch"],
+      "expectedLanguages": ["ko", "ja"],
+      "transcriptField": "text",
+      "mainLanguageField": "main_language",
+      "switchLevelField": "cs_level"
+    },
+    {
+      "id": "ko-ja-japanese-sentence-row017",
+      "sourceId": "ko-ja",
+      "acquisition": {"kind": "whole-utterance", "config": "default", "split": "test", "rowIndex": 17},
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "ko-ja", "sentence-switch"],
+      "expectedLanguages": ["ko", "ja"],
+      "transcriptField": "text",
+      "mainLanguageField": "main_language",
+      "switchLevelField": "cs_level"
+    },
+    {
+      "id": "liva-en-sw-row000-n3",
+      "sourceId": "liva",
+      "acquisition": {"kind": "speaker-window", "config": "default", "split": "train", "rowIndex": 0},
+      "region": "Sub-Saharan Africa",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "multispeaker", "en-sw", "overlap"],
+      "expectedLanguages": ["en", "sw"],
+      "transcriptField": "transcript",
+      "targetSpeakerCount": 3
+    },
+    {
+      "id": "liva-en-pcm-row010-n2",
+      "sourceId": "liva",
+      "acquisition": {"kind": "speaker-window", "config": "default", "split": "train", "rowIndex": 10},
+      "region": "West Africa",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "multispeaker", "en-pcm", "overlap"],
+      "expectedLanguages": ["en", "pcm"],
+      "transcriptField": "transcript",
+      "targetSpeakerCount": 2
+    },
+    {
+      "id": "liva-en-yo-row014-n3",
+      "sourceId": "liva",
+      "acquisition": {"kind": "speaker-window", "config": "default", "split": "train", "rowIndex": 14},
+      "region": "West Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "multispeaker", "en-yo", "overlap"],
+      "expectedLanguages": ["en", "yo"],
+      "transcriptField": "transcript",
+      "targetSpeakerCount": 3
+    },
+    {
+      "id": "liva-en-tl-row024-n5",
+      "sourceId": "liva",
+      "acquisition": {"kind": "speaker-window", "config": "default", "split": "train", "rowIndex": 24},
+      "region": "Southeast Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "multispeaker", "en-tl", "overlap", "n5"],
+      "expectedLanguages": ["en", "tl"],
+      "transcriptField": "transcript",
+      "targetSpeakerCount": 5
+    },
+    {
+      "id": "liva-en-tl-row023-n4",
+      "sourceId": "liva",
+      "acquisition": {"kind": "speaker-window", "config": "default", "split": "train", "rowIndex": 23},
+      "region": "Southeast Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "multispeaker", "en-tl", "overlap"],
+      "expectedLanguages": ["en", "tl"],
+      "transcriptField": "transcript",
+      "targetSpeakerCount": 4
+    },
+    {
+      "id": "fleurs-en-es-switch-row000",
+      "sourceId": "fleurs-switch",
+      "acquisition": {"kind": "switch-window", "config": "default", "split": "test", "rowIndex": 0},
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["synthetic-mixture", "en-es", "exact-switch-timing"],
+      "expectedLanguages": ["en", "es"],
+      "transcriptField": "transcription_tagged",
+      "switchIndex": 0
+    },
+    {
+      "id": "fleurs-en-pt-switch-row001",
+      "sourceId": "fleurs-switch",
+      "acquisition": {"kind": "switch-window", "config": "default", "split": "test", "rowIndex": 1},
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["synthetic-mixture", "en-pt", "exact-switch-timing"],
+      "expectedLanguages": ["en", "pt"],
+      "transcriptField": "transcription_tagged",
+      "switchIndex": 0
+    },
+    {
+      "id": "fleurs-en-it-switch-row002",
+      "sourceId": "fleurs-switch",
+      "acquisition": {"kind": "switch-window", "config": "default", "split": "test", "rowIndex": 2},
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["synthetic-mixture", "en-it", "exact-switch-timing"],
+      "expectedLanguages": ["en", "it"],
+      "transcriptField": "transcription_tagged",
+      "switchIndex": 0
+    },
+    {
+      "id": "fleurs-en-de-switch-row003",
+      "sourceId": "fleurs-switch",
+      "acquisition": {"kind": "switch-window", "config": "default", "split": "test", "rowIndex": 3},
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["synthetic-mixture", "en-de", "exact-switch-timing"],
+      "expectedLanguages": ["en", "de"],
+      "transcriptField": "transcription_tagged",
+      "switchIndex": 0
+    },
+    {
+      "id": "fleurs-en-fr-switch-row008",
+      "sourceId": "fleurs-switch",
+      "acquisition": {"kind": "switch-window", "config": "default", "split": "test", "rowIndex": 8},
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["synthetic-mixture", "en-fr", "exact-switch-timing"],
+      "expectedLanguages": ["en", "fr"],
+      "transcriptField": "transcription_tagged",
+      "switchIndex": 0
+    }
+  ]
+}

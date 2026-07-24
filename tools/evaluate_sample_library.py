@@ -9,7 +9,7 @@ import statistics
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -207,6 +207,182 @@ def _language_quality(
         ),
         "automaticDetectionEligible": automatic_eligible,
     }
+
+
+def _segment_language_roots(segment: Mapping[str, Any]) -> tuple[str, ...]:
+    evidence = segment.get("evidence")
+    asr = evidence.get("asr") if isinstance(evidence, Mapping) else None
+    candidates = (
+        asr.get("languageCandidates")
+        if isinstance(asr, Mapping)
+        else None
+    )
+    roots: list[str] = []
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            root = _language_root(candidate)
+            if root not in {None, "auto", "mul", "und"} and root not in roots:
+                roots.append(root)
+    evidence_language = (
+        asr.get("language") if isinstance(asr, Mapping) else None
+    )
+    direct = _language_root(segment.get("language", evidence_language))
+    if direct not in {None, "auto", "mul", "und"} and direct not in roots:
+        roots.append(direct)
+    return tuple(roots)
+
+
+def _code_switch_language_quality(
+    *,
+    case: Mapping[str, Any],
+    transcript: Mapping[str, Any],
+    segments: Sequence[dict[str, Any]],
+) -> dict[str, Any] | None:
+    truth = case.get("languageTruth")
+    if not isinstance(truth, Mapping):
+        return None
+    expected_raw = truth.get("expectedLanguages", case.get("expectedLanguages"))
+    if not isinstance(expected_raw, list) or not expected_raw:
+        return None
+    expected = sorted(
+        {
+            root
+            for value in expected_raw
+            if (root := _language_root(value))
+            not in {"auto", "mul", "und"}
+        }
+    )
+    detected_by_segment = [
+        {
+            "startMs": segment.get("startMs"),
+            "endMs": segment.get("endMs"),
+            "languages": list(_segment_language_roots(segment)),
+        }
+        for segment in segments
+        if isinstance(segment, Mapping)
+    ]
+    detected = sorted(
+        {
+            language
+            for item in detected_by_segment
+            for language in item["languages"]
+        }
+    )
+    document_root = _language_root(transcript.get("language"))
+    detected_set = set(detected)
+    expected_set = set(expected)
+    base: dict[str, Any] = {
+        "qualification": truth.get("qualification"),
+        "expectedLanguages": expected,
+        "detectedLanguages": detected,
+        "documentLanguage": transcript.get("language"),
+        "documentLanguageRoot": document_root,
+        "documentMarkedMultilingual": document_root == "mul",
+        "expectedLanguageRecall": (
+            len(expected_set & detected_set) / len(expected_set)
+            if expected_set
+            else None
+        ),
+        "expectedLanguageSetExact": detected_set == expected_set,
+        "unexpectedLanguages": sorted(detected_set - expected_set),
+        "missingLanguages": sorted(expected_set - detected_set),
+        "segmentLanguageEvidence": detected_by_segment,
+        "timeScoringEligible": truth.get("timeScoringEligible") is True,
+        "expectedSwitchCount": truth.get("expectedSwitchCount"),
+        "switchLevel": truth.get("switchLevel"),
+        "mainLanguage": truth.get("mainLanguage"),
+        "durationWeightedAccuracy": None,
+        "referenceSwitchPointsMs": [],
+        "predictedSwitchPointsMs": [],
+        "switchPointAbsoluteErrorsMs": [],
+        "switchPointMeanAbsoluteErrorMs": None,
+        "switchPointMaxAbsoluteErrorMs": None,
+    }
+    intervals = truth.get("intervals")
+    if (
+        truth.get("timeScoringEligible") is not True
+        or not isinstance(intervals, list)
+    ):
+        return base
+    reference_intervals: list[tuple[int, int, str]] = []
+    for interval in intervals:
+        if not isinstance(interval, Mapping):
+            continue
+        root = _language_root(interval.get("language"))
+        start = interval.get("startSeconds")
+        end = interval.get("endSeconds")
+        if (
+            root in {None, "auto", "mul", "und"}
+            or isinstance(start, bool)
+            or not isinstance(start, (int, float))
+            or isinstance(end, bool)
+            or not isinstance(end, (int, float))
+        ):
+            continue
+        start_ms = round(float(start) * 1000)
+        end_ms = round(float(end) * 1000)
+        if end_ms > start_ms:
+            reference_intervals.append((start_ms, end_ms, root))
+    total_ms = 0
+    correct_ms = 0
+    predicted_primary: list[tuple[int, int, str | None]] = []
+    for segment, evidence in zip(segments, detected_by_segment):
+        start = segment.get("startMs")
+        end = segment.get("endMs")
+        languages = evidence["languages"]
+        if (
+            isinstance(start, int)
+            and isinstance(end, int)
+            and end > start
+        ):
+            primary = languages[0] if len(languages) == 1 else None
+            predicted_primary.append((start, end, primary))
+            for ref_start, ref_end, expected_language in reference_intervals:
+                overlap = max(0, min(end, ref_end) - max(start, ref_start))
+                if overlap <= 0:
+                    continue
+                total_ms += overlap
+                if primary == expected_language:
+                    correct_ms += overlap
+    base["durationWeightedAccuracy"] = (
+        correct_ms / total_ms if total_ms else None
+    )
+    reference_points_raw = truth.get("switchPointsSeconds")
+    reference_points = (
+        [
+            round(float(value) * 1000)
+            for value in reference_points_raw
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if isinstance(reference_points_raw, list)
+        else []
+    )
+    predicted_points = [
+        current[0]
+        for previous, current in zip(predicted_primary, predicted_primary[1:])
+        if previous[2] is not None
+        and current[2] is not None
+        and previous[2] != current[2]
+    ]
+    errors = (
+        [
+            min(abs(reference - predicted) for predicted in predicted_points)
+            for reference in reference_points
+        ]
+        if predicted_points
+        else []
+    )
+    base["referenceSwitchPointsMs"] = reference_points
+    base["predictedSwitchPointsMs"] = predicted_points
+    base["switchPointAbsoluteErrorsMs"] = errors
+    base["switchPointMeanAbsoluteErrorMs"] = (
+        statistics.fmean(errors) if errors else None
+    )
+    base["switchPointMaxAbsoluteErrorMs"] = max(errors) if errors else None
+    base["missedReferenceSwitchCount"] = (
+        len(reference_points) if not predicted_points else 0
+    )
+    return base
 
 
 def _boundary_quality(
@@ -433,6 +609,11 @@ def evaluate_case(
         transcript=transcript,
         segments=segments,
     )
+    base["codeSwitchLanguageQuality"] = _code_switch_language_quality(
+        case=case,
+        transcript=transcript,
+        segments=segments,
+    )
     base["diarizationQuality"] = diarization
     base["boundaryQuality"] = boundary
     base["runtimeQuality"] = _runtime_quality(transcript_path)
@@ -602,6 +783,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             "languageScored": sum(
                 isinstance(item.get("languageQuality"), dict)
                 and item["languageQuality"].get("automaticDetectionEligible") is True
+                for item in reports
+            ),
+            "codeSwitchDocumentScored": sum(
+                isinstance(item.get("codeSwitchLanguageQuality"), dict)
+                for item in reports
+            ),
+            "codeSwitchTimingScored": sum(
+                isinstance(item.get("codeSwitchLanguageQuality"), dict)
+                and item["codeSwitchLanguageQuality"].get("timeScoringEligible") is True
+                and isinstance(
+                    item["codeSwitchLanguageQuality"].get(
+                        "durationWeightedAccuracy"
+                    ),
+                    (int, float),
+                )
                 for item in reports
             ),
             "missingEvidence": sum(

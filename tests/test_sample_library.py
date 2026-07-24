@@ -131,3 +131,140 @@ def test_unknown_speaker_truth_does_not_report_false_count_result(
     assert report["evidence"]["speakerCountAbsoluteError"] is None
     assert report["evidence"]["speakerCountMatch"] is None
     assert report["evidence"]["distinctSpeakerCountMatch"] is None
+
+
+def test_language_quality_scores_only_automatic_detection(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "outputs" / "language"
+    artifact_root.mkdir(parents=True)
+    transcript = artifact_root / "transcript-document.v2.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "language": "mul",
+                "speakerPolicy": {"resolvedCount": 1},
+                "segments": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1000,
+                        "speakerId": "speaker-1",
+                        "displayText": "bonjour",
+                        "evidence": {
+                            "asr": {
+                                "language": "fr",
+                                "requestedLanguage": "auto",
+                            }
+                        },
+                    },
+                    {
+                        "startMs": 1000,
+                        "endMs": 2000,
+                        "speakerId": "speaker-1",
+                        "displayText": "encore",
+                        "evidence": {
+                            "asr": {
+                                "language": "und",
+                                "requestedLanguage": "auto",
+                            }
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "language-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": [str(transcript)]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = evaluate_case(
+        case={
+            "id": "language",
+            "language": "fr-FR",
+            "expectedSpeakerCount": 1,
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="language",
+    )
+
+    assert report["languageQuality"] == {
+        "expectedLanguage": "fr-FR",
+        "expectedLanguageRoot": "fr",
+        "documentLanguage": "mul",
+        "documentLanguageRoot": "mul",
+        "documentLanguageMatch": False,
+        "requestedLanguages": ["auto"],
+        "detectedLanguageCounts": {"fr": 1, "und": 1},
+        "segmentCount": 2,
+        "scoredSegmentCount": 2,
+        "correctSegmentCount": 1,
+        "segmentAccuracy": 0.5,
+        "undeterminedRate": 0.5,
+        "automaticDetectionEligible": True,
+    }
+
+
+def test_reference_language_prompt_is_not_scored_as_detection(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "outputs" / "language"
+    artifact_root.mkdir(parents=True)
+    transcript = artifact_root / "transcript-document.v2.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "language": "fr-FR",
+                "speakerPolicy": {"resolvedCount": 1},
+                "segments": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1000,
+                        "speakerId": "speaker-1",
+                        "displayText": "bonjour",
+                        "evidence": {
+                            "asr": {
+                                "language": "fr-FR",
+                                "requestedLanguage": "fr-FR",
+                            }
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "language-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": [str(transcript)]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = evaluate_case(
+        case={"id": "language", "language": "fr-FR"},
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="language",
+    )
+
+    assert report["languageQuality"]["automaticDetectionEligible"] is False
+    assert report["languageQuality"]["segmentAccuracy"] is None

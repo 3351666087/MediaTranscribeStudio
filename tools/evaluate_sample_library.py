@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.language import normalize_language_tag
 from backend.pipeline_metrics import ReferenceTurn, evaluate_reference_quality
 from tools.sample_library import word_error_rate
 
@@ -126,6 +127,83 @@ def _review_quality(transcript_path: Path) -> dict[str, Any] | None:
         "path": str(review_path),
         "openCount": review.get("openCount"),
         "itemCount": len(items) if isinstance(items, list) else None,
+    }
+
+
+def _language_root(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        normalized = normalize_language_tag(value, allow_auto=True)
+    except ValueError:
+        return None
+    if normalized in {"auto", "mul", "und"}:
+        return normalized
+    return normalized.split("-", 1)[0].casefold()
+
+
+def _language_quality(
+    *,
+    expected_language: object,
+    transcript: dict[str, Any],
+    segments: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    expected_root = _language_root(expected_language)
+    document_language = transcript.get("language")
+    document_root = _language_root(document_language)
+    detected: list[str] = []
+    requested: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        evidence = segment.get("evidence")
+        asr = evidence.get("asr") if isinstance(evidence, dict) else None
+        if not isinstance(asr, dict):
+            continue
+        detected_root = _language_root(asr.get("language"))
+        if detected_root is not None:
+            detected.append(detected_root)
+        requested_root = _language_root(asr.get("requestedLanguage"))
+        if requested_root is not None:
+            requested.append(requested_root)
+    detected_counts = {
+        language: detected.count(language) for language in sorted(set(detected))
+    }
+    requested_languages = sorted(set(requested))
+    automatic_eligible = (
+        expected_root not in {None, "auto", "mul", "und"}
+        and bool(detected)
+        and requested_languages == ["auto"]
+    )
+    correct = (
+        sum(language == expected_root for language in detected)
+        if automatic_eligible
+        else None
+    )
+    return {
+        "expectedLanguage": expected_language,
+        "expectedLanguageRoot": expected_root,
+        "documentLanguage": document_language,
+        "documentLanguageRoot": document_root,
+        "documentLanguageMatch": (
+            document_root == expected_root
+            if expected_root not in {None, "auto", "mul", "und"}
+            else None
+        ),
+        "requestedLanguages": requested_languages,
+        "detectedLanguageCounts": detected_counts,
+        "segmentCount": len(segments),
+        "scoredSegmentCount": len(detected) if automatic_eligible else 0,
+        "correctSegmentCount": correct,
+        "segmentAccuracy": (
+            correct / len(detected)
+            if automatic_eligible and correct is not None
+            else None
+        ),
+        "undeterminedRate": (
+            detected.count("und") / len(detected) if detected else None
+        ),
+        "automaticDetectionEligible": automatic_eligible,
     }
 
 
@@ -348,6 +426,11 @@ def evaluate_case(
         "referenceCharacters": len(reference),
         "hypothesisCharacters": len(hypothesis),
     }
+    base["languageQuality"] = _language_quality(
+        expected_language=case.get("language"),
+        transcript=transcript,
+        segments=segments,
+    )
     base["diarizationQuality"] = diarization
     base["boundaryQuality"] = boundary
     base["runtimeQuality"] = _runtime_quality(transcript_path)
@@ -399,6 +482,15 @@ def _bucket_summary(
             if isinstance(item.get("runtimeQuality"), dict)
             and isinstance(item["runtimeQuality"].get("rtf"), (int, float))
         ]
+        language_accuracy_values = [
+            item.get("languageQuality", {}).get("segmentAccuracy")
+            for item in items
+            if isinstance(item.get("languageQuality"), dict)
+            and isinstance(
+                item["languageQuality"].get("segmentAccuracy"),
+                (int, float),
+            )
+        ]
         speaker_matches = [
             item.get("evidence", {}).get("speakerCountMatch")
             for item in items
@@ -417,6 +509,11 @@ def _bucket_summary(
             "meanDer": statistics.fmean(der_values) if der_values else None,
             "meanJer": statistics.fmean(jer_values) if jer_values else None,
             "meanRtf": statistics.fmean(rtf_values) if rtf_values else None,
+            "meanLanguageSegmentAccuracy": (
+                statistics.fmean(language_accuracy_values)
+                if language_accuracy_values
+                else None
+            ),
         }
     return output
 
@@ -500,6 +597,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "summary": {
             "total": len(reports),
             "observed": sum(item.get("status") == "observed" for item in reports),
+            "languageScored": sum(
+                isinstance(item.get("languageQuality"), dict)
+                and item["languageQuality"].get("automaticDetectionEligible") is True
+                for item in reports
+            ),
             "missingEvidence": sum(
                 item.get("evidence", {}).get("transcript")
                 in {None, "missing", "invalid-json", "missing-segments"}

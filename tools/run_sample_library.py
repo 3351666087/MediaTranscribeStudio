@@ -115,6 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "manual", "hybrid"),
         default="auto",
     )
+    parser.add_argument(
+        "--language-mode",
+        choices=("reference", "auto"),
+        default="reference",
+        help=(
+            "use each case's reference language or require production "
+            "language detection"
+        ),
+    )
     parser.add_argument("--render-pdf", action="store_true")
     parser.add_argument(
         "--local-llm-mode",
@@ -183,7 +192,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifact_id=artifact_id,
             source=source,
             config=args.config.resolve(),
-            language=str(row.get("language") or "auto"),
+            language=(
+                "auto"
+                if args.language_mode == "auto"
+                else str(row.get("language") or "auto")
+            ),
             worker_output=output,
             logs_root=logs_root,
             speaker_count_mode=args.speaker_count_mode,

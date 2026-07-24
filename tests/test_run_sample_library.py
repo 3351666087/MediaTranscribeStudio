@@ -59,6 +59,38 @@ def test_auto_mode_accepts_case_without_reference_speaker_count(
     assert captured["expected_speaker_count"] is None
 
 
+def test_auto_language_mode_does_not_pass_reference_language(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    manifest = _manifest(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["cases"][0]["language"] = "fr-FR"
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+
+    def fake_run_case(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(run_sample_library, "_run_case", fake_run_case)
+    exit_code = run_sample_library.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--results-root",
+            str(tmp_path / "results"),
+            "--worker-output-root",
+            str(tmp_path / "outputs"),
+            "--language-mode",
+            "auto",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["language"] == "auto"
+
+
 @pytest.mark.parametrize("mode", ["manual", "hybrid"])
 def test_reference_modes_reject_unknown_speaker_count(
     tmp_path: Path,

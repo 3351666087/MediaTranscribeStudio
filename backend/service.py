@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 import uuid
 from collections.abc import Mapping as MappingABC
@@ -86,6 +87,7 @@ from .review import (
 
 
 EventSink = Callable[[dict[str, Any]], None]
+_LOGGER = logging.getLogger(__name__)
 _TERMINAL = frozenset(
     {
         JobStatus.REVIEW_REQUIRED,
@@ -2659,6 +2661,12 @@ class WorkerService:
         except WorkerError as exc:
             self._finish_failed(record, exc)
         except Exception as exc:
+            _LOGGER.exception(
+                "unexpected worker job failure jobId=%s stage=%s exceptionType=%s",
+                record.request.job_id,
+                record.stage,
+                type(exc).__name__,
+            )
             self._finish_failed(
                 record,
                 WorkerError(

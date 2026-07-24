@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Sequence
 from unittest.mock import patch
@@ -648,6 +649,185 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             decoded[0].evidence["speakerSequenceDecode"]["reviewStatus"],
             "NOT_REQUIRED",
         )
+
+    def test_pyannote_tracks_map_to_canonical_speakers_without_changing_n(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+        base = (
+            self.transcript_segment(
+                "one",
+                0,
+                1000,
+                "speaker-1",
+                margin=0.8,
+                scores=(("speaker-1", 0.9), ("speaker-2", 0.1)),
+            ),
+            self.transcript_segment(
+                "two",
+                1000,
+                2000,
+                "speaker-1",
+                margin=0.6,
+                scores=(("speaker-1", 0.8), ("speaker-2", 0.2)),
+            ),
+            self.transcript_segment(
+                "three",
+                2000,
+                3000,
+                "speaker-1",
+                margin=0.5,
+                scores=(("speaker-1", 0.3), ("speaker-2", 0.8)),
+            ),
+            self.transcript_segment(
+                "four",
+                3000,
+                4000,
+                "speaker-2",
+                margin=0.7,
+                scores=(("speaker-1", 0.2), ("speaker-2", 0.9)),
+            ),
+        )
+        local_by_segment = {
+            "one": "LOCAL_A",
+            "two": "LOCAL_A",
+            "three": "LOCAL_B",
+            "four": "LOCAL_B",
+        }
+        segments = tuple(
+            replace(
+                segment,
+                evidence={
+                    **dict(segment.evidence),
+                    "overlap": {
+                        "provider": {
+                            "id": "pyannote-community-1",
+                            "version": "2.0.0",
+                        },
+                        "speakerTurns": [
+                            {
+                                "startMs": segment.start_ms,
+                                "endMs": segment.end_ms,
+                                "localSpeaker": local_by_segment[
+                                    segment.segment_id
+                                ],
+                            }
+                        ],
+                        "overlapIntervals": [],
+                    },
+                },
+            )
+            for segment in base
+        )
+
+        mapped = pipeline._apply_pyannote_canonical_mapping(segments)
+
+        self.assertEqual(
+            [segment.speaker_id for segment in mapped],
+            ["speaker-1", "speaker-1", "speaker-2", "speaker-2"],
+        )
+        self.assertEqual(
+            {segment.speaker_id for segment in mapped},
+            {"speaker-1", "speaker-2"},
+        )
+        changed = mapped[2]
+        self.assertEqual(
+            changed.revisions[-1].reason_code,
+            "PYANNOTE_CANONICAL_TRACK_MAPPING",
+        )
+        evidence = changed.evidence["pyannoteCanonicalMapping"]
+        self.assertTrue(evidence["accepted"])
+        self.assertTrue(evidence["applied"])
+        self.assertGreater(
+            evidence["mappingMargin"],
+            evidence["mappingMarginThreshold"],
+        )
+        self.assertEqual(
+            changed.evidence["overlap"]["canonicalSpeakerTurns"],
+            [
+                {
+                    "startMs": 2000,
+                    "endMs": 3000,
+                    "speakerId": "speaker-2",
+                    "localSpeaker": "LOCAL_B",
+                }
+            ],
+        )
+
+    def test_ambiguous_pyannote_mapping_fails_closed(self) -> None:
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+        base = (
+            self.transcript_segment(
+                "one",
+                0,
+                1000,
+                "speaker-1",
+                scores=(("speaker-1", 0.5), ("speaker-2", 0.5)),
+            ),
+            self.transcript_segment(
+                "two",
+                1000,
+                2000,
+                "speaker-2",
+                scores=(("speaker-1", 0.5), ("speaker-2", 0.5)),
+            ),
+        )
+        segments = tuple(
+            replace(
+                segment,
+                evidence={
+                    **dict(segment.evidence),
+                    "overlap": {
+                        "provider": {
+                            "id": "pyannote-community-1",
+                            "version": "2.0.0",
+                        },
+                        "speakerTurns": [
+                            {
+                                "startMs": segment.start_ms,
+                                "endMs": segment.end_ms,
+                                "localSpeaker": (
+                                    "LOCAL_A"
+                                    if segment.segment_id == "one"
+                                    else "LOCAL_B"
+                                ),
+                            }
+                        ],
+                        "overlapIntervals": [],
+                    },
+                },
+            )
+            for segment in base
+        )
+
+        mapped = pipeline._apply_pyannote_canonical_mapping(segments)
+
+        self.assertEqual(
+            [segment.speaker_id for segment in mapped],
+            ["speaker-1", "speaker-2"],
+        )
+        for segment in mapped:
+            evidence = segment.evidence["pyannoteCanonicalMapping"]
+            self.assertFalse(evidence["accepted"])
+            self.assertFalse(evidence["applied"])
+            self.assertIn(
+                "PYANNOTE_MAPPING_MARGIN_BELOW_THRESHOLD",
+                evidence["blockers"],
+            )
+            self.assertNotIn(
+                "canonicalSpeakerTurns",
+                segment.evidence["overlap"],
+            )
 
     def test_global_sequence_decode_ignores_semantic_role_hints(self) -> None:
         pipeline, _, _, _, _ = self.pipeline(2)

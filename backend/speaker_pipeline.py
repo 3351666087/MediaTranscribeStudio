@@ -35,6 +35,7 @@ from .pipeline_metrics import (
     PipelineMetricsCollector,
     ReferenceTurn,
     evaluate_reference_quality,
+    maximum_weight_assignment,
 )
 from .speaker_sequence_decoder import (
     CARDINALITY_CHANGE_REVIEW_REQUIRED,
@@ -1006,6 +1007,8 @@ class SpeakerPipelineConfig:
     eigengap_landmark_limit: int = 256
     temporal_short_segment_ms: int = 1_500
     temporal_max_gap_ms: int = 750
+    pyannote_mapping_margin_threshold: float = 0.05
+    pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
     local_llm_mode: str = "disabled"
     local_llm_model: str = "qwen3.5:4b"
@@ -1043,6 +1046,10 @@ class SpeakerPipelineConfig:
             raise ValueError("temporal_short_segment_ms must be positive")
         if self.temporal_max_gap_ms < 0:
             raise ValueError("temporal_max_gap_ms must not be negative")
+        if not 0.0 <= self.pyannote_mapping_margin_threshold <= 1.0:
+            raise ValueError("pyannote_mapping_margin_threshold is invalid")
+        if not 0.5 <= self.pyannote_primary_dominance_threshold <= 1.0:
+            raise ValueError("pyannote_primary_dominance_threshold is invalid")
         if self.pyannote_mode not in {"disabled", "fallback"}:
             raise ValueError("pyannote_mode must be disabled or fallback")
         if self.local_llm_mode not in {"disabled", "suggestion-only"}:
@@ -1072,6 +1079,12 @@ class SpeakerPipelineConfig:
             "eigengapLandmarkLimit": self.eigengap_landmark_limit,
             "temporalShortSegmentMs": self.temporal_short_segment_ms,
             "temporalMaxGapMs": self.temporal_max_gap_ms,
+            "pyannoteMappingMarginThreshold": (
+                self.pyannote_mapping_margin_threshold
+            ),
+            "pyannotePrimaryDominanceThreshold": (
+                self.pyannote_primary_dominance_threshold
+            ),
             "pyannoteMode": self.pyannote_mode,
             "pyannoteTelemetryEnabled": False,
             "localLlmMode": self.local_llm_mode,
@@ -5157,6 +5170,315 @@ class SpeakerPipeline:
             )
         return tuple(decoded)
 
+    @staticmethod
+    def _assignment_score(
+        weights: Sequence[Sequence[float]],
+        assignment: Sequence[tuple[int, int]],
+    ) -> float:
+        return sum(weights[row][column] for row, column in assignment)
+
+    def _apply_pyannote_canonical_mapping(
+        self,
+        segments: Sequence[TranscriptSegment],
+    ) -> tuple[TranscriptSegment, ...]:
+        """Map anonymous pyannote tracks to canonical acoustic speakers."""
+
+        if self.config.pyannote_mode != "fallback" or not segments:
+            return tuple(segments)
+        canonical_speakers = sorted(
+            {
+                score.speaker_id
+                for segment in segments
+                for score in segment.speaker_scores
+            },
+            key=lambda speaker_id: (_speaker_number(speaker_id) or math.inf),
+        )
+        if not canonical_speakers:
+            return tuple(segments)
+
+        turns_by_segment: dict[str, list[Mapping[str, Any]]] = {}
+        local_speakers: set[str] = set()
+        for segment in segments:
+            overlap = segment.evidence.get("overlap")
+            provider = (
+                overlap.get("provider")
+                if isinstance(overlap, Mapping)
+                else None
+            )
+            raw_turns = (
+                overlap.get("speakerTurns")
+                if isinstance(overlap, Mapping)
+                and isinstance(provider, Mapping)
+                and provider.get("id") == "pyannote-community-1"
+                else None
+            )
+            if not isinstance(raw_turns, list):
+                return tuple(segments)
+            validated: list[Mapping[str, Any]] = []
+            for raw in raw_turns:
+                if not isinstance(raw, Mapping):
+                    return tuple(segments)
+                start_ms = raw.get("startMs")
+                end_ms = raw.get("endMs")
+                local_speaker = raw.get("localSpeaker")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or not isinstance(local_speaker, str)
+                    or not local_speaker.strip()
+                    or start_ms < segment.start_ms
+                    or end_ms > segment.end_ms
+                    or end_ms <= start_ms
+                ):
+                    return tuple(segments)
+                validated.append(raw)
+                local_speakers.add(local_speaker.strip())
+            turns_by_segment[segment.segment_id] = validated
+
+        ordered_local = sorted(local_speakers)
+        if len(ordered_local) != len(canonical_speakers):
+            return tuple(segments)
+        local_index = {
+            speaker_id: index for index, speaker_id in enumerate(ordered_local)
+        }
+        canonical_index = {
+            speaker_id: index
+            for index, speaker_id in enumerate(canonical_speakers)
+        }
+        weights = [
+            [0.0 for _ in canonical_speakers]
+            for _ in ordered_local
+        ]
+        total_track_ms = 0
+        for segment in segments:
+            scores = {
+                score.speaker_id: max(-1.0, min(1.0, score.score))
+                for score in segment.speaker_scores
+            }
+            if set(scores) != set(canonical_speakers):
+                return tuple(segments)
+            for turn in turns_by_segment[segment.segment_id]:
+                duration_ms = int(turn["endMs"]) - int(turn["startMs"])
+                total_track_ms += duration_ms
+                row = local_index[str(turn["localSpeaker"]).strip()]
+                for speaker_id, score in scores.items():
+                    weights[row][canonical_index[speaker_id]] += (
+                        duration_ms * score
+                    )
+        if total_track_ms <= 0:
+            return tuple(segments)
+
+        assignment = maximum_weight_assignment(weights)
+        if len(assignment) != len(ordered_local):
+            return tuple(segments)
+        optimal_score = self._assignment_score(weights, assignment)
+        alternative_score = -math.inf
+        minimum_weight = min(
+            value for row in weights for value in row
+        )
+        for forbidden_row, forbidden_column in assignment:
+            alternative = [list(row) for row in weights]
+            alternative[forbidden_row][forbidden_column] = (
+                minimum_weight - abs(optimal_score) - total_track_ms - 1.0
+            )
+            candidate = maximum_weight_assignment(alternative)
+            if (
+                len(candidate) == len(ordered_local)
+                and (forbidden_row, forbidden_column) not in candidate
+            ):
+                alternative_score = max(
+                    alternative_score,
+                    self._assignment_score(weights, candidate),
+                )
+        if len(ordered_local) == 1:
+            mapping_margin = 1.0
+            alternative_score_value: float | None = None
+        else:
+            alternative_score_value = (
+                alternative_score if math.isfinite(alternative_score) else None
+            )
+            mapping_margin = (
+                max(0.0, optimal_score - alternative_score) / total_track_ms
+                if alternative_score_value is not None
+                else 0.0
+            )
+        mapping = {
+            ordered_local[row]: canonical_speakers[column]
+            for row, column in assignment
+        }
+        mapping_accepted = (
+            mapping_margin >= self.config.pyannote_mapping_margin_threshold
+        )
+        mapping_evidence = {
+            "provider": {
+                "id": "pyannote-community-1",
+                "version": str(
+                    getattr(self.pyannote_adapter, "version", "unknown")
+                ),
+            },
+            "method": "global-duration-weighted-acoustic-hungarian-v1",
+            "mapping": dict(sorted(mapping.items())),
+            "weights": {
+                ordered_local[row]: {
+                    canonical_speakers[column]: round(value, 6)
+                    for column, value in enumerate(weight_row)
+                }
+                for row, weight_row in enumerate(weights)
+            },
+            "optimalScore": round(optimal_score, 6),
+            "alternativeScore": (
+                round(alternative_score_value, 6)
+                if alternative_score_value is not None
+                else None
+            ),
+            "totalTrackMs": total_track_ms,
+            "mappingMargin": round(mapping_margin, 9),
+            "mappingMarginThreshold": (
+                self.config.pyannote_mapping_margin_threshold
+            ),
+            "primaryDominanceThreshold": (
+                self.config.pyannote_primary_dominance_threshold
+            ),
+            "accepted": mapping_accepted,
+        }
+
+        proposed: list[TranscriptSegment] = []
+        for segment in segments:
+            local_durations: dict[str, int] = {}
+            canonical_turns: list[dict[str, Any]] = []
+            for turn in turns_by_segment[segment.segment_id]:
+                local_speaker = str(turn["localSpeaker"]).strip()
+                duration_ms = int(turn["endMs"]) - int(turn["startMs"])
+                local_durations[local_speaker] = (
+                    local_durations.get(local_speaker, 0) + duration_ms
+                )
+                if mapping_accepted:
+                    canonical_turns.append(
+                        {
+                            "startMs": int(turn["startMs"]),
+                            "endMs": int(turn["endMs"]),
+                            "speakerId": mapping[local_speaker],
+                            "localSpeaker": local_speaker,
+                        }
+                    )
+            ranked_local = sorted(
+                local_durations.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+            tracked_ms = sum(local_durations.values())
+            dominant_local = ranked_local[0][0] if ranked_local else None
+            dominance = (
+                ranked_local[0][1] / tracked_ms
+                if ranked_local and tracked_ms > 0
+                else 0.0
+            )
+            target_speaker = (
+                mapping[dominant_local]
+                if mapping_accepted and dominant_local is not None
+                else segment.speaker_id
+            )
+            blockers: list[str] = []
+            if not mapping_accepted:
+                blockers.append("PYANNOTE_MAPPING_MARGIN_BELOW_THRESHOLD")
+            if dominant_local is None:
+                blockers.append("PYANNOTE_NO_LOCAL_SPEECH")
+            if (
+                target_speaker != segment.speaker_id
+                and dominance
+                < self.config.pyannote_primary_dominance_threshold
+            ):
+                blockers.append("PYANNOTE_PRIMARY_DOMINANCE_BELOW_THRESHOLD")
+            if segment.human_locked and target_speaker != segment.speaker_id:
+                blockers.append("HUMAN_LOCKED")
+            applied = target_speaker != segment.speaker_id and not blockers
+            revisions = segment.revisions
+            if applied:
+                revisions = (
+                    *revisions,
+                    Revision(
+                        revision_id=(
+                            f"{segment.segment_id}:speaker:"
+                            f"{len(segment.revisions) + 1}"
+                        ),
+                        revision_type="speaker",
+                        source="acoustic",
+                        before=segment.speaker_id,
+                        after=target_speaker,
+                        reason_code="PYANNOTE_CANONICAL_TRACK_MAPPING",
+                        confidence=min(1.0, mapping_margin),
+                        evidence_refs=(
+                            f"pyannote-mapping:{segment.segment_id}",
+                        ),
+                    ),
+                )
+            overlap = dict(segment.evidence.get("overlap", {}))
+            if mapping_accepted:
+                overlap["canonicalSpeakerTurns"] = canonical_turns
+            proposed.append(
+                replace(
+                    segment,
+                    speaker_id=target_speaker if applied else segment.speaker_id,
+                    revisions=revisions,
+                    evidence={
+                        **dict(segment.evidence),
+                        "overlap": overlap,
+                        "pyannoteCanonicalMapping": {
+                            **mapping_evidence,
+                            "localDurationsMs": dict(
+                                sorted(local_durations.items())
+                            ),
+                            "dominantLocalSpeaker": dominant_local,
+                            "dominance": round(dominance, 9),
+                            "beforeSpeakerId": segment.speaker_id,
+                            "afterSpeakerId": (
+                                target_speaker if applied else segment.speaker_id
+                            ),
+                            "blockers": blockers,
+                            "applied": applied,
+                            "reviewStatus": (
+                                "REVIEW_REQUIRED" if blockers else "RESOLVED"
+                            ),
+                        },
+                    },
+                )
+            )
+
+        before_ids = {segment.speaker_id for segment in segments}
+        after_ids = {segment.speaker_id for segment in proposed}
+        if after_ids == before_ids:
+            return tuple(proposed)
+        reverted: list[TranscriptSegment] = []
+        before_by_id = {
+            segment.segment_id: segment for segment in segments
+        }
+        for segment in proposed:
+            before = before_by_id[segment.segment_id]
+            evidence = dict(segment.evidence)
+            mapping_item = dict(evidence["pyannoteCanonicalMapping"])
+            mapping_item.update(
+                {
+                    "afterSpeakerId": before.speaker_id,
+                    "blockers": sorted(
+                        {
+                            *mapping_item["blockers"],
+                            "CARDINALITY_CHANGE_REVIEW_REQUIRED",
+                        }
+                    ),
+                    "applied": False,
+                    "reviewStatus": "REVIEW_REQUIRED",
+                }
+            )
+            evidence["pyannoteCanonicalMapping"] = mapping_item
+            reverted.append(
+                replace(
+                    before,
+                    evidence=evidence,
+                )
+            )
+        return tuple(reverted)
+
     def _select_candidates(
         self,
         segments: Sequence[TranscriptSegment],
@@ -6361,19 +6683,27 @@ class SpeakerPipeline:
             ),
             exit_reason="COMPLETED",
         )
-        overlap = self._window_stage(
-            stage="overlap",
-            prepared=prepared,
-            windows=prepared.windows,
-            adapter=self.overlap_adapter,
-            invoke=lambda windows: self.overlap_adapter.detect_batch(
-                prepared, windows, context
-            ),
-            converter=OverlapDecision.from_mapping,
-            accepted_type=OverlapDecision,
-            context=context,
-            metrics=metrics,
-        )
+        try:
+            overlap = self._window_stage(
+                stage="overlap",
+                prepared=prepared,
+                windows=prepared.windows,
+                adapter=self.overlap_adapter,
+                invoke=lambda windows: self.overlap_adapter.detect_batch(
+                    prepared, windows, context
+                ),
+                converter=OverlapDecision.from_mapping,
+                accepted_type=OverlapDecision,
+                context=context,
+                metrics=metrics,
+            )
+        except Exception:
+            _release_adapter_resources(
+                self.overlap_adapter,
+                suppress_errors=True,
+            )
+            raise
+        _release_adapter_resources(self.overlap_adapter)
         clusters = self._clustering_stage(
             prepared, embeddings, request, metrics
         )
@@ -6393,6 +6723,7 @@ class SpeakerPipeline:
             stage="post-clustering",
         )
         segments = self._decode_global_speaker_sequence(segments)
+        segments = self._apply_pyannote_canonical_mapping(segments)
         self._assert_speaker_cardinality(
             segments=segments,
             clusters=clusters,

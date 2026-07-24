@@ -49,7 +49,7 @@ class FakeService:
 class ProductionCompositionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.input_root = self.root / "input"
         self.output_root = self.root / "output"
         self.cache_root = self.root / "cache"
@@ -68,8 +68,10 @@ class ProductionCompositionTests(unittest.TestCase):
             )
         self.ffmpeg = self.root / "ffmpeg.exe"
         self.java = self.root / "java.exe"
+        self.pyannote_python = self.root / "pyannote-python.exe"
         self.ffmpeg.write_bytes(b"fixture")
         self.java.write_bytes(b"fixture")
+        self.pyannote_python.write_bytes(b"fixture")
         self.config_path = self.root / "production.json"
 
     def tearDown(self) -> None:
@@ -99,6 +101,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 "ffmpeg": str(self.ffmpeg),
                 "java": str(self.java),
                 "pdfRendererJar": "renderer.jar",
+                "pyannotePython": str(self.pyannote_python),
             },
             "runtime": {
                 "maxWorkers": 2,
@@ -111,6 +114,8 @@ class ProductionCompositionTests(unittest.TestCase):
                 "maxClusteringWorkItems": 234_567,
                 "countStabilityRuns": 5,
                 "eigengapLandmarkLimit": 128,
+                "pyannoteMappingMarginThreshold": 0.07,
+                "pyannotePrimaryDominanceThreshold": 0.65,
                 "pyannoteMode": pyannote_mode,
                 "localLlmMode": "disabled",
             },
@@ -136,9 +141,28 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(config.speaker.max_clustering_work_items, 234_567)
         self.assertEqual(config.speaker.count_stability_runs, 5)
         self.assertEqual(config.speaker.eigengap_landmark_limit, 128)
+        self.assertEqual(config.speaker.pyannote_mapping_margin_threshold, 0.07)
+        self.assertEqual(
+            config.speaker.pyannote_primary_dominance_threshold,
+            0.65,
+        )
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
         self.assertEqual(config.runtime.vad_device, "cpu")
         self.assertTrue(config.offline)
+
+    def test_rejects_pdf_font_not_bundled_by_renderer(self) -> None:
+        mapping = self.mapping()
+        mapping["pdf"]["preferredFont"] = "MTS CJK"
+        self.config_path.write_text(
+            json.dumps(mapping),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "pdf.preferredFont must be one of LXGW WenKai",
+        ):
+            ProductionConfig.load(self.config_path)
 
     def test_unknown_fields_fail_closed(self) -> None:
         value = self.mapping()
@@ -155,6 +179,16 @@ class ProductionCompositionTests(unittest.TestCase):
         self.config_path.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaisesRegex(
             ProductionConfigError, "models.pyannote is required"
+        ):
+            ProductionConfig.load(self.config_path)
+
+    def test_pyannote_mode_requires_isolated_python(self) -> None:
+        value = self.mapping(pyannote_mode="fallback")
+        del value["executables"]["pyannotePython"]
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "executables.pyannotePython is required",
         ):
             ProductionConfig.load(self.config_path)
 
@@ -286,6 +320,10 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(len(secondary.calls), 1)
         self.assertEqual(len(pyannote.calls), 1)
+        self.assertEqual(
+            pyannote.calls[0][1]["python_executable"],
+            str(self.pyannote_python),
+        )
         self.assertEqual(preparation.calls[0][1]["device"], "cpu")
 
     def test_real_config_builds_real_speaker_pipeline_config(self) -> None:
@@ -335,7 +373,19 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(pipeline.config.count_stability_runs, 5)
         self.assertEqual(pipeline.config.eigengap_landmark_limit, 128)
+        self.assertEqual(
+            pipeline.config.pyannote_mapping_margin_threshold,
+            0.07,
+        )
+        self.assertEqual(
+            pipeline.config.pyannote_primary_dominance_threshold,
+            0.65,
+        )
         self.assertIsNotNone(pipeline.pyannote_adapter)
+        self.assertIs(
+            pipeline.overlap_adapter,
+            pipeline.pyannote_adapter,
+        )
 
     def test_explicit_vad_device_override_is_preserved(self) -> None:
         value = self.mapping()
@@ -374,6 +424,7 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         pipeline = composition.service.kwargs["transcription_adapter"]
         self.assertIsNone(pipeline.kwargs["pyannote_adapter"])
+        self.assertIsNone(pipeline.kwargs["overlap_adapter"])
         self.assertEqual(pyannote.calls, [])
 
 

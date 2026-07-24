@@ -428,10 +428,12 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
         generated_date="2026-07-23",
     )
     captured: dict[str, Any] = {}
+    captured_segments: list[dict[str, Any]] = []
 
     class Assembler:
-        def assemble(self, *_: Any, **kwargs: Any) -> None:
+        def assemble(self, segments: Any, **kwargs: Any) -> None:
             captured.update(kwargs["config"])
+            captured_segments.extend(segments)
             raise WorkerError("TEST_STOP", "captured renderer config")
 
     adapter = JavaPdfRendererAdapter(assembler=Assembler(), java_client=object())
@@ -470,6 +472,34 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
                 "rawText": "Hello.",
                 "normalizedText": "Hello.",
                 "displayText": "Hello.",
+                "evidence": {
+                    "overlap": {
+                        "canonicalSpeakerTurns": [
+                            {
+                                "startMs": 0,
+                                "endMs": 3000,
+                                "speakerId": "speaker-1",
+                                "localSpeaker": "LOCAL_A",
+                            }
+                        ]
+                    },
+                    "pyannoteCanonicalMapping": {
+                        "accepted": True,
+                        "applied": True,
+                    },
+                },
+                "revisions": [
+                    {
+                        "id": "segment-1:speaker:1",
+                        "type": "speaker",
+                        "source": "acoustic",
+                        "reasonCode": "PYANNOTE_CANONICAL_TRACK_MAPPING",
+                        "before": "speaker-2",
+                        "after": "speaker-1",
+                        "confidence": 0.8,
+                        "evidenceRefs": ["pyannote-mapping:segment-1"],
+                    }
+                ],
             }
         ],
     }
@@ -491,6 +521,20 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
     assert captured["presentation"]["report"] == plan.report_config
     assert captured["outputExecutionPlanSha256"] == plan.deterministic_hash()
     assert captured["mediaProbeArtifact"]["sha256"] == artifact.sha256
+    assert (
+        captured_segments[0]["evidence"]["overlap"]["canonicalSpeakerTurns"][0][
+            "localSpeaker"
+        ]
+        == "LOCAL_A"
+    )
+    assert captured_segments[0]["evidence"]["pyannoteCanonicalMapping"] == {
+        "accepted": True,
+        "applied": True,
+    }
+    assert captured_segments[0]["revisions"][0]["confidence"] == 0.8
+    assert captured_segments[0]["revisions"][0]["evidenceRefs"] == [
+        "pyannote-mapping:segment-1"
+    ]
 
 
 def test_source_content_mutation_is_rejected_even_when_size_is_unchanged(

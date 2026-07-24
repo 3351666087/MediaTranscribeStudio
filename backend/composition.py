@@ -105,6 +105,7 @@ def build_production_composition(
         pyannote = factories.pyannote(
             model_path=config.models.pyannote,
             device=config.runtime.pyannote_device,
+            python_executable=config.executables.pyannote_python,
         )
 
     pipeline_config = SpeakerPipelineConfig(
@@ -129,6 +130,12 @@ def build_production_composition(
         ),
         count_stability_runs=config.speaker.count_stability_runs,
         eigengap_landmark_limit=config.speaker.eigengap_landmark_limit,
+        pyannote_mapping_margin_threshold=(
+            config.speaker.pyannote_mapping_margin_threshold
+        ),
+        pyannote_primary_dominance_threshold=(
+            config.speaker.pyannote_primary_dominance_threshold
+        ),
         pyannote_mode=config.speaker.pyannote_mode,
         local_llm_mode=config.speaker.local_llm_mode,
         local_llm_model=config.speaker.local_llm_model,
@@ -137,6 +144,7 @@ def build_production_composition(
         preparation_adapter=preparation,
         asr_adapter=asr,
         embedding_adapter=embedding,
+        overlap_adapter=pyannote,
         secondary_adapter=secondary,
         pyannote_adapter=pyannote,
         cache=factories.cache(config.paths.cache_root),

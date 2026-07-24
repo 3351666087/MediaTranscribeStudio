@@ -1,0 +1,418 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/output-recipe.schema.json",
+  "title": "MediaTranscribeStudio Native Output Recipe",
+  "description": "The exact presentation-only recipe accepted by backend/output_recipe.py. The backend compiles this recipe into evidence-bearing OutputCustomization snapshots.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "report",
+    "subtitles",
+    "delivery",
+    "finishing"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "report": {
+      "$ref": "#/$defs/report"
+    },
+    "subtitles": {
+      "$ref": "#/$defs/subtitles"
+    },
+    "delivery": {
+      "$ref": "#/$defs/delivery"
+    },
+    "finishing": {
+      "$ref": "#/$defs/finishing"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "subtitles": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "subtitles"
+        ]
+      },
+      "then": {
+        "properties": {
+          "delivery": {
+            "properties": {
+              "subtitleModes": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "delivery": {
+            "properties": {
+              "subtitleModes": {
+                "maxItems": 0
+              },
+              "formats": {
+                "not": {
+                  "contains": {
+                    "enum": [
+                      "srt",
+                      "webvtt",
+                      "ass"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "safeText": {
+      "type": "string",
+      "maxLength": 160,
+      "allOf": [
+        {
+          "pattern": "^[^\\u0000-\\u001F\\u007F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]*$"
+        },
+        {
+          "pattern": "^(?:$|\\S(?:.*\\S)?)$"
+        }
+      ]
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "template",
+        "font",
+        "customFontFamily",
+        "pageSize",
+        "density",
+        "accentColor"
+      ],
+      "properties": {
+        "template": {
+          "type": "string",
+          "enum": [
+            "soft-glass",
+            "editorial",
+            "academic",
+            "compact"
+          ]
+        },
+        "font": {
+          "type": "string",
+          "enum": [
+            "system-sans",
+            "humanist",
+            "serif",
+            "mono-accent",
+            "custom"
+          ]
+        },
+        "customFontFamily": {
+          "$ref": "#/$defs/safeText"
+        },
+        "pageSize": {
+          "type": "string",
+          "enum": [
+            "a4",
+            "letter",
+            "legal",
+            "screen"
+          ]
+        },
+        "density": {
+          "type": "string",
+          "enum": [
+            "airy",
+            "balanced",
+            "compact"
+          ]
+        },
+        "accentColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-f]{6}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "font": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "font"
+            ]
+          },
+          "then": {
+            "properties": {
+              "customFontFamily": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "subtitles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "theme",
+        "size",
+        "safeArea",
+        "position",
+        "speakerPalette",
+        "backgroundOpacity",
+        "maximumLines",
+        "avoidVisualCollisions",
+        "wordProgressHighlight"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "theme": {
+          "type": "string",
+          "enum": [
+            "youtube-clean",
+            "soft-bubble",
+            "cinema",
+            "high-contrast"
+          ]
+        },
+        "size": {
+          "type": "string",
+          "enum": [
+            "small",
+            "medium",
+            "large",
+            "x-large"
+          ]
+        },
+        "safeArea": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "broadcast",
+            "generous"
+          ]
+        },
+        "position": {
+          "type": "string",
+          "enum": [
+            "bottom",
+            "smart",
+            "top"
+          ]
+        },
+        "speakerPalette": {
+          "type": "string",
+          "enum": [
+            "adaptive-spectrum",
+            "candy",
+            "ocean",
+            "high-contrast",
+            "monochrome"
+          ]
+        },
+        "backgroundOpacity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "maximumLines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "avoidVisualCollisions": {
+          "type": "boolean"
+        },
+        "wordProgressHighlight": {
+          "const": false
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formats",
+        "subtitleModes",
+        "includeMediaMetadata",
+        "preserveSourceMedia",
+        "fileNamePattern"
+      ],
+      "properties": {
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "pdf",
+              "html",
+              "markdown",
+              "txt",
+              "json",
+              "srt",
+              "webvtt",
+              "ass"
+            ]
+          }
+        },
+        "subtitleModes": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "sidecar",
+              "soft-mux",
+              "burn-in"
+            ]
+          }
+        },
+        "includeMediaMetadata": {
+          "type": "boolean"
+        },
+        "preserveSourceMedia": {
+          "const": true
+        },
+        "fileNamePattern": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "allOf": [
+            {
+              "$ref": "#/$defs/safeText"
+            },
+            {
+              "pattern": "^[^\\\\/]+$"
+            },
+            {
+              "pattern": "\\{(?:sourceStem|artifact|language|date|speakerCount)\\}"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:sourceStem|artifact|language|date|speakerCount)\\})+$"
+            }
+          ]
+        }
+      }
+    },
+    "finishing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "includeCover",
+        "includeChapters",
+        "includeTimestamps",
+        "includeHeader",
+        "includeFooter",
+        "includeSpeakerIndex",
+        "includeConfidenceNotes",
+        "chapterStyle",
+        "timestampStyle",
+        "customTitle"
+      ],
+      "properties": {
+        "includeCover": {
+          "type": "boolean"
+        },
+        "includeChapters": {
+          "type": "boolean"
+        },
+        "includeTimestamps": {
+          "type": "boolean"
+        },
+        "includeHeader": {
+          "type": "boolean"
+        },
+        "includeFooter": {
+          "type": "boolean"
+        },
+        "includeSpeakerIndex": {
+          "type": "boolean"
+        },
+        "includeConfidenceNotes": {
+          "type": "boolean"
+        },
+        "chapterStyle": {
+          "type": "string",
+          "enum": [
+            "semantic",
+            "interval",
+            "none"
+          ]
+        },
+        "timestampStyle": {
+          "type": "string",
+          "enum": [
+            "segment",
+            "paragraph",
+            "chapter"
+          ]
+        },
+        "customTitle": {
+          "$ref": "#/$defs/safeText"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "includeChapters": {
+                "const": true
+              }
+            },
+            "required": [
+              "includeChapters"
+            ]
+          },
+          "then": {
+            "properties": {
+              "chapterStyle": {
+                "enum": [
+                  "semantic",
+                  "interval"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "chapterStyle": {
+                "const": "none"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

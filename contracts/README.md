@@ -79,6 +79,8 @@ JSON Schema alone:
 | `artifact-manifest.schema.json` | Content-addressed artifact inventory and integrity metadata. |
 | `business-processing-request.schema.json` | Opt-in local translation, source-language polishing, and summary request. |
 | `job-event.schema.json` | Versioned worker event stream. |
+| `output-customization.schema.json` | Evidence-bearing canonical report, subtitle, delivery, export, and reversibility snapshot. |
+| `output-recipe.schema.json` | Compact native desktop presentation recipe compiled into canonical output customizations. |
 | `pdf-quality-report.schema.json` | PDF hard gates, quality findings, and deterministic repair queue. |
 | `pdf-render-request.schema.json` | Request sent to the Java PDF sidecar. |
 | `pdf-render-result.schema.json` | Renderer outcome and generated artifact paths. |

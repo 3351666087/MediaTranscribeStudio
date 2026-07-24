@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from contracts.pyannote_evidence import is_verified_pyannote_speaker_revision
 from contracts.validate_contracts import ContractError, validate_report_document
 
 
@@ -892,7 +893,12 @@ class ReportDocumentAssembler:
                 raise ReportAssemblyError(
                     f"{segment_id}.revisions[{index - 1}] must be an object"
                 )
-            revision_id = _clean_text(value.get("revisionId", value.get("revision_id")))
+            revision_id = _clean_text(
+                value.get(
+                    "revisionId",
+                    value.get("revision_id", value.get("id")),
+                )
+            )
             if not revision_id:
                 revision_id = self._allocate_revision_id(
                     f"{segment_id}-revision-{index:03d}", used_revision_ids
@@ -956,6 +962,39 @@ class ReportDocumentAssembler:
                 "before": before,
                 "after": after,
             }
+            if "confidence" in value:
+                entry["confidence"] = _probability(
+                    value.get("confidence"),
+                    field=f"{segment_id}.revisions[{index - 1}].confidence",
+                )
+            raw_refs = value.get(
+                "evidenceRefs",
+                value.get("evidence_refs"),
+            )
+            if raw_refs is not None:
+                if not isinstance(raw_refs, Sequence) or isinstance(
+                    raw_refs,
+                    (str, bytes),
+                ):
+                    raise ReportAssemblyError(
+                        f"{segment_id}.revisions[{index - 1}].evidenceRefs "
+                        "must be an array"
+                    )
+                refs: list[str] = []
+                for raw_ref in raw_refs:
+                    ref = _clean_text(raw_ref)
+                    if not ref or len(ref) > 240 or ref in refs:
+                        raise ReportAssemblyError(
+                            f"{segment_id}.revisions[{index - 1}].evidenceRefs "
+                            "contains an invalid or duplicate reference"
+                        )
+                    refs.append(ref)
+                if not refs:
+                    raise ReportAssemblyError(
+                        f"{segment_id}.revisions[{index - 1}].evidenceRefs "
+                        "must not be empty"
+                    )
+                entry["evidenceRefs"] = refs
             for source_key, target_key in (
                 ("model", "model"),
                 ("actor", "actor"),
@@ -1193,6 +1232,32 @@ class ReportDocumentAssembler:
         )
         if audio_review is not None:
             evidence["audioReview"] = audio_review
+        verified_mapping_revisions = [
+            revision
+            for revision in revisions
+            if is_verified_pyannote_speaker_revision(
+                revision,
+                raw_evidence,
+                set(speaker_ids),
+            )
+        ]
+        if verified_mapping_revisions:
+            proof = raw_evidence["pyannoteCanonicalMapping"]
+            overlap = raw_evidence["overlap"]
+            evidence["speakerMapping"] = {
+                **dict(proof),
+                "evidenceRefs": sorted(
+                    {
+                        ref
+                        for revision in verified_mapping_revisions
+                        for ref in revision["evidenceRefs"]
+                    }
+                ),
+                "canonicalSpeakerTurns": [
+                    dict(turn)
+                    for turn in overlap["canonicalSpeakerTurns"]
+                ],
+            }
         return evidence, incomplete
 
     def _speaker_evidence(
@@ -1415,6 +1480,21 @@ class ReportDocumentAssembler:
             for revision in speaker_revisions
             if revision.get("source") != "manual"
         ]
+        verified_pyannote_revisions = {
+            str(revision.get("revisionId") or "")
+            for revision in speaker_revisions
+            if is_verified_pyannote_speaker_revision(
+                revision,
+                raw_evidence,
+                set(speaker_ids),
+            )
+        }
+        unsafe_non_manual_revisions = [
+            revision
+            for revision in non_manual_revisions
+            if str(revision.get("revisionId") or "")
+            not in verified_pyannote_revisions
+        ]
         locked = bool(speaker_evidence.get("locked"))
         semantic = raw_evidence.get("semantic")
         if not isinstance(semantic, Mapping):
@@ -1439,11 +1519,14 @@ class ReportDocumentAssembler:
             raise ReportAssemblyError(
                 f"{segment_id}: a locked speaker cannot be overridden by semantic logic"
             )
-        if overlap_detected and non_manual_revisions:
+        if overlap_detected and unsafe_non_manual_revisions:
             raise ReportAssemblyError(
                 f"{segment_id}: overlap/串话 speaker decisions require manual review"
             )
-        if non_manual_revisions and margin >= self.semantic_margin_threshold:
+        if (
+            unsafe_non_manual_revisions
+            and margin >= self.semantic_margin_threshold
+        ):
             raise ReportAssemblyError(
                 f"{segment_id}: automatic speaker override is forbidden at acoustic "
                 f"margin {margin:.3f}"
@@ -1468,7 +1551,12 @@ class ReportDocumentAssembler:
                 raise ReportAssemblyError(
                     f"{segment_id}: speaker revisions must record a change"
                 )
-            if source != "manual" and after not in top_two:
+            if (
+                source != "manual"
+                and after not in top_two
+                and str(revision.get("revisionId") or "")
+                not in verified_pyannote_revisions
+            ):
                 raise ReportAssemblyError(
                     f"{segment_id}: automatic speaker override must remain inside "
                     "the acoustic top-2"

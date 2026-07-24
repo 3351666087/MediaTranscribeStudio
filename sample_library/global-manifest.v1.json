@@ -1,0 +1,331 @@
+{
+  "schemaVersion": "1.0.0",
+  "libraryId": "mts-global-speech-matrix-v1",
+  "maxDurationSeconds": 90,
+  "generatedRoot": ".runtime_cache/sample-library/global",
+  "randomSeed": 3351666087,
+  "sources": [
+    {
+      "id": "minds14",
+      "provider": "huggingface",
+      "dataset": "PolyAI/minds14",
+      "revision": "40ce77cb32a384e4d50a568e1ec39ac804019d33",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/PolyAI/minds14",
+      "attribution": "MInDS-14, PolyAI; CC BY 4.0."
+    },
+    {
+      "id": "fleurs",
+      "provider": "huggingface",
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/google/fleurs",
+      "attribution": "FLEURS, Google; CC BY 4.0."
+    },
+    {
+      "id": "ami",
+      "provider": "huggingface",
+      "dataset": "diarizers-community/ami",
+      "revision": "8cdaae2eaf968f3b000b6eb1204ab9b8db006ed0",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/diarizers-community/ami",
+      "attribution": "AMI Meeting Corpus derivative published by diarizers-community; CC BY 4.0."
+    },
+    {
+      "id": "voxconverse",
+      "provider": "huggingface",
+      "dataset": "diarizers-community/voxconverse",
+      "revision": "3acfa1b45ca4b7419aee999d67d94c617f9c9d47",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/diarizers-community/voxconverse",
+      "attribution": "VoxConverse derivative published by diarizers-community; CC BY 4.0."
+    }
+  ],
+  "cases": [
+    {
+      "id": "minds_cs_cz_000",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "cs-CZ", "split": "train", "rowIndex": 0},
+      "language": "cs-CZ",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_de_de_007",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "de-DE", "split": "train", "rowIndex": 7},
+      "language": "de-DE",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_en_au_013",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "en-AU", "split": "train", "rowIndex": 13},
+      "language": "en-AU",
+      "region": "Oceania",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "telephone-band", "accent"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_en_gb_021",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "en-GB", "split": "train", "rowIndex": 21},
+      "language": "en-GB",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "telephone-band", "accent"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_en_us_034",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "en-US", "split": "train", "rowIndex": 34},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "telephone-band", "accent"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_es_es_055",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "es-ES", "split": "train", "rowIndex": 55},
+      "language": "es-ES",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_fr_fr_089",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "fr-FR", "split": "train", "rowIndex": 89},
+      "language": "fr-FR",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_it_it_144",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "it-IT", "split": "train", "rowIndex": 144},
+      "language": "it-IT",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_ko_kr_233",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko-KR", "split": "train", "rowIndex": 233},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_nl_nl_377",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "nl-NL", "split": "train", "rowIndex": 377},
+      "language": "nl-NL",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_pl_pl_061",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "pl-PL", "split": "train", "rowIndex": 61},
+      "language": "pl-PL",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_pt_pt_098",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "pt-PT", "split": "train", "rowIndex": 98},
+      "language": "pt-PT",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_ru_ru_159",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ru-RU", "split": "train", "rowIndex": 159},
+      "language": "ru-RU",
+      "region": "Eastern Europe and Central Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "minds_zh_cn_258",
+      "sourceId": "minds14",
+      "acquisition": {"kind": "hf-viewer-row", "config": "zh-CN", "split": "train", "rowIndex": 258},
+      "language": "zh-CN",
+      "region": "East Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "telephone-band"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ar_eg_test_000",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "ar_eg", "split": "test", "rowIndex": 0},
+      "language": "ar-EG",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_validation_001",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "es_419", "split": "validation", "rowIndex": 1},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_hi_in_test_002",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "hi_in", "split": "test", "rowIndex": 2},
+      "language": "hi-IN",
+      "region": "South Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_id_id_validation_003",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "id_id", "split": "validation", "rowIndex": 3},
+      "language": "id-ID",
+      "region": "Southeast Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_sw_ke_test_004",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "sw_ke", "split": "test", "rowIndex": 4},
+      "language": "sw-KE",
+      "region": "Sub-Saharan Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_tr_tr_validation_005",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "tr_tr", "split": "validation", "rowIndex": 5},
+      "language": "tr-TR",
+      "region": "Western Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_vi_vn_test_006",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "vi_vn", "split": "test", "rowIndex": 6},
+      "language": "vi-VN",
+      "region": "Southeast Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_om_et_validation_007",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "om_et", "split": "validation", "rowIndex": 7},
+      "language": "om-ET",
+      "region": "Sub-Saharan Africa",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    }
+  ],
+  "derivedMatrices": [
+    {
+      "id": "minds-sequential-dynamic-n",
+      "kind": "sequential-speaker-mixture",
+      "speakerCounts": [2, 3, 5, 8],
+      "sourceCaseIds": [
+        "minds_cs_cz_000",
+        "minds_de_de_007",
+        "minds_en_au_013",
+        "minds_en_gb_021",
+        "minds_en_us_034",
+        "minds_es_es_055",
+        "minds_fr_fr_089",
+        "minds_it_it_144"
+      ],
+      "scenario": ["synthetic-mixture", "multilingual", "rapid-turns"]
+    },
+    {
+      "id": "minds-overlap-dynamic-n",
+      "kind": "overlap-speaker-mixture",
+      "speakerCounts": [2, 3, 5, 8, 13],
+      "sourceCaseIds": [
+        "minds_ko_kr_233",
+        "minds_nl_nl_377",
+        "minds_pl_pl_061",
+        "minds_pt_pt_098",
+        "minds_ru_ru_159",
+        "minds_zh_cn_258",
+        "minds_en_us_034",
+        "minds_fr_fr_089",
+        "minds_de_de_007",
+        "minds_it_it_144",
+        "minds_en_gb_021",
+        "minds_es_es_055",
+        "minds_cs_cz_000"
+      ],
+      "scenario": ["synthetic-mixture", "multilingual", "overlap", "interruption"]
+    }
+  ],
+  "plannedRealDiarizationSources": [
+    {
+      "sourceId": "ami",
+      "config": "ihm",
+      "split": "test",
+      "rowIndex": 0,
+      "targetSpeakerCounts": [2, 3, 4],
+      "windowSelection": "deterministic-max-speaker-and-overlap-coverage"
+    },
+    {
+      "sourceId": "voxconverse",
+      "config": "default",
+      "split": "dev",
+      "targetSpeakerCounts": [2, 3, 5, 8],
+      "parquetPath": "data/dev-00000-of-00005.parquet",
+      "parquetBytes": 485283393,
+      "rowTargets": [
+        {"rowIndex": 35, "targetSpeakerCount": 2},
+        {"rowIndex": 22, "targetSpeakerCount": 3},
+        {"rowIndex": 20, "targetSpeakerCount": 5},
+        {"rowIndex": 25, "targetSpeakerCount": 8}
+      ],
+      "windowSelection": "deterministic-max-speaker-and-overlap-coverage"
+    }
+  ]
+}

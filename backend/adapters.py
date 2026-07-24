@@ -177,7 +177,7 @@ class JavaPdfRendererAdapter:
                 overlap = {}
             segment["speaker_locked"] = bool(segment.get("humanLocked", False))
             segment["overlapDetected"] = bool(segment.get("overlapping", False))
-            segment["evidence"] = {
+            report_evidence: dict[str, Any] = {
                 "asr": {
                     "provider": str(asr.get("provider") or "qwen-asr"),
                     "model": str(asr.get("model") or "Qwen3-ASR-1.7B"),
@@ -209,6 +209,11 @@ class JavaPdfRendererAdapter:
                     "scores": list(scores),
                 },
             }
+            for key in ("overlap", "pyannoteCanonicalMapping"):
+                value = raw_evidence.get(key)
+                if isinstance(value, Mapping):
+                    report_evidence[key] = dict(value)
+            segment["evidence"] = report_evidence
             revisions = segment.get("revisions", [])
             if isinstance(revisions, list):
                 segment["revisions"] = [
@@ -223,6 +228,31 @@ class JavaPdfRendererAdapter:
                         "reasonCode": revision.get("reasonCode"),
                         "before": revision.get("before"),
                         "after": revision.get("after"),
+                        **(
+                            {"confidence": revision.get("confidence")}
+                            if "confidence" in revision
+                            else {}
+                        ),
+                        **(
+                            {"evidenceRefs": revision.get("evidenceRefs")}
+                            if "evidenceRefs" in revision
+                            else {}
+                        ),
+                        **(
+                            {"model": revision.get("model")}
+                            if "model" in revision
+                            else {}
+                        ),
+                        **(
+                            {"actor": revision.get("actor")}
+                            if "actor" in revision
+                            else {}
+                        ),
+                        **(
+                            {"occurredAt": revision.get("occurredAt")}
+                            if "occurredAt" in revision
+                            else {}
+                        ),
                     }
                     for revision in revisions
                     if isinstance(revision, Mapping)

@@ -160,7 +160,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             preflight.raise_if_failed()
             preload_production_runtime(
-                include_pyannote=config.speaker.pyannote_mode != "disabled",
+                # Pyannote is required to run in its configured child
+                # interpreter; importing it here would reintroduce the
+                # NumPy/torchmetrics conflict in the primary ASR runtime.
+                include_pyannote=False,
             )
             composition = build_production_composition(
                 config,

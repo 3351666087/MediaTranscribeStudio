@@ -84,6 +84,7 @@ public final class ReportDocument {
         public SpeakerEvidence speaker;
         public SemanticEvidence semantic;
         public AudioReview audioReview;
+        public JsonNode speakerMapping;
     }
 
     public static final class AsrEvidence {
@@ -136,6 +137,8 @@ public final class ReportDocument {
         public String reasonCode;
         public JsonNode before;
         public JsonNode after;
+        public Double confidence;
+        public List<String> evidenceRefs;
         public String model;
         public String actor;
         public String occurredAt;

@@ -245,11 +245,35 @@ def _locked_inventory(model: LockedModel) -> dict[str, tuple[int, str]]:
 
 def _live_inventory(model: LockedModel, api: Any) -> dict[str, tuple[int, str]]:
     result: dict[str, tuple[int, str]] = {}
-    for entry in api.get_model_files(
-        model.repo_id,
-        revision=model.revision,
-        recursive=True,
-    ):
+    # ModelScope 1.38 exposes revision-aware hashes through its underlying
+    # hub client, while the public compatibility wrapper drops both revision
+    # and SHA-256. Prefer the strict path when available and retain the
+    # mapping-based fallback for older clients and unit-test fakes.
+    hub_client = getattr(api, "_api", None)
+    list_repo_files = getattr(hub_client, "list_repo_files", None)
+    if callable(list_repo_files):
+        entries = list_repo_files(
+            model.repo_id,
+            "model",
+            revision=model.revision,
+            recursive=True,
+        )
+        for entry in entries:
+            if getattr(entry, "type", None) not in {None, "blob"}:
+                continue
+            path = getattr(entry, "path", None)
+            size = getattr(entry, "size", None)
+            sha256 = getattr(entry, "sha256", None)
+            if not isinstance(path, str) or not isinstance(size, int) or not isinstance(
+                sha256, str
+            ):
+                raise ModelInstallError(
+                    f"ModelScope returned incomplete inventory for {model.repo_id}"
+                )
+            result[PurePosixPath(path).as_posix()] = (size, sha256)
+        return result
+
+    for entry in api.get_model_files(model.repo_id, recursive=True):
         if entry.get("Type") != "blob":
             continue
         path = entry.get("Path")

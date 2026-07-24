@@ -6,6 +6,7 @@ absl-py=2.4.0=pypi_0
 accelerate=1.12.0=pypi_0
 aiohappyeyeballs=2.6.1=pypi_0
 aiohttp=3.13.3=pypi_0
+addict=2.4.0=pypi_0
 aiosignal=1.4.0=pypi_0
 alembic=1.18.4=pypi_0
 aliyun-python-sdk-core=2.16.0=pypi_0
@@ -128,7 +129,7 @@ nemo-toolkit=2.6.2=pypi_0
 networkx=3.6.1=pypi_0
 numba=0.64.0=pypi_0
 numexpr=2.13.1=pypi_0
-numpy=2.4.2=pypi_0
+numpy=1.26.4=pypi_0
 omegaconf=2.3.0=pypi_0
 onnx=1.20.1=pypi_0
 onnxruntime=1.24.2=pypi_0
@@ -166,12 +167,7 @@ propcache=0.4.1=pypi_0
 protobuf=5.29.6=pypi_0
 psutil=7.2.2=pypi_0
 pure-eval=0.2.3=pypi_0
-pyannote-audio=4.0.4=pypi_0
-pyannote-core=6.0.1=pypi_0
-pyannote-database=6.1.1=pypi_0
-pyannote-metrics=4.0.0=pypi_0
-pyannote-pipeline=4.0.0=pypi_0
-pyannoteai-sdk=0.4.0=pypi_0
+qwen-asr=0.0.6=pypi_0
 pyarrow=23.0.1=pypi_0
 pybind11=3.0.2=pypi_0
 pycparser=3.0=pypi_0
@@ -256,7 +252,7 @@ torch-stoi=0.2.3=pypi_0
 torchaudio=2.10.0=pypi_0
 torchcodec=0.10.0=pypi_0
 torchinfo=1.8.0=pypi_0
-torchmetrics=1.8.2=pypi_0
+torchmetrics=0.11.4=pypi_0
 torchvision=0.25.0=pypi_0
 tqdm=4.67.3=pypi_0
 traitlets=5.14.3=pypi_0

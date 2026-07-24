@@ -1,0 +1,209 @@
+{
+  "schemaVersion": "1.0.0",
+  "libraryId": "mts-multilingual-short-v1",
+  "maxDurationSeconds": 30,
+  "generatedRoot": ".runtime_cache/sample-library",
+  "cases": [
+    {
+      "id": "en_clean_single",
+      "language": "en-US",
+      "scenario": "clean-single",
+      "kind": "audio",
+      "output": "audio/en_clean_single.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Samantha",
+          "text": "The archive opens at nine thirty. Please compare the subtitle timing with the transcript."
+        }
+      ],
+      "effects": []
+    },
+    {
+      "id": "zh_clean_single",
+      "language": "zh-CN",
+      "scenario": "clean-single",
+      "kind": "audio",
+      "output": "audio/zh_clean_single.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Tingting",
+          "text": "档案馆九点半开门，请把字幕时间和逐字稿对照检查。"
+        }
+      ],
+      "effects": []
+    },
+    {
+      "id": "ja_clean_single",
+      "language": "ja-JP",
+      "scenario": "clean-single",
+      "kind": "audio",
+      "output": "audio/ja_clean_single.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Kyoko",
+          "text": "アーカイブは九時半に開きます。字幕のタイミングを文字起こしと確認してください。"
+        }
+      ],
+      "effects": []
+    },
+    {
+      "id": "es_phone_noise",
+      "language": "es-ES",
+      "scenario": "telephony-noise",
+      "kind": "audio",
+      "output": "audio/es_phone_noise.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Mónica",
+          "text": "La llamada empieza a las nueve y media. Comprueba los subtítulos después de la transcripción."
+        }
+      ],
+      "effects": [
+        "phone-band",
+        "white-noise"
+      ]
+    },
+    {
+      "id": "fr_two_speaker_turns",
+      "language": "fr-FR",
+      "scenario": "two-speaker-turns",
+      "kind": "audio",
+      "output": "audio/fr_two_speaker_turns.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Jacques",
+          "text": "Bonjour, je vais vérifier le calendrier et les sous-titres."
+        },
+        {
+          "speaker": "b",
+          "voice": "Amélie",
+          "text": "Merci, je comparerai le texte avec le fichier audio."
+        },
+        {
+          "speaker": "a",
+          "voice": "Jacques",
+          "text": "Parfait, nous pouvons continuer après cette vérification."
+        }
+      ],
+      "effects": [
+        "short-gaps"
+      ]
+    },
+    {
+      "id": "de_overlap",
+      "language": "de-DE",
+      "scenario": "overlap",
+      "kind": "audio",
+      "output": "audio/de_overlap.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Anna",
+          "offsetMs": 0,
+          "text": "Wir beginnen mit dem ersten Abschnitt und prüfen die Sprecher."
+        },
+        {
+          "speaker": "b",
+          "voice": "Sandy (德语（德国）)",
+          "offsetMs": 2300,
+          "text": "Ich lese die zweite Zeile, während du die Zeitmarken kontrollierst."
+        }
+      ],
+      "effects": [
+        "overlap"
+      ]
+    },
+    {
+      "id": "pt_video_scene_cuts",
+      "language": "pt-BR",
+      "scenario": "video-scene-cuts",
+      "kind": "video",
+      "output": "video/pt_video_scene_cuts.mp4",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Luciana",
+          "text": "Este vídeo tem duas cenas curtas. Verifique o áudio, a transcrição e a posição das legendas."
+        }
+      ],
+      "effects": [
+        "scene-cuts"
+      ]
+    },
+    {
+      "id": "ru_reverb",
+      "language": "ru-RU",
+      "scenario": "reverb",
+      "kind": "audio",
+      "output": "audio/ru_reverb.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Milena",
+          "text": "Архив открывается в половине десятого. Проверьте расшифровку и синхронизацию субтитров."
+        }
+      ],
+      "effects": [
+        "room-reverb"
+      ]
+    },
+    {
+      "id": "en_three_speaker_meeting",
+      "language": "en-US",
+      "scenario": "three-speaker-meeting",
+      "kind": "audio",
+      "output": "audio/en_three_speaker_meeting.wav",
+      "utterances": [
+        {
+          "speaker": "a",
+          "voice": "Samantha",
+          "text": "The first agenda item is the subtitle export."
+        },
+        {
+          "speaker": "b",
+          "voice": "Daniel",
+          "text": "I will check the WebVTT and the SRT files."
+        },
+        {
+          "speaker": "c",
+          "voice": "Karen",
+          "text": "I will review the speaker labels and the final timing."
+        },
+        {
+          "speaker": "a",
+          "voice": "Samantha",
+          "text": "Good, let us record the quality result for this sample."
+        }
+      ],
+      "effects": [
+        "short-gaps",
+        "room-reverb"
+      ]
+    },
+    {
+      "id": "en_downloaded_reference",
+      "language": "en-US",
+      "scenario": "downloaded-reference",
+      "kind": "audio",
+      "output": "audio/en_downloaded_reference.wav",
+      "remote": {
+        "url": "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/samples/jfk.wav",
+        "sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+        "attribution": "Upstream whisper.cpp audio sample; see its samples/README.md and repository license."
+      },
+      "expectedTranscript": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+      "utterances": [
+        {
+          "speaker": "a",
+          "text": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+        }
+      ],
+      "effects": []
+    }
+  ]
+}

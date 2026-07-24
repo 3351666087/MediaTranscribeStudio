@@ -139,7 +139,7 @@ public final class ReportDocumentValidator {
             require(segment.confidence != null && unit(segment.confidence),
                     "segment.confidence must be in [0,1]");
             validateEvidence(segment, canonical);
-            validateTextAudit(segment, revisionIds);
+            validateRevisionAudit(segment, revisionIds, speakerIds);
         }
         require(usedSpeakers.equals(speakerIds), "every declared speaker must occur in the transcript");
         require(document.provenance != null, "provenance is required");
@@ -386,7 +386,11 @@ public final class ReportDocumentValidator {
         }
     }
 
-    private static void validateTextAudit(ReportDocument.Segment segment, Set<String> revisionIds) {
+    private static void validateRevisionAudit(
+            ReportDocument.Segment segment,
+            Set<String> revisionIds,
+            Set<String> speakerIds
+    ) {
         require(segment.revisions != null, "segment.revisions is required");
         if (segment.revisions.isEmpty()) {
             require(segment.rawText.equals(segment.normalizedText)
@@ -396,7 +400,13 @@ public final class ReportDocumentValidator {
         }
 
         String expectedBefore = segment.rawText;
-        boolean hasManualRevision = false;
+        String expectedSpeaker = segment.evidence.speaker.scores.stream()
+                .max((left, right) -> Double.compare(left.score, right.score))
+                .orElseThrow(() -> new IllegalArgumentException("speaker scores are required"))
+                .speakerId;
+        boolean hasTextRevision = false;
+        boolean hasManualTextRevision = false;
+        boolean hasSpeakerRevision = false;
         for (ReportDocument.Revision revision : segment.revisions) {
             require(revision != null, "revision is required");
             requireText(revision.revisionId, "revision.revisionId");
@@ -408,22 +418,102 @@ public final class ReportDocumentValidator {
             requireText(revision.source, "revision.source");
             require(REVISION_SOURCES.contains(revision.source), "revision.source is unsupported");
             requireText(revision.reasonCode, "revision.reasonCode");
-            requireText(revision.actor, "revision.actor");
-            try {
-                OffsetDateTime.parse(revision.occurredAt);
-            } catch (DateTimeParseException | NullPointerException exception) {
-                throw new IllegalArgumentException("revision.occurredAt must be RFC 3339", exception);
+            require(!"llm".equals(revision.source), "LLM-authored revisions are forbidden");
+            if ("manual".equals(revision.source)) {
+                requireText(revision.actor, "revision.actor");
+                try {
+                    OffsetDateTime.parse(revision.occurredAt);
+                } catch (DateTimeParseException | NullPointerException exception) {
+                    throw new IllegalArgumentException(
+                            "revision.occurredAt must be RFC 3339",
+                            exception
+                    );
+                }
             }
-            String before = textNode(revision.before, "revision.before");
-            String after = textNode(revision.after, "revision.after");
-            require(expectedBefore.equals(before), "revision chain must start at rawText and be continuous");
-            expectedBefore = after;
-            hasManualRevision |= "manual".equals(revision.source);
+
+            if ("text".equals(revision.type)) {
+                String before = textNode(revision.before, "revision.before");
+                String after = textNode(revision.after, "revision.after");
+                require(expectedBefore.equals(before),
+                        "text revision chain must start at rawText and be continuous");
+                expectedBefore = after;
+                hasTextRevision = true;
+                hasManualTextRevision |= "manual".equals(revision.source);
+                continue;
+            }
+            if ("speaker".equals(revision.type)) {
+                String before = textNode(revision.before, "revision.before");
+                String after = textNode(revision.after, "revision.after");
+                require(speakerIds.contains(before) && speakerIds.contains(after),
+                        "speaker revisions must use canonical speaker IDs");
+                require(!before.equals(after), "speaker revisions must record a change");
+                require(expectedSpeaker.equals(before),
+                        "speaker revision chain must start at acoustic top-1 and be continuous");
+                if (!"manual".equals(revision.source)) {
+                    validatePyannoteSpeakerRevision(segment, revision, before, after);
+                }
+                expectedSpeaker = after;
+                hasSpeakerRevision = true;
+                continue;
+            }
+            require("manual".equals(revision.source),
+                    "boundary, split, and merge revisions must be manual");
         }
-        require(hasManualRevision, "edited text requires at least one manual revision");
-        require(expectedBefore.equals(segment.normalizedText)
-                        && expectedBefore.equals(segment.displayText),
-                "final revision must equal normalizedText and displayText");
+        if (hasTextRevision) {
+            require(hasManualTextRevision,
+                    "edited text requires at least one manual revision");
+            require(expectedBefore.equals(segment.normalizedText)
+                            && expectedBefore.equals(segment.displayText),
+                    "final text revision must equal normalizedText and displayText");
+        } else {
+            require(segment.rawText.equals(segment.normalizedText)
+                            && segment.rawText.equals(segment.displayText),
+                    "segments without text revisions must preserve rawText");
+        }
+        if (hasSpeakerRevision) {
+            require(expectedSpeaker.equals(segment.speakerId),
+                    "final speaker revision must equal segment.speakerId");
+        }
+    }
+
+    private static void validatePyannoteSpeakerRevision(
+            ReportDocument.Segment segment,
+            ReportDocument.Revision revision,
+            String before,
+            String after
+    ) {
+        require("acoustic".equals(revision.source),
+                "automatic speaker revisions must be acoustic");
+        require("PYANNOTE_CANONICAL_TRACK_MAPPING".equals(revision.reasonCode),
+                "automatic speaker revisions require Pyannote canonical mapping");
+        require(revision.confidence != null && unit(revision.confidence),
+                "automatic speaker revision confidence must be in [0,1]");
+        require(revision.evidenceRefs != null && !revision.evidenceRefs.isEmpty(),
+                "automatic speaker revisions require evidenceRefs");
+        require(!Boolean.TRUE.equals(segment.evidence.speaker.locked),
+                "locked speakers cannot be changed automatically");
+        JsonNode proof = segment.evidence.speakerMapping;
+        require(proof != null && proof.isObject(),
+                "automatic speaker revisions require speakerMapping evidence");
+        require(proof.path("accepted").asBoolean(false)
+                        && proof.path("applied").asBoolean(false),
+                "speakerMapping must be accepted and applied");
+        require(proof.path("blockers").isArray()
+                        && proof.path("blockers").isEmpty(),
+                "speakerMapping blockers must be empty");
+        require(before.equals(proof.path("beforeSpeakerId").asText())
+                        && after.equals(proof.path("afterSpeakerId").asText()),
+                "speakerMapping before/after must match the revision");
+        require(proof.path("evidenceRefs").isArray(),
+                "speakerMapping evidenceRefs are required");
+        Set<String> proofRefs = new HashSet<>();
+        proof.path("evidenceRefs").forEach(item -> {
+            if (item.isTextual()) {
+                proofRefs.add(item.textValue());
+            }
+        });
+        require(proofRefs.containsAll(revision.evidenceRefs),
+                "speaker revision evidenceRefs must resolve inside speakerMapping");
     }
 
     private static String textNode(JsonNode node, String field) {

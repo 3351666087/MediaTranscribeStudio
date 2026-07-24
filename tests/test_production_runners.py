@@ -27,6 +27,7 @@ from backend.production_runners import (
     LocalQwen3AsrAdapter,
 )
 from backend.speaker_pipeline import (
+    OverlapDecision,
     PreparedAudio,
     ReviewCandidate,
     SpeechWindow,
@@ -384,7 +385,11 @@ class ProductionRunnerTests(unittest.TestCase):
 
     def test_qwen3_windows_balanced_policy_uses_bounded_memory(self) -> None:
         with (
-            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_is_windows_runtime",
+                return_value=True,
+            ),
             mock.patch.object(
                 production_runners,
                 "_cuda_total_memory_bytes",
@@ -416,7 +421,11 @@ class ProductionRunnerTests(unittest.TestCase):
 
     def test_qwen3_cpu_policy_and_fake_factory_avoid_gpu_probe(self) -> None:
         with (
-            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_is_windows_runtime",
+                return_value=True,
+            ),
             mock.patch.object(
                 production_runners,
                 "_cuda_total_memory_bytes",
@@ -479,7 +488,11 @@ class ProductionRunnerTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_is_windows_runtime",
+                return_value=True,
+            ),
             mock.patch.object(
                 production_runners,
                 "_WINDOWS_SAFE_SHARD_LIMIT_BYTES",
@@ -517,7 +530,11 @@ class ProductionRunnerTests(unittest.TestCase):
             torch_dtype="float32",
         )
         with (
-            mock.patch.object(production_runners.os, "name", "nt"),
+            mock.patch.object(
+                production_runners,
+                "_is_windows_runtime",
+                return_value=True,
+            ),
             self.assertRaises(WorkerError) as captured,
         ):
             adapter.transcribe_batch(
@@ -1473,6 +1490,83 @@ class ProductionRunnerTests(unittest.TestCase):
         cache_material = verifier.cache_material(candidate, segments)
         self.assertEqual(len(cache_material["references"]), 2)
 
+    def test_eres2netv2_mps_loads_through_cpu_then_moves_embedding_model(
+        self,
+    ) -> None:
+        class EmbeddingModel:
+            def __init__(self) -> None:
+                self.devices: list[str] = []
+                self.eval_calls = 0
+
+            def to(self, device):
+                self.devices.append(str(device))
+                return self
+
+            def eval(self):
+                self.eval_calls += 1
+                return self
+
+        model = SimpleNamespace(
+            device="cpu",
+            embedding_model=EmbeddingModel(),
+        )
+        pipeline = SimpleNamespace(model=model)
+        factory_calls: list[dict[str, object]] = []
+
+        def factory(**kwargs):
+            factory_calls.append(kwargs)
+            return pipeline
+
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="mps",
+            pipeline_factory=factory,
+        )
+        with mock.patch.object(
+            production_runners,
+            "_mps_is_available",
+            return_value=True,
+        ):
+            loaded = verifier._pipeline()
+
+        self.assertIs(loaded, pipeline)
+        self.assertEqual(factory_calls[0]["device"], "cpu")
+        self.assertEqual(model.embedding_model.devices, ["mps"])
+        self.assertEqual(model.embedding_model.eval_calls, 1)
+        self.assertEqual(str(model.device), "mps")
+
+    def test_eres2netv2_mps_unavailable_fails_before_device_transfer(
+        self,
+    ) -> None:
+        pipeline = SimpleNamespace(
+            model=SimpleNamespace(
+                device="cpu",
+                embedding_model=mock.Mock(),
+            )
+        )
+        verifier = LocalERes2NetV2Verifier(
+            model_path=self.eres_model,
+            device="mps",
+            pipeline_factory=lambda **_kwargs: pipeline,
+        )
+
+        with (
+            mock.patch.object(
+                production_runners,
+                "_mps_is_available",
+                return_value=False,
+            ),
+            self.assertRaises(WorkerError) as captured,
+        ):
+            verifier._pipeline()
+
+        self.assertEqual(
+            captured.exception.code,
+            "ERES2NETV2_DEVICE_UNAVAILABLE",
+        )
+        pipeline.model.embedding_model.to.assert_not_called()
+        self.assertIsNone(verifier._pipeline_instance)
+
     def test_eres2netv2_serializes_shared_pipeline_inference(self) -> None:
         class ConcurrentTrackingPipeline:
             def __init__(self) -> None:
@@ -1945,6 +2039,175 @@ class ProductionRunnerTests(unittest.TestCase):
             evidence["conflictProposal"]["automaticSpeakerOverride"]
         )
         self.assertEqual(len(pipeline.calls), 1)
+
+    def test_pyannote_detects_exact_overlap_intervals_once_per_timeline(
+        self,
+    ) -> None:
+        annotation = FakeAnnotation(
+            [
+                (SimpleNamespace(start=-0.2, end=0.8), "track-1", "LOCAL_A"),
+                (SimpleNamespace(start=0.5, end=1.5), "track-2", "LOCAL_B"),
+                (SimpleNamespace(start=1.2, end=2.2), "track-3", "LOCAL_A"),
+            ]
+        )
+        pipeline = FakePyannotePipeline(
+            SimpleNamespace(speaker_diarization=annotation)
+        )
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            pipeline_factory=lambda **kwargs: pipeline,
+        )
+
+        decisions = adapter.detect_batch(
+            self.prepared(),
+            (
+                SpeechWindow("window-1", 0, 1000),
+                SpeechWindow("window-2", 1000, 2000),
+            ),
+            self.context,
+        )
+
+        self.assertEqual(len(pipeline.calls), 1)
+        self.assertEqual(
+            [decision.window_id for decision in decisions],
+            ["window-1", "window-2"],
+        )
+        self.assertTrue(all(isinstance(item, OverlapDecision) for item in decisions))
+        self.assertTrue(all(item.overlapping for item in decisions))
+        self.assertEqual(
+            decisions[0].evidence["overlapIntervals"],
+            [
+                {
+                    "startMs": 500,
+                    "endMs": 800,
+                    "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+                }
+            ],
+        )
+        self.assertEqual(
+            decisions[1].evidence["overlapIntervals"],
+            [
+                {
+                    "startMs": 1200,
+                    "endMs": 1500,
+                    "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+                }
+            ],
+        )
+        self.assertEqual(
+            decisions[0].evidence["confidenceKind"],
+            "binary-annotation-no-posterior",
+        )
+        self.assertFalse(decisions[0].evidence["calibratedConfidence"])
+        self.assertTrue(decisions[0].evidence["overlapDetectorRun"])
+
+    def test_pyannote_isolated_runtime_receives_one_full_timeline(
+        self,
+    ) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def isolated_runner(**kwargs):
+            calls.append(kwargs)
+            return [
+                {"startMs": 0, "endMs": 800, "localSpeaker": "LOCAL_A"},
+                {"startMs": 500, "endMs": 1500, "localSpeaker": "LOCAL_B"},
+                {"startMs": 1200, "endMs": 2000, "localSpeaker": "LOCAL_A"},
+            ]
+
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            isolated_inference_runner=isolated_runner,
+        )
+        decisions = adapter.detect_batch(
+            self.prepared(),
+            (
+                SpeechWindow("window-1", 0, 1000),
+                SpeechWindow("window-2", 1000, 2000),
+            ),
+            self.context,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["start_ms"], 0)
+        self.assertEqual(calls[0]["end_ms"], 4000)
+        self.assertEqual(
+            [item.evidence["overlapIntervals"] for item in decisions],
+            [
+                [
+                    {
+                        "startMs": 500,
+                        "endMs": 800,
+                        "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+                    }
+                ],
+                [
+                    {
+                        "startMs": 1200,
+                        "endMs": 1500,
+                        "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+                    }
+                ],
+            ],
+        )
+
+    def test_pyannote_review_reuses_isolated_overlap_turns(self) -> None:
+        def unexpected_runner(**_kwargs):
+            raise AssertionError("review must reuse full-timeline overlap evidence")
+
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            isolated_inference_runner=unexpected_runner,
+        )
+        segment = TranscriptSegment(
+            segment_id="candidate",
+            start_ms=1000,
+            end_ms=3000,
+            speaker_id="speaker-1",
+            raw_text="中文原文",
+            normalized_text="中文原文",
+            display_text="中文原文",
+            confidence=0.9,
+            speaker_scores=(
+                SpeakerScore("speaker-1", 0.52),
+                SpeakerScore("speaker-2", 0.48),
+            ),
+            speaker_margin=0.04,
+            evidence={
+                "preparation": {"audioPath": str(self.audio)},
+                "overlap": {
+                    "speakerTurns": [
+                        {
+                            "startMs": 1000,
+                            "endMs": 1800,
+                            "localSpeaker": "LOCAL_A",
+                        },
+                        {
+                            "startMs": 1500,
+                            "endMs": 2500,
+                            "localSpeaker": "LOCAL_B",
+                        },
+                    ]
+                },
+            },
+        )
+
+        proposal = adapter.review_batch(
+            [ReviewCandidate("candidate", ("OVERLAP",), False)],
+            {"candidate": segment},
+            self.context,
+        )[0]
+
+        encoded = next(
+            ref
+            for ref in proposal.evidence_refs
+            if ref.startswith("pyannote:")
+        )
+        evidence = json.loads(encoded.split(":", 2)[2])
+        self.assertEqual(evidence["localSpeakerCount"], 2)
+        self.assertEqual(len(evidence["overlapIntervals"]), 1)
 
     def test_pyannote_runtime_initialization_incompatibility_fails_closed(
         self,

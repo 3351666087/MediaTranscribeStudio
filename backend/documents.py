@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from contracts.pyannote_evidence import is_verified_pyannote_speaker_revision
+
 from .errors import WorkerError
 from .language import MULTIPLE_LANGUAGES, UNDETERMINED_LANGUAGE, normalize_language_tag
 from .models import (
@@ -128,6 +130,15 @@ def validate_segments(
                 f"{segment.segment_id} speakerMargin does not match acoustic scores",
             )
         revisions = _speaker_revisions(segment)
+        verified_pyannote_revisions = {
+            revision.revision_id
+            for revision in revisions
+            if is_verified_pyannote_speaker_revision(
+                revision,
+                segment.evidence,
+                canonical_set,
+            )
+        }
         for revision in segment.revisions:
             if revision.source == "llm":
                 raise WorkerError(
@@ -157,6 +168,7 @@ def validate_segments(
                 and revision.source != "manual"
                 and revision.revision_type
                 in {"speaker", "boundary", "split", "merge"}
+                and revision.revision_id not in verified_pyannote_revisions
             ):
                 raise WorkerError(
                     "OVERLAP_OVERRIDE_FORBIDDEN",
@@ -165,13 +177,18 @@ def validate_segments(
         non_manual_revisions = [
             item for item in revisions if item.source != "manual"
         ]
+        unsafe_non_manual_revisions = [
+            item
+            for item in non_manual_revisions
+            if item.revision_id not in verified_pyannote_revisions
+        ]
         if segment.human_locked and non_manual_revisions:
             raise WorkerError(
                 "HUMAN_LOCK_OVERRIDE_FORBIDDEN",
                 f"{segment.segment_id} is human-locked and cannot be changed automatically",
             )
         if (
-            non_manual_revisions
+            unsafe_non_manual_revisions
             and segment.speaker_margin >= high_margin_threshold
         ):
             raise WorkerError(
@@ -204,7 +221,11 @@ def validate_segments(
                     "SPEAKER_REVISION_INVALID",
                     f"{segment.segment_id} speaker revisions must record a change",
                 )
-            if revision.source != "manual" and revision.after not in top_two:
+            if (
+                revision.source != "manual"
+                and revision.after not in top_two
+                and revision.revision_id not in verified_pyannote_revisions
+            ):
                 raise WorkerError(
                     "SEMANTIC_ARBITRATION_OUTSIDE_TOP2",
                     f"{segment.segment_id} automatic arbitration must stay within acoustic top-2",

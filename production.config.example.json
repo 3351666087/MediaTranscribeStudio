@@ -20,7 +20,8 @@
   "executables": {
     "ffmpeg": "ffmpeg",
     "java": "java",
-    "pdfRendererJar": "pdf-renderer/target/pdf-renderer.jar"
+    "pdfRendererJar": "pdf-renderer/target/pdf-renderer.jar",
+    "pyannotePython": "D:/MediaTranscribeStudio/runtime/pyannote/python.exe"
   },
   "runtime": {
     "maxWorkers": 1,
@@ -56,7 +57,7 @@
     "maxRounds": 5,
     "captureDpi": 144,
     "marginMm": 14,
-    "preferredFont": "Microsoft YaHei",
+    "preferredFont": "LXGW WenKai",
     "templateId": "mts-cute-transcript-v1",
     "timeoutSeconds": 300
   }

@@ -524,7 +524,7 @@ class PipelineMetricsCollector:
         return value
 
 
-def _maximum_weight_assignment(
+def maximum_weight_assignment(
     weights: Sequence[Sequence[float]],
 ) -> list[tuple[int, int]]:
     """Return a maximum-weight one-to-one assignment using Hungarian O(n^3)."""
@@ -614,12 +614,125 @@ def _active_prediction(
     start_ms: int,
     end_ms: int,
 ) -> set[str]:
-    return {
-        str(getattr(segment, "speaker_id", ""))
-        for segment in segments
-        if int(getattr(segment, "start_ms")) < end_ms
-        and int(getattr(segment, "end_ms")) > start_ms
-    }
+    active: set[str] = set()
+    for segment in segments:
+        if (
+            int(getattr(segment, "start_ms")) >= end_ms
+            or int(getattr(segment, "end_ms")) <= start_ms
+        ):
+            continue
+        canonical_turns = _canonical_speaker_turns(segment)
+        if canonical_turns is not None:
+            active.update(
+                speaker_id
+                for turn_start, turn_end, speaker_id in canonical_turns
+                if turn_start < end_ms and turn_end > start_ms
+            )
+            continue
+        active.add(str(getattr(segment, "speaker_id", "")))
+    return active
+
+
+def _canonical_speaker_turns(
+    segment: Any,
+) -> tuple[tuple[int, int, str], ...] | None:
+    evidence = getattr(segment, "evidence", None)
+    if not isinstance(evidence, Mapping):
+        return None
+    overlap = evidence.get("overlap")
+    if not isinstance(overlap, Mapping) or "canonicalSpeakerTurns" not in overlap:
+        return None
+    raw_turns = overlap.get("canonicalSpeakerTurns")
+    if not isinstance(raw_turns, Sequence) or isinstance(
+        raw_turns,
+        (str, bytes, bytearray),
+    ):
+        return None
+    turns: list[tuple[int, int, str]] = []
+    segment_start = int(getattr(segment, "start_ms"))
+    segment_end = int(getattr(segment, "end_ms"))
+    for raw in raw_turns:
+        if not isinstance(raw, Mapping):
+            return None
+        start_ms = raw.get("startMs")
+        end_ms = raw.get("endMs")
+        speaker_id = raw.get("speakerId")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or not isinstance(speaker_id, str)
+            or not speaker_id.strip()
+            or start_ms < segment_start
+            or end_ms > segment_end
+            or end_ms <= start_ms
+        ):
+            return None
+        turns.append((start_ms, end_ms, speaker_id.strip()))
+    return tuple(turns)
+
+
+def _exact_overlap_intervals(
+    segment: Any,
+) -> tuple[tuple[int, int], ...] | None:
+    evidence = getattr(segment, "evidence", None)
+    if not isinstance(evidence, Mapping):
+        return None
+    overlap = evidence.get("overlap")
+    if not isinstance(overlap, Mapping) or "overlapIntervals" not in overlap:
+        return None
+    raw_intervals = overlap.get("overlapIntervals")
+    if not isinstance(raw_intervals, Sequence) or isinstance(
+        raw_intervals,
+        (str, bytes, bytearray),
+    ):
+        return None
+    intervals: list[tuple[int, int]] = []
+    segment_start = int(getattr(segment, "start_ms"))
+    segment_end = int(getattr(segment, "end_ms"))
+    for raw in raw_intervals:
+        if not isinstance(raw, Mapping):
+            return None
+        start_ms = raw.get("startMs")
+        end_ms = raw.get("endMs")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or start_ms < segment_start
+            or end_ms > segment_end
+            or end_ms <= start_ms
+        ):
+            return None
+        intervals.append((start_ms, end_ms))
+    return tuple(intervals)
+
+
+def _predicted_overlap(
+    segments: Sequence[Any],
+    start_ms: int,
+    end_ms: int,
+    predicted_speakers: set[str],
+) -> bool:
+    for segment in segments:
+        if (
+            int(getattr(segment, "start_ms")) >= end_ms
+            or int(getattr(segment, "end_ms")) <= start_ms
+        ):
+            continue
+        exact = _exact_overlap_intervals(segment)
+        if exact is not None:
+            if any(
+                overlap_start < end_ms and overlap_end > start_ms
+                for overlap_start, overlap_end in exact
+            ):
+                return True
+            continue
+        if bool(getattr(segment, "overlapping", False)):
+            return True
+    return len(predicted_speakers) > 1
 
 
 def evaluate_reference_quality(
@@ -650,6 +763,18 @@ def evaluate_reference_quality(
             int(getattr(segment, "end_ms")),
         )
     )
+    boundaries.update(
+        boundary
+        for segment in segments
+        for interval in (_exact_overlap_intervals(segment) or ())
+        for boundary in interval
+    )
+    boundaries.update(
+        boundary
+        for segment in segments
+        for turn in (_canonical_speaker_turns(segment) or ())
+        for boundary in turn[:2]
+    )
     ordered = sorted(boundaries)
     intervals: list[tuple[int, int, set[str], set[str], bool]] = []
     reference_speakers: set[str] = set()
@@ -660,12 +785,12 @@ def evaluate_reference_quality(
             continue
         reference = _active_reference(reference_turns, start_ms, end_ms)
         predicted = _active_prediction(segments, start_ms, end_ms)
-        predicted_overlap = any(
-            bool(getattr(segment, "overlapping", False))
-            for segment in segments
-            if int(getattr(segment, "start_ms")) < end_ms
-            and int(getattr(segment, "end_ms")) > start_ms
-        ) or len(predicted) > 1
+        predicted_overlap = _predicted_overlap(
+            segments,
+            start_ms,
+            end_ms,
+            predicted,
+        )
         intervals.append(
             (start_ms, end_ms, reference, predicted, predicted_overlap)
         )
@@ -686,7 +811,7 @@ def evaluate_reference_quality(
         for reference_id in reference:
             for predicted_id in predicted:
                 weights[ref_index[reference_id]][pred_index[predicted_id]] += duration
-    assignment = _maximum_weight_assignment(weights)
+    assignment = maximum_weight_assignment(weights)
     predicted_to_reference = {
         predicted_ids[predicted_index]: reference_ids[reference_index]
         for reference_index, predicted_index in assignment

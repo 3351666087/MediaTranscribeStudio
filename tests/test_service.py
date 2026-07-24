@@ -183,6 +183,12 @@ class _RecordingTranscriptionAdapter(FakeTranscriptionAdapter):
         return super().transcribe(request, context)
 
 
+class _UnexpectedFailureTranscriptionAdapter(FakeTranscriptionAdapter):
+    def transcribe(self, request, context):
+        del request, context
+        raise AssertionError("private diagnostic detail")
+
+
 class _PlannedRenderer(FakeDynamicRenderer):
     def __init__(self) -> None:
         self.output_plans: list[Any] = []
@@ -337,6 +343,60 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
         assert request.business_config.output_locale == "en-US"
         assert request.language == "ja-JP"
         assert request.local_llm_endpoint == "http://127.0.0.1:11434"
+        service.shutdown()
+
+
+def test_unexpected_job_failure_logs_traceback_but_sanitizes_public_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        events: list[dict[str, Any]] = []
+        service = _service(
+            root,
+            adapter=_UnexpectedFailureTranscriptionAdapter(result_mapping(1)),
+            event_sink=events.append,
+        )
+
+        with caplog.at_level("ERROR", logger="backend.service"):
+            started = service.start(
+                {
+                    "jobId": "unexpected-transcription-failure",
+                    "sourcePath": "source.wav",
+                    "outputDirectory": "job",
+                    "speakerCountMode": "manual",
+                    "speakerCount": 1,
+                }
+            )
+            final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "failed"
+        assert final["error"] == {
+            "code": "INTERNAL_ERROR",
+            "message": "worker failed closed due to an unexpected internal error",
+            "retryable": False,
+            "details": {"exceptionType": "AssertionError"},
+        }
+        failed_event = next(
+            event for event in events if event["type"] == "job.failed"
+        )
+        public_payload = json.dumps(failed_event, sort_keys=True)
+        assert "private diagnostic detail" not in public_payload
+        assert "service.py" not in public_payload
+
+        diagnostic = next(
+            record
+            for record in caplog.records
+            if record.getMessage().startswith("unexpected worker job failure")
+        )
+        assert diagnostic.exc_info is not None
+        assert diagnostic.getMessage() == (
+            "unexpected worker job failure "
+            "jobId=unexpected-transcription-failure "
+            "stage=transcription exceptionType=AssertionError"
+        )
+        assert "private diagnostic detail" in caplog.text
+        assert "Traceback (most recent call last)" in caplog.text
         service.shutdown()
 
 

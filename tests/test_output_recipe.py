@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from backend.output_recipe import (
     OutputRecipeError,
@@ -11,6 +13,10 @@ from backend.output_recipe import (
     parse_output_recipe,
     render_recipe_file_name,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RECIPE_SCHEMA = ROOT / "contracts" / "output-recipe.schema.json"
 
 
 def recipe_payload(
@@ -65,6 +71,12 @@ def recipe_payload(
             "customTitle": "",
         },
     }
+
+
+def test_recipe_matches_its_portable_schema() -> None:
+    schema = json.loads(RECIPE_SCHEMA.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(recipe_payload())
 
 
 def test_recipe_is_strict_canonical_and_hash_stable() -> None:

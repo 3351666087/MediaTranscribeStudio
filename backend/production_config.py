@@ -213,6 +213,7 @@ class ProductionExecutables:
     ffmpeg: str
     java: str
     pdf_renderer_jar: Path
+    pyannote_python: str | None = None
 
 
 @dataclass(frozen=True)
@@ -247,6 +248,8 @@ class ProductionSpeakerPolicy:
     count_stability_runs: int = 3
     eigengap_landmark_limit: int = 256
     eres2net_decision_margin: float = 0.05
+    pyannote_mapping_margin_threshold: float = 0.05
+    pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
     local_llm_mode: str = "disabled"
     local_llm_model: str = "qwen3.5:4b"
@@ -463,9 +466,15 @@ class ProductionConfig:
         raw_executables = _object(
             root["executables"],
             field="executables",
-            allowed={"ffmpeg", "java", "pdfRendererJar"},
+            allowed={
+                "ffmpeg",
+                "java",
+                "pdfRendererJar",
+                "pyannotePython",
+            },
             required={"ffmpeg", "java", "pdfRendererJar"},
         )
+        raw_pyannote_python = raw_executables.get("pyannotePython")
         executables = ProductionExecutables(
             ffmpeg=_executable_text(
                 raw_executables["ffmpeg"],
@@ -481,6 +490,15 @@ class ProductionConfig:
                 raw_executables["pdfRendererJar"],
                 field="executables.pdfRendererJar",
                 base_directory=base_directory,
+            ),
+            pyannote_python=(
+                None
+                if raw_pyannote_python is None
+                else _executable_text(
+                    raw_pyannote_python,
+                    field="executables.pyannotePython",
+                    base_directory=base_directory,
+                )
             ),
         )
 
@@ -570,6 +588,8 @@ class ProductionConfig:
                 "countStabilityRuns",
                 "eigengapLandmarkLimit",
                 "eres2netDecisionMargin",
+                "pyannoteMappingMarginThreshold",
+                "pyannotePrimaryDominanceThreshold",
                 "pyannoteMode",
                 "localLlmMode",
                 "localLlmModel",
@@ -697,6 +717,18 @@ class ProductionConfig:
                 minimum=0.0,
                 maximum=1.0,
             ),
+            pyannote_mapping_margin_threshold=_number(
+                raw_speaker.get("pyannoteMappingMarginThreshold", 0.05),
+                field="speaker.pyannoteMappingMarginThreshold",
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            pyannote_primary_dominance_threshold=_number(
+                raw_speaker.get("pyannotePrimaryDominanceThreshold", 0.60),
+                field="speaker.pyannotePrimaryDominanceThreshold",
+                minimum=0.5,
+                maximum=1.0,
+            ),
             pyannote_mode=_choice(
                 raw_pyannote_mode,
                 field="speaker.pyannoteMode",
@@ -725,6 +757,13 @@ class ProductionConfig:
             raise ProductionConfigError(
                 "models.pyannote is required when pyannote is enabled"
             )
+        if (
+            speaker.pyannote_mode != "disabled"
+            and executables.pyannote_python is None
+        ):
+            raise ProductionConfigError(
+                "executables.pyannotePython is required when pyannote is enabled"
+            )
         if speaker.pyannote_mode == "disabled" and models.pyannote is not None:
             raise ProductionConfigError(
                 "models.pyannote must be null or omitted when pyannote is disabled"
@@ -747,9 +786,10 @@ class ProductionConfig:
         preferred_font = (
             None
             if raw_preferred_font is None
-            else _nonempty_text(
+            else _choice(
                 raw_preferred_font,
                 field="pdf.preferredFont",
+                choices={"LXGW WenKai"},
             )
         )
         pdf = ProductionPdfPolicy(
@@ -893,7 +933,20 @@ class ProductionConfig:
             "eigengapLandmarkLimit": (
                 self.speaker.eigengap_landmark_limit
             ),
+            "pyannoteMappingMarginThreshold": (
+                self.speaker.pyannote_mapping_margin_threshold
+            ),
+            "pyannotePrimaryDominanceThreshold": (
+                self.speaker.pyannote_primary_dominance_threshold
+            ),
             "pdfTemplate": self.pdf.template_id,
+            "pyannotePython": (
+                hashlib.sha256(
+                    self.executables.pyannote_python.encode("utf-8")
+                ).hexdigest()
+                if self.executables.pyannote_python is not None
+                else None
+            ),
             "paths": [
                 hashlib.sha256(str(path).encode("utf-8")).hexdigest()
                 for path in (
@@ -1006,6 +1059,30 @@ def _probe_runtime_import(module: str) -> bool:
     try:
         completed = subprocess.run(
             [sys.executable, "-I", "-c", code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=_RUNTIME_IMPORT_TIMEOUT_SECONDS,
+            env=offline_environment(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == b"ok"
+
+
+def _probe_python_import(python_executable: str, module: str) -> bool:
+    resolved = _resolve_executable(python_executable)
+    if resolved is None:
+        return False
+    code = (
+        "import importlib;"
+        f"importlib.import_module({module!r});"
+        "print('ok')"
+    )
+    try:
+        completed = subprocess.run(
+            [resolved, "-I", "-c", code],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1159,6 +1236,11 @@ def run_production_preflight(
 
     ffmpeg = _resolve_executable(config.executables.ffmpeg)
     java = _resolve_executable(config.executables.java)
+    pyannote_python = (
+        _resolve_executable(config.executables.pyannote_python)
+        if config.executables.pyannote_python is not None
+        else None
+    )
     add(
         "ffmpeg-executable",
         "executable",
@@ -1181,6 +1263,18 @@ def run_production_preflight(
         ),
         "JAVA_EXECUTABLE_AVAILABLE",
     )
+    if config.speaker.pyannote_mode != "disabled":
+        add(
+            "pyannote-python-executable",
+            "executable",
+            True,
+            bool(pyannote_python)
+            and (
+                not probe_executables
+                or _probe_command([str(pyannote_python), "--version"])
+            ),
+            "ISOLATED_PYANNOTE_PYTHON_AVAILABLE",
+        )
     jar = config.executables.pdf_renderer_jar
     add(
         "java-pdf-renderer",
@@ -1200,10 +1294,6 @@ def run_production_preflight(
         ("runtime-soundfile", "soundfile", True),
         ("runtime-numpy", "numpy", True),
     ]
-    if config.speaker.pyannote_mode != "disabled":
-        runtime_modules.append(
-            ("runtime-pyannote", "pyannote.audio", True)
-        )
     for check_id, module, required in runtime_modules:
         passed = True if not probe_runtime_imports else runtime_probe(module)
         add(
@@ -1212,6 +1302,27 @@ def run_production_preflight(
             required,
             passed,
             "ISOLATED_IMPORT_PROBE",
+        )
+    if config.speaker.pyannote_mode != "disabled":
+        assert config.executables.pyannote_python is not None
+        passed = (
+            True
+            if not probe_runtime_imports
+            else (
+                runtime_probe("pyannote.audio")
+                if runtime_probe is not _probe_runtime_import
+                else _probe_python_import(
+                    config.executables.pyannote_python,
+                    "pyannote.audio",
+                )
+            )
+        )
+        add(
+            "runtime-pyannote",
+            "runtime",
+            True,
+            passed,
+            "ISOLATED_PYANNOTE_IMPORT_PROBE",
         )
     return ProductionPreflightReport(
         config_fingerprint=config.fingerprint(),

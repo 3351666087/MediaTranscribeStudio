@@ -256,6 +256,34 @@ class SpeakerChangeDetectionTests(unittest.TestCase):
         )
         self.assertEqual(plan.automatic_splits_ms, ())
 
+    def test_review_only_neighbor_does_not_block_strong_automatic_split(
+        self,
+    ) -> None:
+        plan = plan_speaker_changes(
+            vad_start_ms=0,
+            vad_end_ms=3000,
+            windows=(
+                _window("w1", 0, 1000, (1.0, 0.0)),
+                _window("w2", 1000, 2000, (0.0, 1.0)),
+                _window("w3", 1200, 2200, (0.6, 0.8)),
+            ),
+            energy_valleys=(EnergyValley(1000, 1.0, "strong-boundary"),),
+        )
+
+        by_split = {proposal.split_ms: proposal for proposal in plan.proposals}
+        self.assertEqual(plan.automatic_splits_ms, (1000,))
+        self.assertTrue(by_split[1000].apply_automatically)
+        self.assertNotIn(
+            "SHORT_RESULTING_INTERVAL",
+            by_split[1000].review_reasons,
+        )
+        self.assertFalse(by_split[1600].apply_automatically)
+        self.assertIn("LOW_CHANGE_SCORE", by_split[1600].review_reasons)
+        self.assertNotIn(
+            "SHORT_RESULTING_INTERVAL",
+            by_split[1600].review_reasons,
+        )
+
     def test_nearby_change_peaks_are_suppressed_deterministically(self) -> None:
         plan = plan_speaker_changes(
             vad_start_ms=0,

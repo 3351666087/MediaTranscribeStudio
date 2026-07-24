@@ -9,11 +9,17 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 public final class RenderRequestValidator {
     private static final Pattern URL =
             Pattern.compile("^[A-Za-z][A-Za-z0-9+.-]*://.*");
+    private static final Set<Path> MACOS_SYSTEM_ALIASES = Set.of(
+            Path.of("/etc"),
+            Path.of("/tmp"),
+            Path.of("/var")
+    );
 
     private RenderRequestValidator() {
     }
@@ -84,7 +90,7 @@ public final class RenderRequestValidator {
     private static void rejectLinkedPath(Path candidate) {
         Path current = candidate;
         while (current != null) {
-            if (Files.isSymbolicLink(current)) {
+            if (Files.isSymbolicLink(current) && !isPlatformSystemAlias(current)) {
                 throw new IllegalArgumentException("symbolic links are forbidden: " + current);
             }
             if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
@@ -102,6 +108,15 @@ public final class RenderRequestValidator {
             }
             current = current.getParent();
         }
+    }
+
+    private static boolean isPlatformSystemAlias(Path path) {
+        // macOS exposes /etc, /tmp, and /var as stable aliases into /private.
+        // They are filesystem roots, not user-controlled links inside a job
+        // input/output tree. Keep rejecting every other symbolic-link
+        // component, including links created below these roots.
+        return System.getProperty("os.name", "").toLowerCase().contains("mac")
+                && MACOS_SYSTEM_ALIASES.contains(path.toAbsolutePath().normalize());
     }
 
     private static void requireText(String value, String field, int max) {

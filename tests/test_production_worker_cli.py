@@ -162,6 +162,37 @@ class ProductionWorkerCliTests(unittest.TestCase):
         loop.assert_called_once()
         self.assertEqual(buffer.getvalue(), "")
 
+    def test_startup_does_not_preload_isolated_pyannote_in_main_process(
+        self,
+    ) -> None:
+        buffer = io.StringIO()
+        composition = SimpleNamespace(service=FakeService())
+        self.config.speaker.pyannote_mode = "fallback"
+
+        with (
+            patch(
+                "backend.worker.ProductionConfig.load",
+                return_value=self.config,
+            ),
+            patch(
+                "backend.worker.run_production_preflight",
+                return_value=self.passed_report,
+            ),
+            patch(
+                "backend.worker.build_production_composition",
+                return_value=composition,
+            ),
+            patch("backend.worker.preload_production_runtime") as preload,
+            patch("backend.worker.WorkerProtocol"),
+            patch("backend.worker.run_jsonl_loop"),
+            patch("backend.worker.apply_offline_environment"),
+            redirect_stdout(buffer),
+        ):
+            exit_code = main(["--config", str(self.config_path)])
+
+        self.assertEqual(exit_code, 0)
+        preload.assert_called_once_with(include_pyannote=False)
+
     def test_lazy_third_party_stdout_is_firewalled_from_jsonl(self) -> None:
         protocol_output = io.StringIO()
         diagnostic_output = io.StringIO()

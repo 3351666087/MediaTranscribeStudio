@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
+
+from jsonschema import Draft202012Validator
 
 from reporting.report_document_assembler import (
     ReportAssemblyError,
@@ -250,6 +253,176 @@ class ReportDocumentAssemblerTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ReportAssemblyError, "forbidden"):
             self.assemble(segments)
+
+    def test_verified_pyannote_mapping_is_preserved_in_report_audit(self) -> None:
+        segments = synthetic_segments(2)
+        segments[0]["speaker"] = "legacy-2"
+        segments[0]["speaker_scores"] = speaker_scores(
+            "speaker-1",
+            canonical_speaker_ids(2),
+            margin=0.80,
+        )
+        segments[0]["revisions"] = [
+            {
+                "id": "segment-001:speaker:1",
+                "type": "speaker",
+                "source": "acoustic",
+                "reasonCode": "PYANNOTE_CANONICAL_TRACK_MAPPING",
+                "before": "legacy-1",
+                "after": "legacy-2",
+                "confidence": 0.8,
+                "evidenceRefs": ["pyannote-mapping:segment-001"],
+            }
+        ]
+        segments[0]["evidence"] = {
+            "boundary": {
+                "provider": "pyannote-community-1",
+                "confidence": 0.99,
+                "overlapDetected": True,
+            },
+            "overlap": {
+                "canonicalSpeakerTurns": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1_000,
+                        "speakerId": "speaker-2",
+                        "localSpeaker": "LOCAL_B",
+                    }
+                ]
+            },
+            "pyannoteCanonicalMapping": {
+                "provider": {
+                    "id": "pyannote-community-1",
+                    "version": "2.0.0",
+                },
+                "method": "global-duration-weighted-acoustic-hungarian-v1",
+                "mapping": {
+                    "LOCAL_A": "speaker-1",
+                    "LOCAL_B": "speaker-2",
+                },
+                "weights": {
+                    "LOCAL_A": {
+                        "speaker-1": 900.0,
+                        "speaker-2": 100.0,
+                    },
+                    "LOCAL_B": {
+                        "speaker-1": 100.0,
+                        "speaker-2": 900.0,
+                    },
+                },
+                "optimalScore": 1_800.0,
+                "alternativeScore": 200.0,
+                "totalTrackMs": 2_000,
+                "mappingMargin": 0.8,
+                "mappingMarginThreshold": 0.2,
+                "primaryDominanceThreshold": 0.6,
+                "accepted": True,
+                "localDurationsMs": {"LOCAL_B": 1_000},
+                "dominantLocalSpeaker": "LOCAL_B",
+                "dominance": 1.0,
+                "beforeSpeakerId": "speaker-1",
+                "afterSpeakerId": "speaker-2",
+                "blockers": [],
+                "applied": True,
+                "reviewStatus": "RESOLVED",
+            },
+        }
+        segments[1]["speaker"] = "legacy-1"
+        segments[1]["speaker_scores"] = speaker_scores(
+            "speaker-1",
+            canonical_speaker_ids(2),
+        )
+
+        document = self.assemble(
+            segments,
+            speaker_mapping={
+                "legacy-1": "speaker-1",
+                "legacy-2": "speaker-2",
+            },
+        )
+
+        revision = document["segments"][0]["revisions"][0]
+        self.assertEqual(revision["revisionId"], "segment-001:speaker:1")
+        self.assertEqual(revision["confidence"], 0.8)
+        self.assertEqual(
+            revision["evidenceRefs"],
+            ["pyannote-mapping:segment-001"],
+        )
+        mapping = document["segments"][0]["evidence"]["speakerMapping"]
+        self.assertTrue(mapping["accepted"])
+        self.assertTrue(mapping["applied"])
+        self.assertEqual(
+            mapping["canonicalSpeakerTurns"][0]["speakerId"],
+            "speaker-2",
+        )
+        schema_path = (
+            Path(__file__).resolve().parents[1]
+            / "contracts"
+            / "report-document.schema.json"
+        )
+        Draft202012Validator(
+            json.loads(schema_path.read_text(encoding="utf-8"))
+        ).validate(document)
+
+    def test_unverified_pyannote_mapping_still_fails_closed(self) -> None:
+        segments = synthetic_segments(2)
+        segments[0]["speaker"] = "legacy-2"
+        segments[0]["speaker_scores"] = speaker_scores(
+            "speaker-1",
+            canonical_speaker_ids(2),
+            margin=0.80,
+        )
+        segments[0]["revisions"] = [
+            {
+                "revisionId": "segment-001:speaker:1",
+                "type": "speaker",
+                "source": "acoustic",
+                "reasonCode": "PYANNOTE_CANONICAL_TRACK_MAPPING",
+                "before": "legacy-1",
+                "after": "legacy-2",
+                "confidence": 0.8,
+                "evidenceRefs": ["pyannote-mapping:segment-001"],
+            }
+        ]
+        segments[0]["evidence"] = {
+            "boundary": {
+                "provider": "pyannote-community-1",
+                "confidence": 0.99,
+                "overlapDetected": True,
+            },
+            "overlap": {
+                "canonicalSpeakerTurns": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1_000,
+                        "speakerId": "speaker-2",
+                        "localSpeaker": "LOCAL_B",
+                    }
+                ]
+            },
+            "pyannoteCanonicalMapping": {
+                "accepted": True,
+                "applied": True,
+                "blockers": [],
+            },
+        }
+        segments[1]["speaker"] = "legacy-1"
+        segments[1]["speaker_scores"] = speaker_scores(
+            "speaker-1",
+            canonical_speaker_ids(2),
+        )
+
+        with self.assertRaisesRegex(
+            ReportAssemblyError,
+            "overlap/串话 speaker decisions require manual review",
+        ):
+            self.assemble(
+                segments,
+                speaker_mapping={
+                    "legacy-1": "speaker-1",
+                    "legacy-2": "speaker-2",
+                },
+            )
 
     def test_config_hash_and_source_hash_are_real(self) -> None:
         document = self.assemble(config={"speakerCount": 5, "offline": True})

@@ -45,6 +45,7 @@ from .speaker_change_detection import (
 from .speaker_pipeline import (
     AsrHypothesis,
     EmbeddingRecord,
+    OverlapDecision,
     PreparedAudio,
     ReviewCandidate,
     ReviewProposal,
@@ -59,6 +60,88 @@ _WINDOWS_ASR_GPU_BUDGET = "2GiB"
 _WINDOWS_ASR_CPU_BUDGET = "8GiB"
 _WINDOWS_ALIGNER_GPU_BUDGET = "1500MiB"
 _WINDOWS_ALIGNER_CPU_BUDGET = "6GiB"
+
+
+def _is_windows_runtime() -> bool:
+    return os.name == "nt"
+
+
+def _is_mps_device(value: str) -> bool:
+    return str(value).strip().casefold().split(":", 1)[0] == "mps"
+
+
+def _mps_is_available() -> bool:
+    try:
+        import torch
+    except ImportError:
+        return False
+    return bool(torch.backends.mps.is_available())
+
+
+def _prepare_eres2netv2_mps_pipeline(
+    pipeline: Any,
+    *,
+    requested_device: str,
+) -> Any:
+    """Move ModelScope ERes2NetV2 after its CPU-only device validation."""
+
+    if not _is_mps_device(requested_device):
+        return pipeline
+    if not _mps_is_available():
+        raise WorkerError(
+            "ERES2NETV2_DEVICE_UNAVAILABLE",
+            "ERes2NetV2 requested MPS but the runtime cannot provide it",
+            details={
+                "requestedDevice": requested_device,
+                "modelQualityChanged": False,
+            },
+        )
+    try:
+        import torch
+    except ImportError as exc:
+        raise WorkerError(
+            "ERES2NETV2_RUNTIME_MISSING",
+            "ERes2NetV2 requires PyTorch for MPS execution",
+        ) from exc
+
+    model = getattr(pipeline, "model", None)
+    embedding_model = getattr(model, "embedding_model", None)
+    if model is None or embedding_model is None:
+        raise WorkerError(
+            "ERES2NETV2_RUNTIME_INCOMPATIBLE",
+            "ModelScope ERes2NetV2 does not expose its embedding model",
+            details={
+                "requestedDevice": requested_device,
+                "modelQualityChanged": False,
+            },
+        )
+
+    target = torch.device(requested_device)
+    try:
+        moved = embedding_model.to(target)
+        if moved is not None:
+            model.embedding_model = moved
+        model.embedding_model.eval()
+        model.device = target
+    except Exception as exc:
+        resource_error = _eres2netv2_resource_error(
+            exc,
+            phase="model-device-transfer",
+            requested_device=requested_device,
+            clip_count=0,
+        )
+        if resource_error is not None:
+            raise resource_error from exc
+        raise WorkerError(
+            "ERES2NETV2_DEVICE_CONFIGURATION_FAILED",
+            "ERes2NetV2 could not initialize on the requested MPS device",
+            details={
+                "requestedDevice": requested_device,
+                "exceptionType": type(exc).__name__,
+                "modelQualityChanged": False,
+            },
+        ) from exc
+    return pipeline
 
 
 def _local_model_path(value: str | Path, label: str) -> Path:
@@ -131,7 +214,7 @@ def _checkpoint_layout(path: Path) -> dict[str, int]:
 
 
 def _windows_low_commit_layout_required(path: Path, label: str) -> None:
-    if os.name != "nt":
+    if not _is_windows_runtime():
         return
     layout = _checkpoint_layout(path)
     if layout["largestShardBytes"] <= _WINDOWS_SAFE_SHARD_LIMIT_BYTES:
@@ -152,7 +235,7 @@ def _windows_low_commit_layout_required(path: Path, label: str) -> None:
 
 
 def _is_windows_pagefile_error(error: BaseException) -> bool:
-    if os.name != "nt":
+    if not _is_windows_runtime():
         return False
     if isinstance(error, OSError) and getattr(error, "winerror", None) == 1455:
         return True
@@ -214,7 +297,7 @@ def _qwen_load_policy(
     """Return a stable Windows policy without probing injected test factories."""
 
     normalized = str(device_map).strip().casefold()
-    if os.name != "nt" or normalized in {"cpu", "cpu:0"}:
+    if not _is_windows_runtime() or normalized in {"cpu", "cpu:0"}:
         return {"device_map": device_map}
     if not probe_accelerator:
         return {"device_map": device_map}
@@ -707,7 +790,9 @@ class FfmpegFunAsrPreparationAdapter:
             str(temporary),
         ]
         creationflags = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if _is_windows_runtime()
+            else 0
         )
         process = subprocess.Popen(
             command,
@@ -1326,8 +1411,8 @@ class LocalFunAsrCamPlusAdapter:
     """
 
     adapter_id = "CAM++"
-    version = "2.0.0"
-    refinement_method = "cam-plus-multiresolution-viterbi-ready-v1"
+    version = "2.1.0"
+    refinement_method = "cam-plus-multiresolution-viterbi-ready-v2"
 
     def __init__(
         self,
@@ -1984,9 +2069,18 @@ class LocalERes2NetV2Verifier:
                         return pipeline(task=Tasks.speaker_verification, **kwargs)
 
                 try:
-                    self._pipeline_instance = factory(
+                    load_device = (
+                        "cpu" if _is_mps_device(self.device) else self.device
+                    )
+                    pipeline = factory(
                         model=str(self.model_path),
-                        device=self.device,
+                        device=load_device,
+                    )
+                    self._pipeline_instance = (
+                        _prepare_eres2netv2_mps_pipeline(
+                            pipeline,
+                            requested_device=self.device,
+                        )
                     )
                 except Exception as exc:
                     resource_error = _eres2netv2_resource_error(
@@ -2392,10 +2486,15 @@ class LocalERes2NetV2Verifier:
 
 
 class LocalPyannoteAuditAdapter:
-    """Candidate-only local pyannote audit with telemetry forcibly disabled."""
+    """Local pyannote overlap detector and candidate-only audit.
+
+    Full-corpus inference is only enabled when production configuration selects
+    the explicit pyannote fallback.  Audio is always supplied as an in-memory
+    waveform so the runtime never depends on TorchCodec file decoding.
+    """
 
     adapter_id = "pyannote-community-1"
-    version = "1.0.0"
+    version = "2.1.0"
     telemetry_enabled = False
 
     def __init__(
@@ -2404,14 +2503,59 @@ class LocalPyannoteAuditAdapter:
         model_path: str | Path,
         device: str = "cuda",
         pipeline_factory: Callable[..., Any] | None = None,
+        python_executable: str | Path | None = None,
+        isolated_inference_runner: Callable[..., Any] | None = None,
+        inference_timeout_seconds: float = 300.0,
     ) -> None:
         self.model_path = _local_model_path(model_path, "pyannote model")
         self.device = str(device)
         self._pipeline_factory = pipeline_factory
+        self.python_executable = self._resolve_python(python_executable)
+        if pipeline_factory is not None and (
+            self.python_executable is not None
+            or isolated_inference_runner is not None
+        ):
+            raise ValueError(
+                "pipeline_factory and isolated inference are mutually exclusive"
+            )
+        self._isolated_inference_runner = isolated_inference_runner
+        self.inference_timeout_seconds = float(inference_timeout_seconds)
+        if (
+            not math.isfinite(self.inference_timeout_seconds)
+            or self.inference_timeout_seconds <= 0.0
+        ):
+            raise ValueError("inference_timeout_seconds must be positive")
         self._pipeline_instance: Any = None
         self._load_lock = threading.Lock()
         self._inference_lock = threading.RLock()
         os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
+
+    @property
+    def _uses_isolated_runtime(self) -> bool:
+        return (
+            self.python_executable is not None
+            or self._isolated_inference_runner is not None
+        )
+
+    @staticmethod
+    def _resolve_python(value: str | Path | None) -> str | None:
+        if value is None:
+            return None
+        text = os.fspath(value).strip()
+        if not text:
+            raise ValueError("python_executable must not be empty")
+        contains_separator = any(
+            separator and separator in text for separator in (os.sep, os.altsep)
+        )
+        if Path(text).is_absolute() or contains_separator:
+            candidate = Path(text).expanduser()
+            if not candidate.is_file():
+                raise ValueError("python_executable must be a local file")
+            return str(candidate.resolve(strict=True))
+        resolved = shutil.which(text)
+        if not resolved:
+            raise ValueError("python_executable is not available on PATH")
+        return resolved
 
     def _pipeline(self) -> Any:
         with self._load_lock:
@@ -2461,7 +2605,231 @@ class LocalPyannoteAuditAdapter:
                 self._pipeline_instance = None
                 if pipeline is not None:
                     del pipeline
-                _release_accelerator_memory()
+                if not self._uses_isolated_runtime:
+                    _release_accelerator_memory()
+
+    @staticmethod
+    def _normalize_isolated_turns(
+        values: Any,
+        *,
+        start_ms: int,
+        end_ms: int,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(values, list):
+            raise WorkerError(
+                "PYANNOTE_RESULT_INVALID",
+                "isolated pyannote output is missing speaker turns",
+            )
+        turns: list[dict[str, Any]] = []
+        for index, raw in enumerate(values):
+            if not isinstance(raw, Mapping):
+                raise WorkerError(
+                    "PYANNOTE_RESULT_INVALID",
+                    "isolated pyannote returned a malformed speaker turn",
+                    details={"turnIndex": index},
+                )
+            turn_start = raw.get("startMs")
+            turn_end = raw.get("endMs")
+            local_speaker = raw.get("localSpeaker")
+            if (
+                isinstance(turn_start, bool)
+                or not isinstance(turn_start, int)
+                or isinstance(turn_end, bool)
+                or not isinstance(turn_end, int)
+                or not isinstance(local_speaker, str)
+                or not local_speaker.strip()
+                or turn_start < start_ms
+                or turn_end > end_ms
+                or turn_end <= turn_start
+            ):
+                raise WorkerError(
+                    "PYANNOTE_RESULT_INVALID",
+                    "isolated pyannote returned an out-of-range speaker turn",
+                    details={"turnIndex": index},
+                )
+            turns.append(
+                {
+                    "startMs": turn_start,
+                    "endMs": turn_end,
+                    "localSpeaker": local_speaker.strip(),
+                }
+            )
+        return sorted(
+            turns,
+            key=lambda item: (
+                item["startMs"],
+                item["endMs"],
+                item["localSpeaker"],
+            ),
+        )
+
+    def _run_isolated_inference(
+        self,
+        audio_path: Path,
+        *,
+        start_ms: int,
+        end_ms: int,
+        context: AdapterContext,
+        failure_code: str,
+        failure_message: str,
+        details: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        context.raise_if_cancelled()
+        if self._isolated_inference_runner is not None:
+            raw_turns = self._isolated_inference_runner(
+                audio_path=audio_path,
+                model_path=self.model_path,
+                device=self.device,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                context=context,
+            )
+            return self._normalize_isolated_turns(
+                raw_turns,
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
+        if self.python_executable is None:
+            raise WorkerError(
+                "PYANNOTE_RUNTIME_MISSING",
+                "isolated pyannote Python is not configured",
+            )
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "tools"
+            / "pyannote_runtime.py"
+        )
+        if not script.is_file():
+            raise WorkerError(
+                "PYANNOTE_RUNTIME_MISSING",
+                "isolated pyannote runtime entrypoint is missing",
+            )
+        request = {
+            "schemaVersion": "1.0.0",
+            "modelPath": str(self.model_path),
+            "audioPath": str(audio_path.resolve(strict=True)),
+            "device": self.device,
+            "startMs": start_ms,
+            "endMs": end_ms,
+        }
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "HF_HUB_OFFLINE": "1",
+                "HF_DATASETS_OFFLINE": "1",
+                "TRANSFORMERS_OFFLINE": "1",
+                "PYANNOTE_METRICS_ENABLED": "0",
+                "DO_NOT_TRACK": "1",
+            }
+        )
+        payload = json.dumps(
+            request,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            process = subprocess.Popen(
+                [self.python_executable, "-I", str(script)],
+                cwd=str(script.parents[1]),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+            pending_input: bytes | None = payload
+            deadline = time.monotonic() + self.inference_timeout_seconds
+            while True:
+                try:
+                    stdout, stderr = process.communicate(
+                        input=pending_input,
+                        timeout=min(
+                            0.25,
+                            max(0.01, deadline - time.monotonic()),
+                        ),
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    pending_input = None
+                    context.raise_if_cancelled()
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("isolated pyannote inference timed out")
+            if len(stdout) > 2 * 1024 * 1024:
+                raise ValueError("isolated pyannote output exceeds the limit")
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"isolated pyannote exited with code {process.returncode}"
+                )
+            response = json.loads(stdout.decode("utf-8"))
+            if (
+                not isinstance(response, Mapping)
+                or response.get("schemaVersion") != "1.0.0"
+                or response.get("status") != "ok"
+            ):
+                raise ValueError("isolated pyannote response is malformed")
+            turns = self._normalize_isolated_turns(
+                response.get("speakerTurns"),
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
+        except WorkerError:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            raise
+        except Exception as exc:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            raise WorkerError(
+                failure_code,
+                failure_message,
+                details={
+                    **dict(details),
+                    "exceptionType": type(exc).__name__,
+                },
+            ) from exc
+        context.raise_if_cancelled()
+        return turns
+
+    def _infer_waveform(
+        self,
+        samples: Any,
+        sample_rate: int,
+        context: AdapterContext,
+        *,
+        failure_code: str,
+        failure_message: str,
+        details: Mapping[str, Any],
+    ) -> Any:
+        context.raise_if_cancelled()
+        try:
+            import torch
+        except ImportError as exc:
+            raise WorkerError(
+                "PYANNOTE_RUNTIME_MISSING",
+                "torch is required for pyannote inference",
+            ) from exc
+        waveform = torch.from_numpy(samples).unsqueeze(0)
+        try:
+            with self._inference_lock:
+                pipeline = self._pipeline()
+                result = pipeline(
+                    {"waveform": waveform, "sample_rate": sample_rate}
+                )
+        except WorkerError:
+            raise
+        except Exception as exc:
+            raise WorkerError(
+                failure_code,
+                failure_message,
+                details={
+                    **dict(details),
+                    "exceptionType": type(exc).__name__,
+                },
+            ) from exc
+        context.raise_if_cancelled()
+        return result
 
     @staticmethod
     def _annotation_from_result(result: Any) -> Any:
@@ -2605,6 +2973,113 @@ class LocalPyannoteAuditAdapter:
             )
         return merged
 
+    def detect_batch(
+        self,
+        prepared: PreparedAudio,
+        windows: Sequence[SpeechWindow],
+        context: AdapterContext,
+    ) -> list[OverlapDecision]:
+        """Detect exact overlap intervals once for the normalized timeline."""
+
+        if not windows:
+            return []
+        if not prepared.audio_path or not Path(prepared.audio_path).is_file():
+            raise WorkerError(
+                "PREPARED_AUDIO_MISSING",
+                "pyannote overlap detection requires persisted normalized audio",
+            )
+        pcm_buffer_id = _pcm_buffer_id(prepared)
+        if self._uses_isolated_runtime:
+            turns = self._run_isolated_inference(
+                Path(prepared.audio_path),
+                start_ms=0,
+                end_ms=prepared.duration_ms,
+                context=context,
+                failure_code="PYANNOTE_OVERLAP_INFERENCE_FAILED",
+                failure_message="pyannote failed while detecting overlap",
+                details={"windowCount": len(windows)},
+            )
+        else:
+            samples, sample_rate, pcm_buffer_id = _shared_pcm_for_prepared(
+                prepared
+            )
+            result = self._infer_waveform(
+                samples,
+                sample_rate,
+                context,
+                failure_code="PYANNOTE_OVERLAP_INFERENCE_FAILED",
+                failure_message="pyannote failed while detecting overlap",
+                details={"windowCount": len(windows)},
+            )
+            timeline = type(
+                "_PyannoteTimeline",
+                (),
+                {"start_ms": 0, "end_ms": prepared.duration_ms},
+            )()
+            turns = self._speaker_turns(result, timeline)
+        overlap_intervals = self._overlap_intervals(turns)
+
+        output: list[OverlapDecision] = []
+        for window in windows:
+            context.raise_if_cancelled()
+            window_turns = [
+                {
+                    **dict(turn),
+                    "startMs": max(window.start_ms, int(turn["startMs"])),
+                    "endMs": min(window.end_ms, int(turn["endMs"])),
+                }
+                for turn in turns
+                if int(turn["startMs"]) < window.end_ms
+                and int(turn["endMs"]) > window.start_ms
+            ]
+            window_overlap = [
+                {
+                    **dict(interval),
+                    "startMs": max(
+                        window.start_ms,
+                        int(interval["startMs"]),
+                    ),
+                    "endMs": min(
+                        window.end_ms,
+                        int(interval["endMs"]),
+                    ),
+                }
+                for interval in overlap_intervals
+                if int(interval["startMs"]) < window.end_ms
+                and int(interval["endMs"]) > window.start_ms
+            ]
+            overlapping = bool(window_overlap)
+            evidence: dict[str, Any] = {
+                "detectorStatus": "EVALUATED",
+                "overlapDetectorRun": True,
+                "reviewStatus": (
+                    "REVIEW_REQUIRED" if overlapping else "NOT_REQUIRED"
+                ),
+                "model": self.adapter_id,
+                "pcmBufferId": pcm_buffer_id,
+                "confidenceKind": "binary-annotation-no-posterior",
+                "calibratedConfidence": False,
+                "speakerTurns": window_turns,
+                "overlapIntervals": window_overlap,
+                "localSpeakerCount": len(
+                    {
+                        str(turn["localSpeaker"])
+                        for turn in window_turns
+                    }
+                ),
+            }
+            if overlapping:
+                evidence["reasonCode"] = "PYANNOTE_OVERLAP_DETECTED"
+            output.append(
+                OverlapDecision(
+                    window_id=window.window_id,
+                    overlapping=overlapping,
+                    confidence=0.5,
+                    evidence=evidence,
+                )
+            )
+        return output
+
     def review_batch(
         self,
         candidates: Sequence[ReviewCandidate],
@@ -2626,39 +3101,49 @@ class LocalPyannoteAuditAdapter:
                     "PREPARED_AUDIO_MISSING",
                     "pyannote audit requires persisted normalized audio",
                 )
-            samples, sample_rate = _load_audio(audio_path)
-            clip = _slice_audio(
-                samples,
-                sample_rate,
-                segment.start_ms,
-                segment.end_ms,
+            overlap = segment.evidence.get("overlap")
+            cached_turns = (
+                overlap.get("speakerTurns")
+                if isinstance(overlap, Mapping)
+                else None
             )
-            try:
-                import torch
-            except ImportError as exc:
-                raise WorkerError(
-                    "PYANNOTE_RUNTIME_MISSING",
-                    "torch is required for pyannote audit",
-                ) from exc
-            waveform = torch.from_numpy(clip).unsqueeze(0)
-            try:
-                with self._inference_lock:
-                    pipeline = self._pipeline()
-                    result = pipeline(
-                        {"waveform": waveform, "sample_rate": sample_rate}
-                    )
-            except WorkerError:
-                raise
-            except Exception as exc:
-                raise WorkerError(
-                    "PYANNOTE_INFERENCE_FAILED",
-                    "pyannote failed while auditing a difficult segment",
-                    details={
-                        "segmentId": segment.segment_id,
-                        "exceptionType": type(exc).__name__,
-                    },
-                ) from exc
-            turns = self._speaker_turns(result, segment)
+            if isinstance(cached_turns, list):
+                turns = self._normalize_isolated_turns(
+                    cached_turns,
+                    start_ms=segment.start_ms,
+                    end_ms=segment.end_ms,
+                )
+            elif self._uses_isolated_runtime:
+                turns = self._run_isolated_inference(
+                    Path(audio_path),
+                    start_ms=segment.start_ms,
+                    end_ms=segment.end_ms,
+                    context=context,
+                    failure_code="PYANNOTE_INFERENCE_FAILED",
+                    failure_message=(
+                        "pyannote failed while auditing a difficult segment"
+                    ),
+                    details={"segmentId": segment.segment_id},
+                )
+            else:
+                samples, sample_rate = _load_audio(audio_path)
+                clip = _slice_audio(
+                    samples,
+                    sample_rate,
+                    segment.start_ms,
+                    segment.end_ms,
+                )
+                result = self._infer_waveform(
+                    clip,
+                    sample_rate,
+                    context,
+                    failure_code="PYANNOTE_INFERENCE_FAILED",
+                    failure_message=(
+                        "pyannote failed while auditing a difficult segment"
+                    ),
+                    details={"segmentId": segment.segment_id},
+                )
+                turns = self._speaker_turns(result, segment)
             local_speakers = sorted(
                 {str(turn["localSpeaker"]) for turn in turns}
             )

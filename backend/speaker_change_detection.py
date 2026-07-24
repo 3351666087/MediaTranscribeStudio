@@ -627,9 +627,12 @@ def _mark_short_resulting_intervals(
             ),
         )
     )
+    automatic = tuple(
+        proposal for proposal in ordered if proposal.apply_automatically
+    )
     boundaries = (
         vad_start_ms,
-        *(proposal.split_ms for proposal in ordered),
+        *(proposal.split_ms for proposal in automatic),
         vad_end_ms,
     )
     short_gaps = {
@@ -637,9 +640,14 @@ def _mark_short_resulting_intervals(
         for index, (left, right) in enumerate(zip(boundaries, boundaries[1:]))
         if right - left < config.min_resulting_interval_ms
     }
+    blocked_ids = {
+        proposal.proposal_id
+        for index, proposal in enumerate(automatic)
+        if index in short_gaps or index + 1 in short_gaps
+    }
     output: list[SplitProposal] = []
-    for index, proposal in enumerate(ordered):
-        if index not in short_gaps and index + 1 not in short_gaps:
+    for proposal in ordered:
+        if proposal.proposal_id not in blocked_ids:
             output.append(proposal)
             continue
         reasons = _unique_ordered(

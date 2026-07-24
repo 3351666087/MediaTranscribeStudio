@@ -6,6 +6,7 @@ absl-py
 accelerate
 aiohappyeyeballs
 aiohttp
+addict==2.4.0
 aiosignal
 alembic
 aliyun-python-sdk-core
@@ -124,7 +125,7 @@ nemo-toolkit
 networkx
 numba
 numexpr
-numpy
+numpy==1.26.4
 omegaconf
 onnx==1.20.1
 onnxruntime
@@ -159,12 +160,7 @@ propcache
 protobuf
 psutil
 pure-eval
-pyannote-audio
-pyannote-core
-pyannote-database
-pyannote-metrics
-pyannote-pipeline
-pyannoteai-sdk
+qwen-asr==0.0.6
 pyarrow
 pybind11
 pycparser
@@ -243,7 +239,7 @@ torch-stoi
 torchaudio==2.10.0
 torchcodec
 torchinfo
-torchmetrics
+torchmetrics==0.11.4
 torchvision==0.25.0
 tqdm
 traitlets

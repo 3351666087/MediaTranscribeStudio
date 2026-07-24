@@ -6,6 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Sequence
 
@@ -17,6 +18,14 @@ DEFAULT_MANIFEST = ROOT / ".runtime_cache" / "sample-library" / "sample-library.
 DEFAULT_CONFIG = ROOT / "production.config.json"
 DEFAULT_RESULTS = ROOT / ".runtime_cache" / "sample-library" / "results"
 DEFAULT_WORKER_OUTPUTS = ROOT / ".runtime_cache" / "outputs" / "sample-library"
+
+from tools.run_production_smoke import (
+    BatchSmokeJob,
+    HarnessSettings,
+    ProductionBatchSmokeHarness,
+    SmokePaths,
+    build_start_payload,
+)
 
 
 def _run_case(
@@ -98,6 +107,63 @@ def _run_case(
     return completed.returncode
 
 
+def _batch_job(
+    *,
+    case_id: str,
+    artifact_id: str,
+    source: Path,
+    language: str,
+    worker_output: Path,
+    logs_root: Path,
+    speaker_count_mode: str,
+    expected_speaker_count: int | None,
+    render_pdf: bool,
+    local_llm_mode: str,
+    translation_targets: Sequence[str],
+    polish: bool,
+    summary: bool,
+) -> BatchSmokeJob:
+    speaker_count = None
+    speaker_count_min = None
+    speaker_count_max = None
+    speaker_count_prior = None
+    if speaker_count_mode == "manual":
+        if expected_speaker_count is None:
+            raise ValueError("manual mode requires reference expectedSpeakerCount")
+        speaker_count = expected_speaker_count
+    elif speaker_count_mode == "hybrid":
+        if expected_speaker_count is None:
+            raise ValueError("hybrid mode requires reference expectedSpeakerCount")
+        speaker_count_min = max(1, expected_speaker_count - 1)
+        speaker_count_max = expected_speaker_count + 1
+        speaker_count_prior = expected_speaker_count
+    payload = build_start_payload(
+        job_id=f"sample-{artifact_id}",
+        source_path=source,
+        output_directory=worker_output,
+        speaker_count_mode=speaker_count_mode,
+        speaker_count=speaker_count,
+        speaker_count_min=speaker_count_min,
+        speaker_count_max=speaker_count_max,
+        speaker_count_prior=speaker_count_prior,
+        render_pdf=render_pdf,
+        title=f"Sample {case_id}",
+        language=language,
+        local_llm_mode=local_llm_mode,
+        translation_targets=translation_targets,
+        polish=polish,
+        summary=summary,
+    )
+    return BatchSmokeJob(
+        start_payload=payload,
+        paths=SmokePaths(
+            event_log=logs_root / f"{artifact_id}-events.jsonl",
+            stderr_log=logs_root / f"{artifact_id}-stderr.log",
+            result_json=logs_root / f"{artifact_id}-result.json",
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
@@ -133,6 +199,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--translation-target", action="append", default=[])
     parser.add_argument("--polish", action="store_true")
     parser.add_argument("--summary", action="store_true")
+    parser.add_argument(
+        "--reuse-worker",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "reuse one preloaded production worker for the selected sequential "
+            "cases"
+        ),
+    )
     return parser
 
 
@@ -152,6 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.results_root.mkdir(parents=True, exist_ok=True)
     args.worker_output_root.mkdir(parents=True, exist_ok=True)
     failures = 0
+    batch_jobs: list[BatchSmokeJob] = []
     for case_id in selected:
         row = available[case_id]
         source = args.manifest.parent / str(row["path"])
@@ -187,29 +263,74 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{args.speaker_count_mode} mode"
             )
         print(f"== {case_id} ({source.name}) ==", flush=True)
-        return_code = _run_case(
-            case_id=case_id,
-            artifact_id=artifact_id,
-            source=source,
-            config=args.config.resolve(),
-            language=(
-                "auto"
-                if args.language_mode == "auto"
-                else str(row.get("language") or "auto")
-            ),
-            worker_output=output,
-            logs_root=logs_root,
-            speaker_count_mode=args.speaker_count_mode,
-            expected_speaker_count=expected_speaker_count,
-            timeout_seconds=args.timeout_seconds,
-            render_pdf=args.render_pdf,
-            local_llm_mode=args.local_llm_mode,
-            translation_targets=args.translation_target,
-            polish=args.polish,
-            summary=args.summary,
+        language = (
+            "auto"
+            if args.language_mode == "auto"
+            else str(row.get("language") or "auto")
         )
-        if return_code != 0:
-            failures += 1
+        if args.reuse_worker:
+            batch_jobs.append(
+                _batch_job(
+                    case_id=case_id,
+                    artifact_id=artifact_id,
+                    source=source,
+                    language=language,
+                    worker_output=output,
+                    logs_root=logs_root,
+                    speaker_count_mode=args.speaker_count_mode,
+                    expected_speaker_count=expected_speaker_count,
+                    render_pdf=args.render_pdf,
+                    local_llm_mode=args.local_llm_mode,
+                    translation_targets=args.translation_target,
+                    polish=args.polish,
+                    summary=args.summary,
+                )
+            )
+        else:
+            return_code = _run_case(
+                case_id=case_id,
+                artifact_id=artifact_id,
+                source=source,
+                config=args.config.resolve(),
+                language=language,
+                worker_output=output,
+                logs_root=logs_root,
+                speaker_count_mode=args.speaker_count_mode,
+                expected_speaker_count=expected_speaker_count,
+                timeout_seconds=args.timeout_seconds,
+                render_pdf=args.render_pdf,
+                local_llm_mode=args.local_llm_mode,
+                translation_targets=args.translation_target,
+                polish=args.polish,
+                summary=args.summary,
+            )
+            if return_code != 0:
+                failures += 1
+    session_id = None
+    if batch_jobs:
+        session_token = uuid.uuid4().hex
+        harness = ProductionBatchSmokeHarness(
+            worker_command=(
+                sys.executable,
+                "-m",
+                "backend.worker",
+                "--config",
+                str(args.config.resolve()),
+            ),
+            cwd=ROOT,
+            session_event_log=(
+                args.results_root
+                / f"worker-session-{session_token}-events.jsonl"
+            ),
+            session_stderr_log=(
+                args.results_root
+                / f"worker-session-{session_token}-stderr.log"
+            ),
+            settings=HarnessSettings(timeout_seconds=args.timeout_seconds),
+        )
+        results = harness.run(batch_jobs)
+        failures += sum(result.status != "observed" for result in results)
+        session_id = results[0].worker_session_id if results else None
     print(
         json.dumps(
             {
@@ -217,6 +338,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "selected": selected,
                 "failedCases": failures,
                 "resultsRoot": str(args.results_root.resolve()),
+                "workerLifecycle": (
+                    "shared-session" if args.reuse_worker else "per-case"
+                ),
+                "workerSessionId": session_id,
             },
             ensure_ascii=False,
             indent=2,

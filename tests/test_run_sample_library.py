@@ -52,6 +52,7 @@ def test_auto_mode_accepts_case_without_reference_speaker_count(
             str(tmp_path / "outputs"),
             "--case",
             "unknown",
+            "--no-reuse-worker",
         ]
     )
 
@@ -84,6 +85,7 @@ def test_auto_language_mode_does_not_pass_reference_language(
             str(tmp_path / "outputs"),
             "--language-mode",
             "auto",
+            "--no-reuse-worker",
         ]
     )
 
@@ -109,5 +111,6 @@ def test_reference_modes_reject_unknown_speaker_count(
                 "unknown",
                 "--speaker-count-mode",
                 mode,
+                "--no-reuse-worker",
             ]
         )

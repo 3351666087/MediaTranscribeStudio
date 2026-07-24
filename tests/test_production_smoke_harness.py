@@ -11,7 +11,9 @@ from pathlib import Path
 import psutil
 
 from tools.run_production_smoke import (
+    BatchSmokeJob,
     HarnessSettings,
+    ProductionBatchSmokeHarness,
     ProductionSmokeHarness,
     SmokePaths,
     build_parser,
@@ -186,6 +188,102 @@ emit(
         "payload": {"status": "shutdown-requested"},
     }
 )
+"""
+
+BATCH_FAKE_WORKER = r"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+capture_path = Path(sys.argv[1])
+commands = []
+fail_second = len(sys.argv) > 2 and sys.argv[2] == "fail-second"
+job_count = 0
+
+
+def emit(value):
+    sys.stdout.buffer.write(
+        (
+            json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+    )
+    sys.stdout.buffer.flush()
+
+
+sys.stderr.buffer.write("model-preloaded-once\n".encode("utf-8"))
+sys.stderr.buffer.flush()
+for raw in sys.stdin.buffer:
+    command = json.loads(raw.decode("utf-8", errors="strict"))
+    commands.append(command)
+    capture_path.write_text(
+        json.dumps(commands, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    request_id = command["requestId"]
+    if command["type"] == "job.start":
+        job_count += 1
+        job_id = command["payload"]["jobId"]
+        emit(
+            {
+                "schemaVersion": "1.0.0",
+                "requestId": request_id,
+                "timestamp": "2026-07-24T00:00:00Z",
+                "type": "command.accepted",
+                "payload": {"jobId": job_id, "status": "queued"},
+            }
+        )
+        emit(
+            {
+                "schemaVersion": "1.0.0",
+                "eventId": "evt-start-" + job_id,
+                "jobId": job_id,
+                "sequence": 0,
+                "timestamp": "2026-07-24T00:00:01Z",
+                "type": "job.started",
+                "payload": {"status": "running"},
+            }
+        )
+        if fail_second and job_count == 2:
+            raise SystemExit(7)
+        emit(
+            {
+                "schemaVersion": "1.0.0",
+                "eventId": "evt-review-" + job_id,
+                "jobId": job_id,
+                "sequence": 1,
+                "timestamp": "2026-07-24T00:00:02Z",
+                "type": "review.required",
+                "payload": {"openCount": 1},
+            }
+        )
+    elif command["type"] == "worker.health":
+        emit(
+            {
+                "schemaVersion": "1.0.0",
+                "requestId": request_id,
+                "timestamp": "2026-07-24T00:00:03Z",
+                "type": "command.completed",
+                "payload": {
+                    "status": "ok",
+                    "activeOutputClaims": 0,
+                },
+            }
+        )
+    elif command["type"] == "worker.shutdown":
+        emit(
+            {
+                "schemaVersion": "1.0.0",
+                "requestId": request_id,
+                "timestamp": "2026-07-24T00:00:04Z",
+                "type": "command.completed",
+                "payload": {"status": "shutdown-requested"},
+            }
+        )
+        break
 """
 
 
@@ -532,6 +630,155 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
         self.assertIn(
             "提前退出",
             self.paths("early").stderr_log.read_text(encoding="utf-8"),
+        )
+
+    def test_batch_harness_reuses_one_worker_and_isolates_job_event_logs(
+        self,
+    ) -> None:
+        batch_worker = self.root / "batch_worker.py"
+        batch_worker.write_text(BATCH_FAKE_WORKER, encoding="utf-8")
+        capture = self.root / "batch-commands.json"
+        first_paths = self.paths("batch-first")
+        second_paths = self.paths("batch-second")
+        harness = ProductionBatchSmokeHarness(
+            worker_command=(
+                sys.executable,
+                "-u",
+                str(batch_worker),
+                str(capture),
+            ),
+            cwd=self.root,
+            session_event_log=self.root / "batch-session-events.jsonl",
+            session_stderr_log=self.root / "batch-session-stderr.log",
+            settings=HarnessSettings(
+                timeout_seconds=5.0,
+                shutdown_timeout_seconds=2.0,
+                cleanup_timeout_seconds=2.0,
+            ),
+            environment=os.environ.copy(),
+        )
+
+        results = harness.run(
+            (
+                BatchSmokeJob(
+                    start_payload=self.payload("batch-first", mode="auto"),
+                    paths=first_paths,
+                ),
+                BatchSmokeJob(
+                    start_payload=self.payload("batch-second", mode="auto"),
+                    paths=second_paths,
+                ),
+            )
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual({result.status for result in results}, {"observed"})
+        self.assertEqual(
+            {result.worker_pid for result in results},
+            {results[0].worker_pid},
+        )
+        self.assertEqual(
+            {result.worker_session_id for result in results},
+            {results[0].worker_session_id},
+        )
+        self.assertTrue(all(result.worker_reused for result in results))
+        self.assertTrue(
+            all(result.shutdown_acknowledged for result in results)
+        )
+        self.assertTrue(all(result.exit_code == 0 for result in results))
+        self.assertTrue(
+            all(result.forced_cleanup_pids == () for result in results)
+        )
+
+        commands = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [command["type"] for command in commands],
+            [
+                "job.start",
+                "worker.health",
+                "job.start",
+                "worker.health",
+                "worker.shutdown",
+            ],
+        )
+        first_events = self.read_events(first_paths.event_log)
+        second_events = self.read_events(second_paths.event_log)
+        self.assertEqual(
+            {
+                event["jobId"]
+                for event in first_events
+                if "jobId" in event
+            },
+            {"smoke-batch-first"},
+        )
+        self.assertEqual(
+            {
+                event["jobId"]
+                for event in second_events
+                if "jobId" in event
+            },
+            {"smoke-batch-second"},
+        )
+        self.assertEqual(
+            first_paths.stderr_log.read_text(encoding="utf-8").count(
+                "model-preloaded-once"
+            ),
+            1,
+        )
+        self.assertEqual(
+            second_paths.stderr_log.read_text(encoding="utf-8").count(
+                "model-preloaded-once"
+            ),
+            1,
+        )
+
+    def test_batch_failure_does_not_invalidate_prior_terminal_job(self) -> None:
+        batch_worker = self.root / "batch_worker_fail_second.py"
+        batch_worker.write_text(BATCH_FAKE_WORKER, encoding="utf-8")
+        capture = self.root / "batch-fail-commands.json"
+        first_paths = self.paths("batch-fail-first")
+        second_paths = self.paths("batch-fail-second")
+        harness = ProductionBatchSmokeHarness(
+            worker_command=(
+                sys.executable,
+                "-u",
+                str(batch_worker),
+                str(capture),
+                "fail-second",
+            ),
+            cwd=self.root,
+            session_event_log=self.root / "batch-fail-session-events.jsonl",
+            session_stderr_log=self.root / "batch-fail-session-stderr.log",
+            settings=HarnessSettings(
+                timeout_seconds=5.0,
+                shutdown_timeout_seconds=2.0,
+                cleanup_timeout_seconds=2.0,
+            ),
+            environment=os.environ.copy(),
+        )
+
+        results = harness.run(
+            (
+                BatchSmokeJob(
+                    start_payload=self.payload("batch-fail-first", mode="auto"),
+                    paths=first_paths,
+                ),
+                BatchSmokeJob(
+                    start_payload=self.payload("batch-fail-second", mode="auto"),
+                    paths=second_paths,
+                ),
+            )
+        )
+
+        self.assertEqual(results[0].status, "observed")
+        self.assertEqual(results[0].terminal_type, "review.required")
+        self.assertIsNone(results[0].error)
+        self.assertFalse(results[0].shutdown_acknowledged)
+        self.assertEqual(results[1].status, "harness-failed")
+        self.assertIsNotNone(results[1].error)
+        self.assertIn(
+            results[1].error["code"],
+            {"WORKER_EXITED_EARLY", "WORKER_STDOUT_CLOSED"},
         )
 
 

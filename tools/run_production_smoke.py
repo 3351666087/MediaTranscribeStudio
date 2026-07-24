@@ -80,12 +80,32 @@ class SmokeResult:
     result_json: str
     terminal_event: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    worker_session_id: str | None = None
+    worker_reused: bool = False
+    session_event_log: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["forced_cleanup_pids"] = list(self.forced_cleanup_pids)
         value["elapsed_seconds"] = round(self.elapsed_seconds, 3)
         return value
+
+
+@dataclass(frozen=True)
+class BatchSmokeJob:
+    """One independently persisted job in a shared production worker session."""
+
+    start_payload: Mapping[str, Any]
+    paths: SmokePaths
+
+
+@dataclass(frozen=True)
+class _BatchOutcome:
+    job: BatchSmokeJob
+    elapsed_seconds: float
+    event_count: int
+    terminal_event: dict[str, Any] | None
+    error: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -718,6 +738,530 @@ class ProductionSmokeHarness:
             errors="strict",
         )
         return result
+
+
+class ProductionBatchSmokeHarness:
+    """Run sequential jobs in one preloaded worker with isolated job evidence."""
+
+    def __init__(
+        self,
+        *,
+        worker_command: Sequence[str],
+        cwd: Path,
+        session_event_log: Path,
+        session_stderr_log: Path,
+        settings: HarnessSettings | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        if not worker_command:
+            raise ValueError("worker_command must not be empty")
+        self.worker_command = tuple(worker_command)
+        self.cwd = cwd.resolve()
+        self.session_event_log = session_event_log
+        self.session_stderr_log = session_stderr_log
+        self.settings = settings or HarnessSettings()
+        self.environment = dict(environment) if environment is not None else None
+
+    def _popen(self) -> subprocess.Popen[bytes]:
+        kwargs: dict[str, Any] = {
+            "args": self.worker_command,
+            "cwd": str(self.cwd),
+            "env": self.environment,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "bufsize": 0,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        return subprocess.Popen(**kwargs)
+
+    @staticmethod
+    def _validate_jobs(jobs: Sequence[BatchSmokeJob]) -> None:
+        if not jobs:
+            raise ValueError("batch jobs must not be empty")
+        job_ids: set[str] = set()
+        result_paths: set[Path] = set()
+        for job in jobs:
+            job_id = str(job.start_payload.get("jobId") or "")
+            if not job_id:
+                raise ValueError("each batch start_payload must contain jobId")
+            if job_id in job_ids:
+                raise ValueError(f"duplicate batch jobId: {job_id}")
+            job_ids.add(job_id)
+            result_path = job.paths.result_json.resolve()
+            if result_path in result_paths:
+                raise ValueError("batch result_json paths must be unique")
+            result_paths.add(result_path)
+
+    @staticmethod
+    def _decode_event(
+        raw_line: bytes,
+        *,
+        worker_pid: int,
+        line_number: int,
+    ) -> dict[str, Any]:
+        try:
+            decoded = raw_line.decode("utf-8", errors="strict")
+            event = json.loads(decoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SmokeHarnessError(
+                "worker emitted invalid UTF-8 JSONL",
+                code="INVALID_WORKER_JSONL",
+                details={
+                    "workerPid": worker_pid,
+                    "lineNumber": line_number,
+                    "exceptionType": type(exc).__name__,
+                },
+            ) from exc
+        if not isinstance(event, dict):
+            raise SmokeHarnessError(
+                "worker event root must be a JSON object",
+                code="INVALID_WORKER_EVENT",
+                details={
+                    "workerPid": worker_pid,
+                    "lineNumber": line_number,
+                },
+            )
+        return event
+
+    def _next_event(
+        self,
+        *,
+        process: subprocess.Popen[bytes],
+        output: queue.Queue[object],
+        stderr_tail: deque[str],
+        deadline: float,
+        line_number: int,
+    ) -> tuple[bytes, dict[str, Any]]:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SmokeHarnessError(
+                    "worker did not emit the required event before timeout",
+                    code="JOB_TIMEOUT",
+                    details={
+                        "workerPid": process.pid,
+                        "stderrTail": list(stderr_tail),
+                        "knownProcessTreePids": _process_tree_pids(process.pid),
+                    },
+                )
+            try:
+                item = output.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                if process.poll() is not None and output.empty():
+                    raise SmokeHarnessError(
+                        "worker exited before the batch protocol completed",
+                        code="WORKER_EXITED_EARLY",
+                        details={
+                            "workerPid": process.pid,
+                            "exitCode": process.returncode,
+                            "stderrTail": list(stderr_tail),
+                        },
+                    )
+                continue
+            if item is _EOF:
+                raise SmokeHarnessError(
+                    "worker stdout closed before the batch protocol completed",
+                    code="WORKER_STDOUT_CLOSED",
+                    details={
+                        "workerPid": process.pid,
+                        "exitCode": process.poll(),
+                        "stderrTail": list(stderr_tail),
+                    },
+                )
+            raw_line = bytes(item)
+            return raw_line, self._decode_event(
+                raw_line,
+                worker_pid=process.pid,
+                line_number=line_number,
+            )
+
+    def _wait_for_idle(
+        self,
+        *,
+        process: subprocess.Popen[bytes],
+        output: queue.Queue[object],
+        stderr_tail: deque[str],
+        control_log: BinaryIO,
+        session_id: str,
+        job_index: int,
+        deadline: float,
+        line_number: int,
+    ) -> int:
+        attempt = 1
+        while True:
+            request_id = f"{session_id}-health-{job_index}-{attempt}"
+            if process.stdin is None:
+                raise SmokeHarnessError(
+                    "worker stdin is unavailable",
+                    code="PIPE_INITIALIZATION_FAILED",
+                )
+            _write_command(
+                process.stdin,
+                command_envelope("worker.health", {}, request_id=request_id),
+            )
+            while True:
+                raw_line, event = self._next_event(
+                    process=process,
+                    output=output,
+                    stderr_tail=stderr_tail,
+                    deadline=deadline,
+                    line_number=line_number + 1,
+                )
+                line_number += 1
+                control_log.write(raw_line)
+                if not raw_line.endswith(b"\n"):
+                    control_log.write(b"\n")
+                control_log.flush()
+                if event.get("type") == "worker.startup.failed":
+                    raise SmokeHarnessError(
+                        "production worker startup failed",
+                        code="WORKER_STARTUP_FAILED",
+                        details={"event": event, "workerPid": process.pid},
+                    )
+                if event.get("requestId") != request_id:
+                    continue
+                if event.get("type") == "command.rejected":
+                    raise SmokeHarnessError(
+                        "worker rejected the health synchronization command",
+                        code="HEALTH_COMMAND_REJECTED",
+                        details={"event": event, "workerPid": process.pid},
+                    )
+                if event.get("type") != "command.completed":
+                    continue
+                payload = event.get("payload")
+                active = (
+                    payload.get("activeOutputClaims")
+                    if isinstance(payload, Mapping)
+                    else None
+                )
+                if active == 0:
+                    return line_number
+                break
+            attempt += 1
+            if time.monotonic() >= deadline:
+                raise SmokeHarnessError(
+                    "worker did not release job capacity before timeout",
+                    code="WORKER_CAPACITY_RELEASE_TIMEOUT",
+                    details={"workerPid": process.pid},
+                )
+            time.sleep(0.01)
+
+    @staticmethod
+    def _result_status(
+        terminal_event: Mapping[str, Any] | None,
+        error: Mapping[str, Any] | None,
+    ) -> tuple[str, str | None, dict[str, Any] | None]:
+        terminal_type = (
+            str(terminal_event.get("type"))
+            if terminal_event is not None
+            else None
+        )
+        if error is not None:
+            return "harness-failed", terminal_type, dict(error)
+        if terminal_type in {"job.failed", "command.rejected"}:
+            return (
+                "job-failed",
+                terminal_type,
+                {
+                    "code": terminal_type.upper().replace(".", "_"),
+                    "message": "worker reported an unsuccessful job outcome",
+                    "details": {"event": dict(terminal_event or {})},
+                },
+            )
+        if terminal_type in {"job.completed", "review.required"}:
+            return "observed", terminal_type, None
+        return (
+            "harness-failed",
+            terminal_type,
+            {
+                "code": "TERMINAL_EVENT_MISSING",
+                "message": "required terminal event was not observed",
+                "details": {"terminalType": terminal_type},
+            },
+        )
+
+    def run(self, jobs: Sequence[BatchSmokeJob]) -> tuple[SmokeResult, ...]:
+        self._validate_jobs(jobs)
+        for job in jobs:
+            for path in (
+                job.paths.event_log,
+                job.paths.stderr_log,
+                job.paths.result_json,
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+        self.session_event_log.parent.mkdir(parents=True, exist_ok=True)
+        self.session_stderr_log.parent.mkdir(parents=True, exist_ok=True)
+
+        process = self._popen()
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            process.kill()
+            raise SmokeHarnessError(
+                "worker pipes were not created",
+                code="PIPE_INITIALIZATION_FAILED",
+            )
+
+        session_id = f"production-batch-{uuid.uuid4().hex}"
+        output: queue.Queue[object] = queue.Queue()
+        stderr_tail: deque[str] = deque(maxlen=self.settings.stderr_tail_lines)
+        stdout_thread = threading.Thread(
+            target=_reader,
+            args=(process.stdout, output),
+            name=f"batch-smoke-stdout-{process.pid}",
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_stderr_reader,
+            args=(process.stderr, self.session_stderr_log, stderr_tail),
+            name=f"batch-smoke-stderr-{process.pid}",
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        outcomes: list[_BatchOutcome] = []
+        line_number = 0
+        shutdown_acknowledged = False
+        forced_cleanup_pids: tuple[int, ...] = ()
+        batch_error: dict[str, Any] | None = None
+        active_job: BatchSmokeJob | None = None
+        active_started = 0.0
+        active_event_count = 0
+
+        try:
+            with self.session_event_log.open("wb") as control_log:
+                for job_index, job in enumerate(jobs, start=1):
+                    active_job = job
+                    active_started = time.monotonic()
+                    active_event_count = 0
+                    job_id = str(job.start_payload["jobId"])
+                    request_id = f"{session_id}-start-{job_index}"
+                    _write_command(
+                        process.stdin,
+                        command_envelope(
+                            "job.start",
+                            job.start_payload,
+                            request_id=request_id,
+                        ),
+                    )
+                    terminal_event: dict[str, Any] | None = None
+                    deadline = active_started + self.settings.timeout_seconds
+                    with job.paths.event_log.open("wb") as event_log:
+                        while terminal_event is None:
+                            raw_line, event = self._next_event(
+                                process=process,
+                                output=output,
+                                stderr_tail=stderr_tail,
+                                deadline=deadline,
+                                line_number=line_number + 1,
+                            )
+                            line_number += 1
+                            active_event_count += 1
+                            event_log.write(raw_line)
+                            if not raw_line.endswith(b"\n"):
+                                event_log.write(b"\n")
+                            event_log.flush()
+                            event_type = event.get("type")
+                            if event_type == "worker.startup.failed":
+                                raise SmokeHarnessError(
+                                    "production worker startup failed",
+                                    code="WORKER_STARTUP_FAILED",
+                                    details={
+                                        "event": event,
+                                        "workerPid": process.pid,
+                                    },
+                                )
+                            if (
+                                event.get("requestId") == request_id
+                                and event_type == "command.rejected"
+                            ):
+                                terminal_event = event
+                                break
+                            if (
+                                event_type in TARGET_JOB_EVENTS
+                                and event.get("jobId") == job_id
+                            ):
+                                terminal_event = event
+                    outcomes.append(
+                        _BatchOutcome(
+                            job=job,
+                            elapsed_seconds=time.monotonic() - active_started,
+                            event_count=active_event_count,
+                            terminal_event=terminal_event,
+                        )
+                    )
+                    active_job = None
+                    line_number = self._wait_for_idle(
+                        process=process,
+                        output=output,
+                        stderr_tail=stderr_tail,
+                        control_log=control_log,
+                        session_id=session_id,
+                        job_index=job_index,
+                        deadline=(
+                            time.monotonic()
+                            + self.settings.shutdown_timeout_seconds
+                        ),
+                        line_number=line_number,
+                    )
+
+                shutdown_request_id = f"{session_id}-shutdown"
+                _write_command(
+                    process.stdin,
+                    command_envelope(
+                        "worker.shutdown",
+                        {},
+                        request_id=shutdown_request_id,
+                    ),
+                )
+                shutdown_deadline = (
+                    time.monotonic() + self.settings.shutdown_timeout_seconds
+                )
+                while not shutdown_acknowledged:
+                    raw_line, event = self._next_event(
+                        process=process,
+                        output=output,
+                        stderr_tail=stderr_tail,
+                        deadline=shutdown_deadline,
+                        line_number=line_number + 1,
+                    )
+                    line_number += 1
+                    control_log.write(raw_line)
+                    if not raw_line.endswith(b"\n"):
+                        control_log.write(b"\n")
+                    control_log.flush()
+                    if (
+                        event.get("requestId") == shutdown_request_id
+                        and event.get("type") == "command.completed"
+                    ):
+                        shutdown_acknowledged = True
+        except (BrokenPipeError, OSError, SmokeHarnessError) as exc:
+            batch_error = {
+                "code": getattr(exc, "code", "WORKER_PIPE_FAILED"),
+                "message": str(exc),
+                "details": getattr(exc, "details", {}),
+            }
+            if active_job is not None:
+                outcomes.append(
+                    _BatchOutcome(
+                        job=active_job,
+                        elapsed_seconds=max(0.0, time.monotonic() - active_started),
+                        event_count=active_event_count,
+                        terminal_event=None,
+                        error=batch_error,
+                    )
+                )
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+            if shutdown_acknowledged:
+                try:
+                    process.wait(timeout=self.settings.shutdown_timeout_seconds)
+                except subprocess.TimeoutExpired:
+                    batch_error = {
+                        "code": "WORKER_EXIT_TIMEOUT",
+                        "message": (
+                            "worker acknowledged shutdown but did not exit"
+                        ),
+                        "details": {"workerPid": process.pid},
+                    }
+            if process.poll() is None:
+                forced_cleanup_pids = terminate_exact_process_tree(
+                    process,
+                    timeout_seconds=self.settings.cleanup_timeout_seconds,
+                )
+            stdout_thread.join(timeout=self.settings.cleanup_timeout_seconds)
+            stderr_thread.join(timeout=self.settings.cleanup_timeout_seconds)
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+            try:
+                process.stderr.close()
+            except OSError:
+                pass
+
+        completed_jobs = {str(item.job.start_payload["jobId"]) for item in outcomes}
+        if batch_error is not None:
+            for job in jobs:
+                job_id = str(job.start_payload["jobId"])
+                if job_id in completed_jobs:
+                    continue
+                outcomes.append(
+                    _BatchOutcome(
+                        job=job,
+                        elapsed_seconds=0.0,
+                        event_count=0,
+                        terminal_event=None,
+                        error={
+                            "code": "BATCH_ABORTED",
+                            "message": (
+                                "job was not started because the shared worker "
+                                "session aborted"
+                            ),
+                            "details": {
+                                "sessionError": batch_error,
+                            },
+                        },
+                    )
+                )
+
+        try:
+            shared_stderr = self.session_stderr_log.read_bytes()
+        except OSError:
+            shared_stderr = b""
+
+        results: list[SmokeResult] = []
+        for outcome in outcomes:
+            outcome_error = outcome.error
+            if (
+                outcome_error is None
+                and outcome.terminal_event is None
+                and batch_error is not None
+            ):
+                outcome_error = batch_error
+            status, terminal_type, error = self._result_status(
+                outcome.terminal_event,
+                outcome_error,
+            )
+            outcome.job.paths.stderr_log.write_bytes(shared_stderr)
+            result = SmokeResult(
+                status=status,
+                terminal_type=terminal_type,
+                job_id=str(outcome.job.start_payload["jobId"]),
+                worker_pid=process.pid,
+                exit_code=process.poll(),
+                elapsed_seconds=outcome.elapsed_seconds,
+                event_count=outcome.event_count,
+                shutdown_acknowledged=shutdown_acknowledged,
+                forced_cleanup_pids=forced_cleanup_pids,
+                event_log=str(outcome.job.paths.event_log.resolve()),
+                stderr_log=str(outcome.job.paths.stderr_log.resolve()),
+                result_json=str(outcome.job.paths.result_json.resolve()),
+                terminal_event=outcome.terminal_event,
+                error=error,
+                worker_session_id=session_id,
+                worker_reused=len(jobs) > 1,
+                session_event_log=str(self.session_event_log.resolve()),
+            )
+            outcome.job.paths.result_json.write_text(
+                json.dumps(
+                    result.as_dict(),
+                    ensure_ascii=False,
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+                errors="strict",
+            )
+            results.append(result)
+        return tuple(results)
 
 
 def _load_roles(args: argparse.Namespace) -> tuple[str, ...]:

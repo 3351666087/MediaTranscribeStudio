@@ -70,6 +70,7 @@ _OVERLAP_DETECTOR_UNAVAILABLE_REASON = "OVERLAP_DETECTOR_UNAVAILABLE"
 _SPEAKER_CHANGE_REFINEMENT_STAGE = "speaker-change-refinement"
 _SPEAKER_COUNT_PARTITION_STAGE = "speaker-count-partition"
 _MIN_SPEAKER_COUNT_PARTITION_MS = 700
+_AUTO_SPEAKER_EVIDENCE_WINDOW_MS = 2_000
 _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON = (
     "SPEAKER_CHANGE_REFINEMENT_REVIEW_REQUIRED"
 )
@@ -4073,7 +4074,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.1.0"
+    version = "2.2.0"
 
     def __init__(
         self,
@@ -4610,7 +4611,7 @@ class SpeakerPipeline:
         request: StartJobRequest,
         metrics: PipelineMetricsCollector,
     ) -> PreparedAudio:
-        """Create enough contiguous evidence windows for a constrained count.
+        """Create enough contiguous evidence windows for speaker counting.
 
         A VAD window is a continuous speech region, not a speaker turn. Manual
         and hybrid policies therefore cannot use the number of VAD windows as
@@ -4621,16 +4622,26 @@ class SpeakerPipeline:
 
         started = time.perf_counter()
         policy = request.speaker_policy
-        required = (
-            policy.manual_count
-            if policy.mode is SpeakerCountMode.MANUAL
-            else (
-                policy.minimum
-                if policy.mode is SpeakerCountMode.HYBRID
-                else None
+        constrained_minimum: int | None = None
+        if policy.mode is SpeakerCountMode.MANUAL:
+            constrained_minimum = policy.manual_count
+        elif policy.mode is SpeakerCountMode.HYBRID:
+            constrained_minimum = policy.minimum
+        if constrained_minimum is None:
+            desired = sum(
+                max(
+                    1,
+                    math.ceil(
+                        (window.end_ms - window.start_ms)
+                        / _AUTO_SPEAKER_EVIDENCE_WINDOW_MS
+                    ),
+                )
+                for window in prepared.windows
             )
-        )
-        if required is None or len(prepared.windows) >= required:
+            required = min(self.config.max_clustering_windows, desired)
+        else:
+            required = constrained_minimum
+        if len(prepared.windows) >= required:
             metrics.record_stage(
                 _SPEAKER_COUNT_PARTITION_STAGE,
                 (time.perf_counter() - started) * 1000.0,
@@ -4655,7 +4666,8 @@ class SpeakerPipeline:
                     "speech duration is too short to create independent "
                     "speaker evidence windows",
                     details={
-                        "speakerCountMinimum": required,
+                        "speakerCountMinimum": constrained_minimum,
+                        "targetEvidenceWindowCount": required,
                         "speechWindows": len(prepared.windows),
                         "speechDurationMs": sum(durations),
                         "minimumPartitionMs": (
@@ -4703,14 +4715,22 @@ class SpeakerPipeline:
                         "turnId": source_turn_id,
                         "speakerCountPartition": {
                             "method": (
-                                "policy-minimum-contiguous-partition-v1"
+                                "auto-acoustic-contiguous-partition-v1"
+                                if constrained_minimum is None
+                                else "policy-minimum-contiguous-partition-v1"
                             ),
                             "sourceWindowId": source.window_id,
-                            "requestedMinimum": required,
+                            "requestedMinimum": constrained_minimum,
+                            "targetEvidenceWindowCount": required,
                             "partitionCount": partition_count,
                             "reviewRequired": True,
                             "reasonCode": (
-                                "SPEAKER_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                                "AUTO_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                                if constrained_minimum is None
+                                else (
+                                    "SPEAKER_COUNT_REQUIRES_"
+                                    "SUBWINDOW_EVIDENCE"
+                                )
                             ),
                         },
                     }
@@ -4734,6 +4754,7 @@ class SpeakerPipeline:
         )
         metrics.set_policy(
             speakerCountPartitionApplied=True,
+            speakerCountPartitionMode=policy.mode.value,
             speakerCountPartitionSourceWindows=len(prepared.windows),
             speakerCountPartitionEvidenceWindows=len(partitioned),
         )

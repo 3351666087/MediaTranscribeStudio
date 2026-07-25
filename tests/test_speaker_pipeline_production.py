@@ -1627,6 +1627,47 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             result.pipeline_metrics["policy"]["speakerCountPartitionApplied"]
         )
 
+    def test_auto_count_samples_long_vad_and_merges_same_voice(self) -> None:
+        preparation = FakePreparationAdapter(
+            1,
+            window_ranges={"window-1": (0, 5_000)},
+        )
+        pipeline, _, asr, cam, overlap = self.pipeline(
+            1,
+            windows=1,
+            preparation=preparation,
+            cam=FakeCamPlusAdapter(1, identical=True),
+        )
+
+        result = pipeline.transcribe(
+            self.request(1, "auto", job_id="auto-continuous-vad"),
+            self.context("auto-continuous-vad"),
+        )
+
+        expected_windows = tuple(
+            f"window-1.cardinality-{index:02d}" for index in range(1, 4)
+        )
+        self.assertEqual(asr.calls, [expected_windows])
+        self.assertEqual(cam.calls, [expected_windows])
+        self.assertEqual(overlap.calls, [expected_windows])
+        self.assertIsNotNone(result.speaker_count_estimate)
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 1)
+        self.assertEqual(
+            {segment.speaker_id for segment in result.segments},
+            {"speaker-1"},
+        )
+        self.assertTrue(
+            all(
+                segment.evidence["speakerCountPartition"]["method"]
+                == "auto-acoustic-contiguous-partition-v1"
+                for segment in result.segments
+            )
+        )
+        self.assertEqual(
+            result.pipeline_metrics["policy"]["speakerCountPartitionMode"],
+            "auto",
+        )
+
     def test_manual_count_fails_when_audio_cannot_support_evidence_windows(
         self,
     ) -> None:

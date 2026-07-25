@@ -1110,6 +1110,16 @@ class ReportDocumentAssembler:
                 field=f"{segment_id}.evidence.asr.confidence",
             ),
         }
+        if "confidenceAvailable" in asr_source or "confidence_available" in asr_source:
+            confidence_available = asr_source.get(
+                "confidenceAvailable",
+                asr_source.get("confidence_available"),
+            )
+            if not isinstance(confidence_available, bool):
+                raise ReportAssemblyError(
+                    f"{segment_id}.evidence.asr.confidenceAvailable must be a boolean"
+                )
+            asr["confidenceAvailable"] = confidence_available
         model_revision = _clean_text(
             asr_source.get("modelRevision", asr_source.get("model_revision"))
         )

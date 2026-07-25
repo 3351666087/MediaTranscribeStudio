@@ -353,6 +353,10 @@ public final class ReportDocumentValidator {
         requireText(segment.evidence.asr.model, "evidence.asr.model");
         require(segment.evidence.asr.confidence != null && unit(segment.evidence.asr.confidence),
                 "evidence.asr.confidence must be in [0,1]");
+        if (Boolean.FALSE.equals(segment.evidence.asr.confidenceAvailable)) {
+            require(segment.evidence.asr.confidence == 0.0,
+                    "unavailable ASR confidence must use the 0 compatibility sentinel");
+        }
         require(segment.evidence.boundary != null, "evidence.boundary is required");
         requireText(segment.evidence.boundary.provider, "evidence.boundary.provider");
         require(segment.evidence.boundary.confidence != null

@@ -117,6 +117,46 @@ final class ContractAndPaletteTest {
     }
 
     @Test
+    void xhtmlTruthfullyLabelsReviewAndUnavailableConfidence() {
+        ReportDocument unapproved = TestFixtures.document(2);
+        unapproved.language = "en";
+        unapproved.reportLocale = "en";
+        unapproved.segments.forEach(segment -> segment.reviewStatus = "review-required");
+        unapproved.segments.get(0).confidence = 0.0;
+        unapproved.segments.get(0).evidence.asr.confidence = 0.0;
+        unapproved.segments.get(0).evidence.asr.confidenceAvailable = false;
+
+        CanonicalXhtmlRenderer renderer = new CanonicalXhtmlRenderer();
+        String unapprovedXhtml = renderer.render(
+                unapproved, RenderProfile.forRound(1, 14));
+        assertTrue(unapprovedXhtml.contains("UNAPPROVED · REVIEW REQUIRED"));
+        assertTrue(unapprovedXhtml.contains("ASR confidence unavailable"));
+        assertFalse(unapprovedXhtml.contains("VERIFIED TRANSCRIPT"));
+        assertFalse(unapprovedXhtml.contains("ASR 0.0%"));
+
+        ReportDocument contradictory = TestFixtures.document(2);
+        contradictory.segments.get(0).evidence.asr.confidenceAvailable = false;
+        assertThrows(IllegalArgumentException.class,
+                () -> renderer.render(contradictory, RenderProfile.forRound(1, 14)));
+
+        ReportDocument reviewed = TestFixtures.document(2);
+        reviewed.language = "en";
+        reviewed.reportLocale = "en";
+        String reviewedXhtml = renderer.render(
+                reviewed, RenderProfile.forRound(1, 14));
+        assertTrue(reviewedXhtml.contains("HUMAN-REVIEWED TRANSCRIPT"));
+
+        ReportDocument neutral = TestFixtures.document(2);
+        neutral.language = "en";
+        neutral.reportLocale = "en";
+        neutral.segments.forEach(segment -> segment.reviewStatus = "accepted");
+        String neutralXhtml = renderer.render(
+                neutral, RenderProfile.forRound(1, 14));
+        assertTrue(neutralXhtml.contains("TRANSCRIPT REPORT"));
+        assertFalse(neutralXhtml.contains("HUMAN-REVIEWED TRANSCRIPT"));
+    }
+
+    @Test
     void aestheticWeightsSumExactlyToOne() {
         BigDecimal sum = Arrays.stream(AestheticFacetId.values())
                 .map(item -> BigDecimal.valueOf(item.weight()))

@@ -473,6 +473,15 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
                 "normalizedText": "Hello.",
                 "displayText": "Hello.",
                 "evidence": {
+                    "asr": {
+                        "provider": {
+                            "id": "Qwen3-ASR-1.7B",
+                            "version": "1.2.0",
+                        },
+                        "model": "Qwen3-ASR-1.7B",
+                        "confidence": 0.0,
+                        "confidenceAvailable": False,
+                    },
                     "overlap": {
                         "canonicalSpeakerTurns": [
                             {
@@ -530,6 +539,13 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
     assert captured_segments[0]["evidence"]["pyannoteCanonicalMapping"] == {
         "accepted": True,
         "applied": True,
+    }
+    assert captured_segments[0]["evidence"]["asr"] == {
+        "provider": "Qwen3-ASR-1.7B",
+        "model": "Qwen3-ASR-1.7B",
+        "modelRevision": "1.2.0",
+        "confidence": 0.0,
+        "confidenceAvailable": False,
     }
     assert captured_segments[0]["revisions"][0]["confidence"] == 0.8
     assert captured_segments[0]["revisions"][0]["evidenceRefs"] == [

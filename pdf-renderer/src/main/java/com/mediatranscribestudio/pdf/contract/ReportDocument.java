@@ -92,6 +92,7 @@ public final class ReportDocument {
         public String model;
         public String modelRevision;
         public Double confidence;
+        public Boolean confidenceAvailable;
         public Integer wordCount;
     }
 

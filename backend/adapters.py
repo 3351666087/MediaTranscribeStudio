@@ -23,6 +23,24 @@ _JAVA_PDF_ARTIFACT_TYPES = {
 }
 
 
+def _provider_id(value: Any, default: str) -> str:
+    if isinstance(value, Mapping):
+        for key in ("id", "name", "provider"):
+            candidate = str(value.get(key) or "").strip()
+            if candidate:
+                return candidate
+        return default
+    candidate = str(value or "").strip()
+    return candidate or default
+
+
+def _provider_version(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    candidate = str(value.get("version") or value.get("revision") or "").strip()
+    return candidate or None
+
+
 @dataclass(frozen=True)
 class AdapterContext:
     job_id: str
@@ -175,19 +193,27 @@ class JavaPdfRendererAdapter:
             overlap = raw_evidence.get("overlap")
             if not isinstance(overlap, Mapping):
                 overlap = {}
+            asr_provider = asr.get("provider")
+            confidence_available = asr.get("confidenceAvailable", True)
+            if not isinstance(confidence_available, bool):
+                raise WorkerError(
+                    "REPORT_DOCUMENT_INVALID",
+                    f"segments[{index}].evidence.asr.confidenceAvailable must be a boolean",
+                )
             segment["speaker_locked"] = bool(segment.get("humanLocked", False))
             segment["overlapDetected"] = bool(segment.get("overlapping", False))
             report_evidence: dict[str, Any] = {
                 "asr": {
-                    "provider": str(asr.get("provider") or "qwen-asr"),
+                    "provider": _provider_id(asr_provider, "qwen-asr"),
                     "model": str(asr.get("model") or "Qwen3-ASR-1.7B"),
                     "confidence": float(
                         asr.get("confidence", segment.get("confidence", 0.0))
                     ),
+                    "confidenceAvailable": confidence_available,
                 },
                 "boundary": {
-                    "provider": str(
-                        boundary.get("provider") or "funasr-forced-aligner"
+                    "provider": _provider_id(
+                        boundary.get("provider"), "funasr-forced-aligner"
                     ),
                     "model": str(
                         boundary.get("model") or "FunASR/Qwen3-ForcedAligner"
@@ -199,8 +225,8 @@ class JavaPdfRendererAdapter:
                     ),
                 },
                 "speaker": {
-                    "provider": str(
-                        voiceprint.get("provider") or "camp-plus"
+                    "provider": _provider_id(
+                        voiceprint.get("provider"), "camp-plus"
                     ),
                     "model": str(voiceprint.get("model") or "CAM++"),
                     "assignment": str(segment.get("speakerId") or ""),
@@ -209,6 +235,14 @@ class JavaPdfRendererAdapter:
                     "scores": list(scores),
                 },
             }
+            asr_model_revision = str(
+                asr.get("modelRevision")
+                or asr.get("model_revision")
+                or _provider_version(asr_provider)
+                or ""
+            ).strip()
+            if asr_model_revision:
+                report_evidence["asr"]["modelRevision"] = asr_model_revision
             for key in ("overlap", "pyannoteCanonicalMapping"):
                 value = raw_evidence.get(key)
                 if isinstance(value, Mapping):

@@ -381,6 +381,21 @@
     "asrEvidence": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": ["confidenceAvailable"],
+            "properties": {
+              "confidenceAvailable": {"const": false}
+            }
+          },
+          "then": {
+            "properties": {
+              "confidence": {"const": 0}
+            }
+          }
+        }
+      ],
       "required": [
         "provider",
         "model",
@@ -405,6 +420,10 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        },
+        "confidenceAvailable": {
+          "type": "boolean",
+          "description": "False when confidence is a compatibility sentinel rather than a calibrated ASR probability."
         },
         "wordCount": {
           "type": "integer",

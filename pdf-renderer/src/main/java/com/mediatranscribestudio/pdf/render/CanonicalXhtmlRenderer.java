@@ -40,6 +40,16 @@ public final class CanonicalXhtmlRenderer {
         for (ReportDocument.Segment segment : document.segments) {
             counts.computeIfPresent(segment.speakerId, (ignored, value) -> value + 1);
         }
+        boolean reviewRequired = document.segments.stream()
+                .anyMatch(segment -> "review-required".equals(segment.reviewStatus));
+        boolean humanReviewed = document.segments.stream()
+                .allMatch(segment -> "manually-reviewed".equals(segment.reviewStatus)
+                        || "locked".equals(segment.reviewStatus));
+        String transcriptStatus = reviewRequired
+                ? copy.reviewRequiredStatus()
+                : humanReviewed
+                ? copy.humanReviewedStatus()
+                : copy.neutralTranscriptStatus();
 
         int legendColumns = document.speakers.size() <= 2 ? 2 : 3;
         long estimatedCapacity = Math.max(
@@ -62,7 +72,8 @@ public final class CanonicalXhtmlRenderer {
                 .append("<div class=\"running-header\">").append(escape(title(document, copy)))
                 .append(" · ").append(escape(copy.runningDescriptor())).append("</div>\n")
                 .append("<section class=\"cover\">\n")
-                .append("<p class=\"eyebrow\">MEDIATRANSCRIBESTUDIO · VERIFIED TRANSCRIPT</p>")
+                .append("<p class=\"eyebrow\">MEDIATRANSCRIBESTUDIO · ")
+                .append(escape(transcriptStatus)).append("</p>")
                 .append("<h1>").append(escape(title(document, copy))).append("</h1>")
                 .append("<p class=\"subtitle\">").append(escape(copy.subtitle())).append("</p>")
                 .append("<table class=\"meta-grid\"><tbody><tr>")
@@ -170,8 +181,13 @@ public final class CanonicalXhtmlRenderer {
                     .append("\" xml:lang=\"").append(segmentLanguage)
                     .append("\" dir=\"").append(segmentDirection).append("\">")
                     .append(escape(segment.displayText)).append("</p>")
-                    .append("<div class=\"turn-meta\">ASR ")
-                    .append(String.format("%.1f%%", segment.confidence * 100.0));
+                    .append("<div class=\"turn-meta\">");
+            if (Boolean.FALSE.equals(segment.evidence.asr.confidenceAvailable)) {
+                html.append(escape(copy.asrConfidenceUnavailable()));
+            } else {
+                html.append("ASR ")
+                        .append(String.format("%.1f%%", segment.evidence.asr.confidence * 100.0));
+            }
             if (Boolean.TRUE.equals(segment.evidence.boundary.overlapDetected)
                     || segment.overlapGroupId != null) {
                 html.append(" · ").append(escape(copy.overlapSpeech()));

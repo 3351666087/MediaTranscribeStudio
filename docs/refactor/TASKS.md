@@ -155,6 +155,7 @@
 - [x] rerender 复用通过验证的字幕/视频产物；任何篡改都必须 fail closed。
 - [x] 通过字幕、输出编排、代表帧 QA、输出发布和 WorkerService 全套测试。
 - [x] 用真实视频分别验收 sidecar、soft-mux 和 burn-in 的同步、字体、颜色、清晰度和兼容性：选择用户 MOV 的全时段分层中段窗口 `1341.5–1401.5 秒`，不再使用前 60 秒；生产事务原子发布 SRT/WebVTT/ASS、`h264+aac+mov_text` soft-mux MP4 和 `h264+aac` burn-in MP4，三者时长均为 `60.000 秒`。soft-mux 解封装为 `7/7` cue 且保留说话人标签，burn-in 与同一 ASS carrier 在 5 个代表 cue 中点的像素遮罩一致，字体使用本机 `PingFang SC`/`Arial Unicode MS`，5 份客户产物大小和 SHA-256 全部复算匹配、源视频不变、隔离文件为 0。默认 Homebrew FFmpeg 缺少 libass 的首轮失败正确回滚；已安装并固定 keg-only `ffmpeg-full 8.1.2_1` 的绝对路径，两份本地生产配置固定到该工具链后，普通与 Pyannote 配置的严格 preflight 分别为 `19/19`、`22/22` 通过。可重复工具和证据分别位于 `tools/run_real_video_delivery_acceptance.py` 与 `.runtime_cache/outputs/long-media-20260724/video-delivery-w02-v1/production-transaction-v4/`。该窗口仍有 14 个 open review items 且无人数字幕真值，因此这里只勾选交付技术与视觉兼容性，不代表语言、说话人、文本或发布质量通过。
+- [x] 对同一 MOV 中段完成可重复的真实 Java-only PDF 报告验收：报告契约向后兼容地保留 `confidenceAvailable=false`，生产适配器不再把 provider 对象字符串化为字典文本；未决逐字稿首页明确显示“未审核 · 需要复核”，6 段无校准概率的 ASR 证据显示“置信度不可用”而非误导性的 `0.0%`，只有全部人工复核/锁定的文档才显示人工复核状态。OpenHTMLtoPDF/PDFBox 生成 2 页 A4 PDF，质量分 `97.87`、`13/13` 硬门槛、`14/14` 视觉维度、repair `0`，全文/段数/时间戳/说话人集合/嵌入字体检查全部通过；Poppler 重新渲染两页后逐页确认无裁切、重叠、缺字或异常分页。PDF、Java manifest 与未批准验收清单 SHA-256 分别为 `eb93310ab06f9ce7b75bcb3d6037c961d11612d89e1fc59626b7f7a19e8872a6`、`81155141265de36cca3cfb162826fa351309a5ebfea0ef780026376b7fde9bfb`、`a9e4ac1ec4672737105d30296ba9e06668f61e8373a9c93a2e9bcfa1ae4b7f7e`，工具和证据位于 `tools/run_real_java_report_acceptance.py` 与 `.runtime_cache/outputs/long-media-20260724/report-w02-java-v2/`；Python 聚焦回归 `60 passed, 16 subtests passed`、Maven `69 tests`、23 个契约校验和静态编译通过。14 个 open review items 与无参考真值仍使 `releaseApproved=false`，不得解释为中文文本或两人分离质量获批。
 
 ### 7.4 报告、字体和 DIY
 
@@ -214,7 +215,7 @@
 - [ ] 通过 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
 - [ ] 未知人数真实 `20260723_123047(1).m4a` 完成整段终态、全时段分层抽样、自动人数、角色分离、人工真值和分域性能验收。
 - [ ] 真实 MOV 完成全时段分层抽样，并仅在人工确认五人覆盖的窗口/整段上运行 auto 与 manual=5，对比人数稳定性、speaker confusion、审查量、RTF、RAM/VRAM 和缓存指标。
-- [ ] 完成 Java-only PDF、SRT/WebVTT/ASS、soft-mux、burn-in 和代表帧视觉 QA。
+- [x] 完成 Java-only PDF、SRT/WebVTT/ASS、soft-mux、burn-in 和代表帧视觉 QA；当前完成的是同一用户 MOV 分层中段窗口的技术与视觉闭环，全球样本、内容真值和人工发布批准仍由 7.9/7.10 的未完成项约束。
 - [ ] 原业务全部迁移、旧 Python UI/PDF/业务入口删除、最终 parity 通过后覆盖 `main` 并结束 `/goal`。
 
 ### 7.9 全球多源、多语种样本与严谨抽样

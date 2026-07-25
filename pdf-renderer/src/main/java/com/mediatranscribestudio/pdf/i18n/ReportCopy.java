@@ -60,6 +60,18 @@ public final class ReportCopy {
                 + "This report does not translate or summarize.";
     }
 
+    public String reviewRequiredStatus() {
+        return chinese ? "未审核 · 需要复核" : "UNAPPROVED · REVIEW REQUIRED";
+    }
+
+    public String humanReviewedStatus() {
+        return chinese ? "已完成人工复核" : "HUMAN-REVIEWED TRANSCRIPT";
+    }
+
+    public String neutralTranscriptStatus() {
+        return chinese ? "逐字稿报告" : "TRANSCRIPT REPORT";
+    }
+
     public String sourceFile() {
         return chinese ? "源文件" : "Source file";
     }
@@ -125,9 +137,9 @@ public final class ReportCopy {
 
     public String transcriptDescription() {
         return chinese
-                ? "时间戳精确到毫秒；每段显示稳定段号、说话人和声学置信度。"
+                ? "时间戳精确到毫秒；每段显示稳定段号、说话人，并在可用时显示 ASR 置信度。"
                 : "Timestamps are precise to milliseconds; every turn includes a stable segment "
-                + "identifier, speaker attribution, and acoustic confidence.";
+                + "identifier, speaker attribution, and ASR confidence when available.";
     }
 
     public String timeSection() {
@@ -140,6 +152,10 @@ public final class ReportCopy {
 
     public String speakerLocked() {
         return chinese ? "角色已锁定" : "Speaker locked";
+    }
+
+    public String asrConfidenceUnavailable() {
+        return chinese ? "ASR 置信度不可用" : "ASR confidence unavailable";
     }
 
     public String endMark() {

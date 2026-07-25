@@ -448,7 +448,7 @@ def test_embedded_close_voice_pair_uses_residual_collapse_correction(
     result = _cluster(case, request)
 
     assert result.count == speaker_count
-    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v8"
+    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v10"
     assert result.under_split_detected
     assert "CLOSE_VOICE_RESIDUAL_COLLAPSE" in result.correction_path
     assert result.candidate_min <= speaker_count - 1

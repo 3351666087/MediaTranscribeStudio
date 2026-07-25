@@ -197,22 +197,38 @@ def test_auto_dynamic_n_has_no_fixed_cardinality_ceiling(
     _assert_exact_partition(case, result)
 
 
-def test_pyannote_full_timeline_prior_corrects_singleton_over_split() -> None:
+def test_pyannote_prior_cannot_override_large_singleton_objective_gap() -> None:
     case = _basis_case((1,) * 12)
 
-    acoustic_only = _cluster(case, _request("auto"))
-    reconciled = _cluster(
+    result = _cluster(
         case,
         _request("auto"),
         pyannote_count_prior=3,
     )
 
-    assert acoustic_only.count == 12
-    assert reconciled.count == 3
-    assert reconciled.candidate_min <= 3
-    assert reconciled.candidate_max >= 12
+    assert result.count == 12
+    assert result.candidate_min <= 3
+    assert result.candidate_max >= 12
+    assert result.low_confidence_fail_closed
+    assert "PYANNOTE_COUNT_PRIOR_CONFLICT" in result.confidence_reasons
+
+
+def test_pyannote_prior_breaks_close_voice_acoustic_tie_with_review() -> None:
+    case = _close_voice_case(0.99, 4)
+
+    acoustic_only = _cluster(case, _request("auto"))
+    reconciled = _cluster(
+        case,
+        _request("auto"),
+        pyannote_count_prior=2,
+    )
+
+    assert acoustic_only.count == 1
+    assert reconciled.count == 2
+    assert reconciled.candidate_min <= 1
+    assert reconciled.candidate_max >= 2
     assert reconciled.low_confidence_fail_closed
-    assert "PYANNOTE_FULL_TIMELINE_PRIOR:12->3" in reconciled.correction_path
+    assert "PYANNOTE_FULL_TIMELINE_PRIOR:1->2" in reconciled.correction_path
     assert (
         "PYANNOTE_COUNT_PRIOR_APPLIED_WITH_REVIEW"
         in reconciled.confidence_reasons

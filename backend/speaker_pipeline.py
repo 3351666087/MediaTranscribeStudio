@@ -81,7 +81,7 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
     }
 )
-_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v8"
+_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v10"
 _STABILITY_MASK_ALGORITHM = "sha256-ranked-retained-mask-v1"
 _REQUIRED_STABILITY_COMPONENTS = frozenset(
     {
@@ -98,11 +98,10 @@ _SEARCH_TRUNCATION_REASONS = frozenset(
         "adaptive-budget-unresolved-local-bracket",
     }
 )
-_SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v5"
+_SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v6"
 _PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE = 0.12
 _PYANNOTE_COUNT_PRIOR_MIN_STABILITY = 0.60
 _PYANNOTE_COUNT_PRIOR_MIN_BOOTSTRAP_SUPPORT = 0.60
-_PYANNOTE_COUNT_PRIOR_OVER_SPLIT_FRACTION = 0.25
 _ASR_NON_LEXICAL_DISPOSITION = "rejected-non-lexical"
 
 
@@ -3746,24 +3745,15 @@ def _cluster(
         and pyannote_prior_score.count != selected_score.count
     ):
         objective_gap = selected_score.objective - pyannote_prior_score.objective
-        selected_looks_over_split = (
-            pyannote_prior_score.count < selected_score.count
-            and (
-                selected_score.tiny_cluster_fraction
-                >= _PYANNOTE_COUNT_PRIOR_OVER_SPLIT_FRACTION
-                or selected_score.over_split_risk >= 0.20
-                or selected_score.outlier_risk >= 0.15
-            )
-        )
         prior_has_repeatable_support = (
             pyannote_prior_score.stability
             >= _PYANNOTE_COUNT_PRIOR_MIN_STABILITY
             and pyannote_prior_score.bootstrap_support
             >= _PYANNOTE_COUNT_PRIOR_MIN_BOOTSTRAP_SUPPORT
         )
-        if prior_has_repeatable_support and (
-            objective_gap <= _PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE
-            or selected_looks_over_split
+        if (
+            prior_has_repeatable_support
+            and objective_gap <= _PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE
         ):
             correction_path.append(
                 "PYANNOTE_FULL_TIMELINE_PRIOR:"
@@ -4147,7 +4137,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.5.0"
+    version = "2.7.0"
 
     def __init__(
         self,
@@ -5120,9 +5110,11 @@ class SpeakerPipeline:
             item.startswith("PYANNOTE_FULL_TIMELINE_PRIOR:")
             for item in value.correction_path
         )
+        observed_prior = pyannote_prior_audit.get("observedCount")
         prior_conflict = (
-            pyannote_count_prior is not None
-            and value.count != pyannote_count_prior
+            isinstance(observed_prior, int)
+            and not isinstance(observed_prior, bool)
+            and value.count != observed_prior
         )
         metrics.set_policy(
             pyannoteSpeakerCountPriorApplied=prior_applied,
@@ -5239,6 +5231,9 @@ class SpeakerPipeline:
         )
         if observed_count > len(prepared.windows):
             audit["status"] = "outside-acoustic-evidence-range"
+            return None, audit
+        if observed_count == 1:
+            audit["status"] = "single-track-not-independent-count-evidence"
             return None, audit
         audit["status"] = "eligible"
         return observed_count, audit

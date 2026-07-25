@@ -270,16 +270,31 @@ class FakePyannoteOverlapAdapter(FakeOverlapAdapter):
     adapter_id = "pyannote-community-1"
     version = "2.2.0"
 
-    def __init__(self, *, inconsistent_digest: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        inconsistent_digest: bool = False,
+        observed_speaker_count: int = 2,
+    ) -> None:
         super().__init__()
         self.inconsistent_digest = inconsistent_digest
+        self.observed_speaker_count = observed_speaker_count
 
     def detect_batch(self, prepared, windows, context):
         context.raise_if_cancelled()
         self.calls.append(tuple(window.window_id for window in windows))
         output = []
         for index, window in enumerate(windows):
-            local_speaker = "LOCAL_A" if window.start_ms < 3_000 else "LOCAL_B"
+            local_speaker = (
+                "LOCAL_A"
+                if self.observed_speaker_count == 1 or window.start_ms < 3_000
+                else "LOCAL_B"
+            )
+            local_speakers = (
+                ["LOCAL_A"]
+                if self.observed_speaker_count == 1
+                else ["LOCAL_A", "LOCAL_B"]
+            )
             digest_character = (
                 "b" if self.inconsistent_digest and index == 1 else "a"
             )
@@ -299,8 +314,8 @@ class FakePyannoteOverlapAdapter(FakeOverlapAdapter):
                             "startMs": 0,
                             "endMs": prepared.duration_ms,
                             "turnCount": 6,
-                            "localSpeakerCount": 2,
-                            "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+                            "localSpeakerCount": len(local_speakers),
+                            "localSpeakers": local_speakers,
                             "speakerTurnsSha256": digest_character * 64,
                         },
                         "speakerTurns": [
@@ -1745,9 +1760,25 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
 
     def test_auto_count_uses_audited_full_timeline_pyannote_prior(self) -> None:
         overlap = FakePyannoteOverlapAdapter()
+        second_axis = (1.0 - 0.99**2) ** 0.5
+        vectors = {
+            **{
+                f"window-{index}": (1.0, 0.0, (index - 2) * 0.001)
+                for index in range(1, 4)
+            },
+            **{
+                f"window-{index}": (
+                    0.99,
+                    second_axis,
+                    (index - 5) * 0.001,
+                )
+                for index in range(4, 7)
+            },
+        }
         pipeline, _, _, _, _ = self.pipeline(
             6,
             overlap=overlap,
+            cam=FakeCamPlusAdapter(2, vectors_by_window_id=vectors),
             secondary=FakeSecondaryVerifier(),
             pyannote=FakePyannoteAudit(),
             config=SpeakerPipelineConfig(pyannote_mode="fallback"),
@@ -1759,8 +1790,8 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         )
 
         self.assertEqual(result.speaker_count_estimate.estimated_count, 2)
-        self.assertLessEqual(result.speaker_count_estimate.candidate_min, 2)
-        self.assertGreaterEqual(result.speaker_count_estimate.candidate_max, 6)
+        self.assertLessEqual(result.speaker_count_estimate.candidate_min, 1)
+        self.assertGreaterEqual(result.speaker_count_estimate.candidate_max, 2)
         policy = result.pipeline_metrics["policy"]
         self.assertEqual(policy["pyannoteSpeakerCountPriorStatus"], "eligible")
         self.assertEqual(policy["pyannoteSpeakerCountPriorObserved"], 2)
@@ -1768,9 +1799,31 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertTrue(policy["pyannoteSpeakerCountPriorApplied"])
         self.assertFalse(policy["pyannoteSpeakerCountPriorConflict"])
         self.assertIn(
-            "PYANNOTE_FULL_TIMELINE_PRIOR:6->2",
+            "PYANNOTE_FULL_TIMELINE_PRIOR:1->2",
             policy["speakerCountCorrectionPath"],
         )
+
+    def test_pyannote_prior_does_not_override_large_acoustic_gap(self) -> None:
+        overlap = FakePyannoteOverlapAdapter()
+        pipeline, _, _, _, _ = self.pipeline(
+            6,
+            overlap=overlap,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        result = pipeline.transcribe(
+            self.request(6, "auto", job_id="pyannote-count-conflict"),
+            self.context("pyannote-count-conflict"),
+        )
+
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 6)
+        policy = result.pipeline_metrics["policy"]
+        self.assertEqual(policy["pyannoteSpeakerCountPriorObserved"], 2)
+        self.assertEqual(policy["pyannoteSpeakerCountPriorUsed"], 2)
+        self.assertFalse(policy["pyannoteSpeakerCountPriorApplied"])
+        self.assertTrue(policy["pyannoteSpeakerCountPriorConflict"])
 
     def test_inconsistent_pyannote_full_timeline_evidence_is_not_used(
         self,
@@ -1797,6 +1850,34 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         )
         self.assertIsNone(policy["pyannoteSpeakerCountPriorUsed"])
         self.assertFalse(policy["pyannoteSpeakerCountPriorApplied"])
+
+    def test_single_pyannote_track_is_conflict_evidence_not_count_prior(
+        self,
+    ) -> None:
+        overlap = FakePyannoteOverlapAdapter(observed_speaker_count=1)
+        pipeline, _, _, _, _ = self.pipeline(
+            6,
+            overlap=overlap,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        result = pipeline.transcribe(
+            self.request(6, "auto", job_id="pyannote-single-track"),
+            self.context("pyannote-single-track"),
+        )
+
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 6)
+        policy = result.pipeline_metrics["policy"]
+        self.assertEqual(
+            policy["pyannoteSpeakerCountPriorStatus"],
+            "single-track-not-independent-count-evidence",
+        )
+        self.assertEqual(policy["pyannoteSpeakerCountPriorObserved"], 1)
+        self.assertIsNone(policy["pyannoteSpeakerCountPriorUsed"])
+        self.assertFalse(policy["pyannoteSpeakerCountPriorApplied"])
+        self.assertTrue(policy["pyannoteSpeakerCountPriorConflict"])
 
     def test_speaker_partition_requires_forced_alignment_timestamps(
         self,
@@ -2340,7 +2421,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertTrue(cached.hit)
         malformed = copy.deepcopy(cached.value)
         malformed["selectionMethod"] = (
-            "dynamic-n-adaptive-resample-stability-v7"
+            "dynamic-n-adaptive-resample-stability-v9"
         )
         cache.set_raw("clustering", cluster_key, malformed)
 
@@ -2366,7 +2447,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertTrue(repaired.hit)
         self.assertEqual(
             repaired.value["selectionMethod"],
-            "dynamic-n-adaptive-resample-stability-v8",
+            "dynamic-n-adaptive-resample-stability-v10",
         )
 
     def test_asr_language_isolated_cache_reuses_acoustic_stages(self) -> None:

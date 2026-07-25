@@ -104,6 +104,83 @@ def test_subtitle_preview_refuses_silent_overwrite(tmp_path: Path) -> None:
         export_sample_subtitles(transcript_path, output)
 
 
+def test_subtitle_preview_preserves_dense_monotonic_source_duration(
+    tmp_path: Path,
+) -> None:
+    document = _transcript()
+    document["source"]["durationMs"] = 3000  # type: ignore[index]
+    document["segments"] = [
+        {
+            "id": f"segment-{index}",
+            "startMs": (index - 1) * 1000,
+            "endMs": index * 1000,
+            "speakerId": "speaker-1",
+            "rawText": f"Line {index}.",
+        }
+        for index in range(1, 4)
+    ]
+    transcript_path = _write_json(tmp_path / "transcript.json", document)
+
+    paths = export_sample_subtitles(transcript_path, tmp_path / "subtitles")
+
+    manifest = json.loads(paths[-1].read_text(encoding="utf-8"))
+    assert manifest["cueQa"]["cueCount"] == 3
+    assert manifest["cueQa"]["lastCueEndMs"] == 3000
+    assert manifest["cueQa"]["withinSourceDuration"] is True
+    assert manifest["cueQa"]["timingPolicy"] == {
+        "configuredGapMs": 80,
+        "effectiveGapMs": 0,
+        "configuredMaxReadingSpeed": 17.0,
+        "effectiveMaxReadingSpeed": 100.0,
+        "sourceSegmentsMonotonicNonoverlapping": True,
+        "zeroGapApplied": True,
+        "sourceBoundFallbackApplied": True,
+        "configuredPolicyQaPassed": False,
+        "configuredPolicyIssues": [
+            {
+                "code": "gap",
+                "message": "cue gap is below 80 ms",
+                "cueNumber": 2,
+            },
+            {
+                "code": "gap",
+                "message": "cue gap is below 80 ms",
+                "cueNumber": 3,
+            },
+        ],
+    }
+
+
+def test_subtitle_preview_does_not_hide_overlapping_source_overflow(
+    tmp_path: Path,
+) -> None:
+    document = _transcript()
+    document["source"]["durationMs"] = 2500  # type: ignore[index]
+    document["segments"] = [
+        {
+            "id": "segment-1",
+            "startMs": 0,
+            "endMs": 1500,
+            "speakerId": "speaker-1",
+            "rawText": "First line.",
+        },
+        {
+            "id": "segment-2",
+            "startMs": 1400,
+            "endMs": 2500,
+            "speakerId": "speaker-2",
+            "rawText": "Second line.",
+        },
+    ]
+    transcript_path = _write_json(tmp_path / "transcript.json", document)
+
+    with pytest.raises(
+        RuntimeError,
+        match="subtitle cues exceed the persisted source duration",
+    ):
+        export_sample_subtitles(transcript_path, tmp_path / "subtitles")
+
+
 def test_business_acceptance_requires_policy_and_complete_variant_set(
     tmp_path: Path,
 ) -> None:

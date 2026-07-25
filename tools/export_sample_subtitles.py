@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Mapping
+from dataclasses import replace as replace_dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -20,7 +21,14 @@ from backend.persistence import (
     read_json_strict,
     sha256_file,
 )
-from backend.subtitles import CuePolicy, SubtitleFormat, arrange_cues, export_subtitles
+from backend.subtitles import (
+    CuePolicy,
+    SubtitleFormat,
+    SubtitleSegment,
+    arrange_cues,
+    audit_cues,
+    export_subtitles,
+)
 
 
 def _sha256(value: str) -> str:
@@ -98,10 +106,49 @@ def export_sample_subtitles(
                 "open review count mismatch: "
                 f"expected {expected_open_review_items}, observed {open_review_items}"
             )
-    segments = transcript_subtitle_segments(document)
-    arrangement = arrange_cues(
+    segments = tuple(
+        SubtitleSegment.from_value(segment)
+        for segment in transcript_subtitle_segments(document)
+    )
+    duration_ms = document.get("source", {}).get("durationMs")
+    if (
+        isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 1
+    ):
+        raise RuntimeError("transcript source duration is invalid")
+    configured_policy = CuePolicy(include_speaker_labels=include_speaker_labels)
+    source_segments_are_monotonic = all(
+        right.start_ms >= left.end_ms
+        for left, right in zip(segments, segments[1:], strict=False)
+    )
+    configured_arrangement = arrange_cues(
         segments,
-        policy=CuePolicy(include_speaker_labels=include_speaker_labels),
+        policy=configured_policy,
+    )
+    source_bound_fallback_applied = (
+        source_segments_are_monotonic
+        and configured_arrangement.cues[-1].end_ms > duration_ms
+    )
+    effective_policy = (
+        replace_dataclass(
+            configured_policy,
+            gap_ms=0,
+            max_reading_speed=100.0,
+        )
+        if source_bound_fallback_applied
+        else configured_policy
+    )
+    arrangement = (
+        arrange_cues(segments, policy=effective_policy)
+        if source_bound_fallback_applied
+        else configured_arrangement
+    )
+    configured_policy_qa = audit_cues(
+        arrangement.cues,
+        policy=configured_policy,
+        source_segments=segments,
+        repairs=arrangement.qa.repairs,
     )
     if not arrangement.qa.passed or not arrangement.qa.source_text_preserved:
         raise RuntimeError("subtitle cue QA failed")
@@ -110,13 +157,7 @@ def export_sample_subtitles(
         for left, right in zip(arrangement.cues, arrangement.cues[1:], strict=False)
     ):
         raise RuntimeError("subtitle cue times are not monotonic")
-    duration_ms = document.get("source", {}).get("durationMs")
-    if (
-        isinstance(duration_ms, bool)
-        or not isinstance(duration_ms, int)
-        or duration_ms < 1
-        or arrangement.cues[-1].end_ms > duration_ms
-    ):
+    if arrangement.cues[-1].end_ms > duration_ms:
         raise RuntimeError("subtitle cues exceed the persisted source duration")
 
     output_root.mkdir(parents=True, exist_ok=True)
@@ -188,6 +229,28 @@ def export_sample_subtitles(
             ),
             "repairs": list(arrangement.qa.repairs),
             "speakerLabelsIncluded": include_speaker_labels,
+            "timingPolicy": {
+                "configuredGapMs": configured_policy.gap_ms,
+                "effectiveGapMs": effective_policy.gap_ms,
+                "configuredMaxReadingSpeed": (
+                    configured_policy.max_reading_speed
+                ),
+                "effectiveMaxReadingSpeed": effective_policy.max_reading_speed,
+                "sourceSegmentsMonotonicNonoverlapping": (
+                    source_segments_are_monotonic
+                ),
+                "zeroGapApplied": effective_policy.gap_ms == 0,
+                "sourceBoundFallbackApplied": source_bound_fallback_applied,
+                "configuredPolicyQaPassed": configured_policy_qa.passed,
+                "configuredPolicyIssues": [
+                    {
+                        "code": issue.code,
+                        "message": issue.message,
+                        "cueNumber": issue.cue_number,
+                    }
+                    for issue in configured_policy_qa.issues
+                ],
+            },
         },
         "artifacts": artifacts,
         "qualityBoundary": {

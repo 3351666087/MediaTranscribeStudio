@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import sys
 import threading
 
 import pytest
@@ -36,6 +38,31 @@ def test_preload_appends_pyannote_only_when_enabled() -> None:
 
     assert modules[-1] == "pyannote.audio"
     assert modules[:-1] == production_runtime_modules(include_pyannote=False)
+
+
+def test_pyav_stub_exposes_valid_import_specs() -> None:
+    av_module = sys.modules.get("av")
+    if av_module is None or not getattr(av_module, "__mts_stub__", False):
+        pytest.skip("real PyAV is enabled in this runtime")
+
+    expected_packages = {
+        "av": True,
+        "av.error": False,
+        "av.video": True,
+        "av.video.frame": False,
+        "av.audio": True,
+        "av.audio.resampler": False,
+        "av.audio.fifo": False,
+    }
+    for module_name, is_package in expected_packages.items():
+        module = sys.modules[module_name]
+        assert module.__spec__ is not None
+        assert module.__spec__.name == module_name
+        assert (module.__spec__.submodule_search_locations is not None) is (
+            is_package
+        )
+
+    assert importlib.util.find_spec("av") is not None
 
 
 def test_preload_fails_closed_without_disclosing_exception_text() -> None:

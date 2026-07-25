@@ -218,16 +218,28 @@ class _PyAVStubOperationError(RuntimeError):
     pass
 
 
+def _pyav_stub_module(name: str, *, package: bool) -> types.ModuleType:
+    module = types.ModuleType(name)
+    module.__loader__ = None
+    module.__spec__ = importlib.machinery.ModuleSpec(
+        name,
+        loader=None,
+        is_package=package,
+    )
+    module.__package__ = name if package else name.rpartition(".")[0]
+    if package:
+        module.__path__ = []  # type: ignore[attr-defined]
+    return module
+
+
 def _install_pyav_stub() -> None:
     if not _env_flag("MTS_DISABLE_REAL_PYAV", sys.platform == "darwin"):
         return
     if "av" in sys.modules:
         return
 
-    av_mod = types.ModuleType("av")
+    av_mod = _pyav_stub_module("av", package=True)
     av_mod.__file__ = "<mts-av-stub>"
-    av_mod.__package__ = "av"
-    av_mod.__path__ = []  # type: ignore[attr-defined]
     av_mod.__version__ = "0+stub"
     av_mod.__mts_stub__ = True
 
@@ -253,11 +265,11 @@ def _install_pyav_stub() -> None:
         def set_level(_value):
             return None
 
-    error_mod = types.ModuleType("av.error")
+    error_mod = _pyav_stub_module("av.error", package=False)
     error_mod.InvalidDataError = _InvalidDataError
 
-    video_mod = types.ModuleType("av.video")
-    video_frame_mod = types.ModuleType("av.video.frame")
+    video_mod = _pyav_stub_module("av.video", package=True)
+    video_frame_mod = _pyav_stub_module("av.video.frame", package=False)
 
     class VideoFrame:
         pict_type = "NONE"
@@ -269,9 +281,12 @@ def _install_pyav_stub() -> None:
     video_frame_mod.PictureType = PictureType
     video_mod.frame = video_frame_mod
 
-    audio_mod = types.ModuleType("av.audio")
-    audio_resampler_mod = types.ModuleType("av.audio.resampler")
-    audio_fifo_mod = types.ModuleType("av.audio.fifo")
+    audio_mod = _pyav_stub_module("av.audio", package=True)
+    audio_resampler_mod = _pyav_stub_module(
+        "av.audio.resampler",
+        package=False,
+    )
+    audio_fifo_mod = _pyav_stub_module("av.audio.fifo", package=False)
 
     class AudioResampler:
         def __init__(self, *_args, **_kwargs):

@@ -35,7 +35,7 @@ cryptography
 ctranslate2
 cycler
 cytoolz
-datasets
+datasets==4.5.0
 decorator
 dill
 distro
@@ -84,6 +84,7 @@ jiter
 jiwer
 jmespath
 joblib
+jsonschema>=4.18
 julius
 kaldi-python-io
 kaldialign
@@ -111,7 +112,7 @@ mir-eval
 ml-dtypes
 mlx; platform_system == "Darwin"
 mlx-whisper; platform_system == "Darwin"
-modelscope
+modelscope==1.38.1
 more-itertools
 mpmath
 msgpack
@@ -158,7 +159,7 @@ protobuf
 psutil
 pure-eval
 qwen-asr==0.0.6
-pyarrow
+pyarrow==23.0.1
 pybind11
 pycparser
 pycryptodome
@@ -218,6 +219,7 @@ speechbrain
 sqlalchemy
 stack-data
 strenum
+setuptools==80.10.2
 sympy
 tabulate
 taichi

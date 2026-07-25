@@ -1,6 +1,6 @@
 dmgbuild>=1.6
 wheel>=0.45
-setuptools>=75
+setuptools==80.10.2
 pip>=25
 absl-py
 accelerate
@@ -39,7 +39,7 @@ cryptography
 ctranslate2
 cycler
 cytoolz
-datasets
+datasets==4.5.0
 decorator
 dill
 distro
@@ -88,6 +88,7 @@ jiter
 jiwer
 jmespath
 joblib
+jsonschema>=4.18
 julius
 kaldi-python-io
 kaldialign
@@ -115,7 +116,7 @@ mir-eval
 ml-dtypes
 mlx; platform_system == "Darwin"
 mlx-whisper; platform_system == "Darwin"
-modelscope
+modelscope==1.38.1
 more-itertools
 mpmath
 msgpack
@@ -161,7 +162,7 @@ protobuf
 psutil
 pure-eval
 qwen-asr==0.0.6
-pyarrow
+pyarrow==23.0.1
 pybind11
 pycparser
 pycryptodome
@@ -207,6 +208,7 @@ sentry-sdk
 shellingham
 shiboken6
 silero-vad
+simplejson==4.1.1
 six
 smmap
 sniffio

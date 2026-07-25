@@ -1693,6 +1693,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def absolute_python_executable(path: Path) -> str:
+    """Return an absolute interpreter path without dereferencing a venv symlink."""
+
+    return os.path.abspath(os.fspath(path))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     repo_root = Path(__file__).resolve().parents[1]
@@ -1730,7 +1736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         harness = ProductionSmokeHarness(
             worker_command=(
-                str(args.python.resolve()),
+                absolute_python_executable(args.python),
                 "-m",
                 "backend.worker",
                 "--config",

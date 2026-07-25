@@ -790,6 +790,8 @@ class OverlapDetectionAdapter(Protocol):
         prepared: PreparedAudio,
         windows: Sequence[SpeechWindow],
         context: AdapterContext,
+        *,
+        speaker_count_constraints: Mapping[str, int] | None = None,
     ) -> Sequence[OverlapDecision | Mapping[str, Any]]:
         """Detect overlap only for cache misses."""
 
@@ -880,7 +882,14 @@ class UnavailableOverlapAdapter:
     adapter_id = "overlap-unavailable"
     version = "2"
 
-    def detect_batch(self, prepared, windows, context):
+    def detect_batch(
+        self,
+        prepared,
+        windows,
+        context,
+        *,
+        speaker_count_constraints=None,
+    ):
         context.raise_if_cancelled()
         return [
             OverlapDecision(
@@ -7807,18 +7816,37 @@ class SpeakerPipeline:
             exit_reason="COMPLETED",
         )
         try:
+            speaker_count_constraints: dict[str, int] | None = None
+            if request.speaker_policy.mode is SpeakerCountMode.MANUAL:
+                assert request.speaker_policy.manual_count is not None
+                speaker_count_constraints = {
+                    "numSpeakers": request.speaker_policy.manual_count,
+                }
+            elif request.speaker_policy.mode is SpeakerCountMode.HYBRID:
+                assert request.speaker_policy.minimum is not None
+                assert request.speaker_policy.maximum is not None
+                speaker_count_constraints = {
+                    "minSpeakers": request.speaker_policy.minimum,
+                    "maxSpeakers": request.speaker_policy.maximum,
+                }
             overlap = self._window_stage(
                 stage="overlap",
                 prepared=prepared,
                 windows=prepared.windows,
                 adapter=self.overlap_adapter,
                 invoke=lambda windows: self.overlap_adapter.detect_batch(
-                    prepared, windows, context
+                    prepared,
+                    windows,
+                    context,
+                    speaker_count_constraints=speaker_count_constraints,
                 ),
                 converter=OverlapDecision.from_mapping,
                 accepted_type=OverlapDecision,
                 context=context,
                 metrics=metrics,
+                cache_identity_material={
+                    "speakerCountConstraints": speaker_count_constraints,
+                },
             )
         except Exception:
             _release_adapter_resources(

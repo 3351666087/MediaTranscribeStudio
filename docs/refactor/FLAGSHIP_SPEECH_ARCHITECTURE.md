@@ -8,7 +8,7 @@
 
 “世界最高端”不是挑一个模型名称，而是保留三个不能互相冒充的部署档：
 
-1. **托管前沿质量档**：在用户逐次明确授权媒体上传、数据保留策略和成本后，允许 `pyannote Precision-2`、`gpt-4o-transcribe-diarize` 以及后续登记的托管 ASR 基模参加同音频挑战。Precision-2 是当前官方同口径榜单中的 diarization 能力上限候选；`gpt-4o-transcribe-diarize` 可输出 speaker/time/text，但长于 30 秒需要 chunking、已知说话人参考最多 4 个，二者都只在远端运行，因此不能替代离线产品承诺。
+1. **托管前沿质量档**：在用户逐次明确授权媒体上传、数据保留策略和成本后，允许 `pyannote Precision-2`、AssemblyAI `Universal-3.5 Pro`、ElevenLabs `Scribe v2`、Speechmatics `Melia 1`、`gpt-4o-transcribe-diarize` 以及后续登记的托管基模参加同音频挑战。Precision-2 是当前官方同口径榜单中的纯 diarization 能力上限候选；Universal-3.5 Pro 是高优先级的联合 who/what 挑战者；Scribe v2 提供 90+ 语言和最多 32 人；Melia 1 提供逐词语言与中途代码切换。它们均只在远端运行，供应商自报指标也不是同一独立榜单，因此不能替代离线产品承诺或直接获得生产权威。
 2. **私有自托管旗舰档**：在受控 GPU 服务器运行 Qwen3-ASR-1.7B、`omniASR_LLM_Unlimited_7B_v2`、Community-1/VBx、NeMo 挑战者和服务器 LLM。这是默认的高质量生产上限，原始媒体不离开用户控制的基础设施。
 3. **M4 边缘质量档**：使用相同契约、缓存和证据链串行运行可容纳模型；资源不足时升级到私有服务器或明确降级，不能把 16 GB 能运行的小模型结果宣称为全系统上限。
 
@@ -19,7 +19,7 @@
 系统采用“旗舰级联 + 专用挑战者 + 长尾兜底”，不采用一个模型包办全部任务：
 
 1. `Qwen3-ASR-1.7B` 是其 30 种语言和 22 种中文方言支持集内的首选 ASR 基模。官方模型卡把它描述为开源 ASR 中的 SOTA，并提供语言识别、流式/离线推理、长音频和独立强制对齐器。
-2. `pyannote/speaker-diarization-community-1` 的 powerset segmentation、WeSpeaker embedding 和 VBx clustering 是离线 Dynamic-N 说话人主权威。其全局人数没有 Sortformer 的固定四输出限制，并原生接受 `num_speakers`、`min_speakers` 和 `max_speakers`。托管前沿档以 `pyannote Precision-2` 为当前 incumbent：pyannote 官方在无 collar、保留 overlap 的同表 12 个基准中报告其 `12/12` DER 低于 Community-1；但它不是离线 checkpoint。
+2. `pyannote/speaker-diarization-community-1` 的 powerset segmentation、WeSpeaker embedding 和 VBx clustering 是当前已落地的离线 Dynamic-N 基线与 incumbent，不再被视为私有旗舰的唯一权威。其全局人数没有官方 Sortformer 4spk 的固定四输出限制，并原生接受 `num_speakers`、`min_speakers` 和 `max_speakers`；但真实 N=5 已证明自动聚类会少一轨，而强制人数仍可能产生低置信身份映射。私有旗舰必须并行引入 NeMo cascaded/MSDD、许可兼容重训的 DiariZen 架构以及 MOSS/VibeVoice 联合审计，再用人数后验、轨道一致性和校准仲裁决定权威。托管前沿档以 `pyannote Precision-2` 为纯 diarization incumbent：pyannote 官方在无 collar、保留 overlap 的同表 12 个基准中报告其 `12/12` DER 低于 Community-1；但它不是离线 checkpoint。
 3. `MOSS-Transcribe-Diarize 0.9B` 是当前优先级最高的可自托管联合挑战者：公开 Apache-2.0 权重、128k 上下文、单次最长 90 分钟、50+ 语言、逐段自动语言、时间戳、说话人和事件/重叠标签，并有官方 Transformers、SGLang 和 vLLM 路径。其 2026-07-09 权重和 14 语言比赛结果很新，模型需 `trust_remote_code=True`，公开论文的主要多人集集中中文/英语且指标以 CER/cpCER 为主；因此必须先审计远程代码、幻觉、漏轨、人数、DER/JER、overlap 和时间边界，不能因参数小或作者榜单领先直接替代声学 RTTM 权威。
 4. `omniASR_LLM_Unlimited_7B_v2` 是服务端支持集外语言和长音频的旗舰兜底，覆盖 1600+ 语言。官方 checkpoint 为 7,801,041,536 参数、FP32 下载约 30 GiB、推理显存约 17 GiB，15 分钟 A100 样本 RTF 为 `0.208`；普通 CTC/LLM suite 仍只接受短于 40 秒的输入，unlimited 变体当前不提供微调 recipe。`CTC-300M/1B` 只能作为低成本召回或本机兼容候选，不能用小模型、普通 7B 或第三方转换结果代表 unlimited 7B 上限。
 5. `Whisper large-v3` 是成熟的独立第二意见。在 Apple Silicon 上优先验证 WhisperKit/Core ML 或 whisper.cpp/Metal，而不是把 CUDA 路径直接搬到 MPS。
@@ -27,7 +27,7 @@
 7. `VibeVoice-ASR-7B` 是服务器级联合挑战者：公开 MIT 权重、Transformers/vLLM 部署、60 分钟单次上下文、50+ 语言/代码切换，并直接生成 who/when/what。它的公开报告同时明确 serialized 输出在 overlap 会漏掉次要说话人，SFT 主要集中英语/中文；因此用于全局一致性、长上下文和语义挑战，不能抹掉 Community-1 的多轨 overlap 真值。
 8. `FireRedASR2S` 是中文和中英代码切换专用挑战者：8B+ LLM / 1B+ AED、20+ 中文方言/口音、100+ 语言 VAD/LID、singing/music 多标签门控和中英 punctuation 均有公开权重与部署代码。`FireRedASR2-LLM` 官方模型卡明确单次输入上限为 40 秒，因此只能在有界切分上评测；它可接管已验证的中文方言、歌声或人声门控分桶，但不能代表 1600+ 语言、任意长音频或任意多人 diarization。
 9. `DiariZen` 是高价值的 Dynamic-N 研究挑战者。独立 196.6 小时五语言比较报告其总体 DER `13.3%`，仅次于托管 PyannoteAI/Precision-2 的 `11.2%`，且 5+ 人分桶 DER `7.1%`；但当前最佳公开权重为 CC BY-NC 4.0，默认商业产品只能研究评测或复用 MIT 代码以许可兼容数据重训，不能打包其权重。
-10. Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。当前公开 checkpoint 输出维度固定为 4，且官方在 5 人以上数据上的 DER 明显退化，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
+10. NVIDIA 官方 Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。官方公开 checkpoint 输出维度固定为 4，且在 5 人以上数据上的 DER 明显退化。2026-03 发布的第三方 Apache-2.0 `Ultra Diar Streaming Sortformer 8spk` 由官方 4spk 基模经 2 张 H100 微调与结构修改扩到最多 8 人，可进入隔离研究挑战，但它仍是固定容量、非 NVIDIA 官方权重，且模型卡没有足够的独立跨域结果，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
 11. 本地 LLM 与声学权威完全分离。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。LLM 只能在已有声学 N-best 内做约束重排、术语、翻译、保守润色和证据化报告，不能创建说话人、语言或原音频不存在的文本。
 
 这些是模型晋级候选，不是发布声明。官方自报指标只用于缩小候选集，最终权威是本项目按数据源、录音、说话人隔离的 held-out 结果。
@@ -38,9 +38,10 @@
 |---|---|---|---|
 | 人声活动与内容门控 | 轻量 VAD + Community-1 segmentation + ASR no-speech 共识 | Silero VAD、独立音频事件分类器 | 单独 VAD 不能区分歌词、音乐中人声、笑声和可转写词汇 |
 | 托管前沿 diarization | Precision-2（仅经逐次授权的可上传媒体） | 后续托管模型按相同盲测登记 | 远端推理不满足默认离线和数据不出域约束；官方榜单不能替代本项目 held-out |
-| 私有任意总人数 diarization | Community-1/VBx；服务端并行评测 NeMo cascaded diarizer | CAM++/ERes2NetV2、SpeakerKit Core ML | 单段 embedding 聚类不能独立解决边界、重叠和人数；现有 Dynamic-N 实测会过分裂 |
-| Dynamic-N 研究上限 | Community-1 与 DiariZen 同音频比较 | 以许可兼容数据重训 DiariZen 架构 | DiariZen 最佳公开权重为 CC BY-NC 4.0，只能研究比较，不能进入默认商业模型包 |
-| 低延迟 1-4 人 diarization | Community-1 仍保留最终审计 | Streaming Sortformer 4spk | 固定 4 个输出通道，5 人以上不是适用域 |
+| 托管联合说话人转录 | Universal-3.5 Pro、Scribe v2、Melia 1 按分桶同音频挑战 | gpt-4o-transcribe-diarize、Soniox/Deepgram 等登记后参加 | U3.5 仅 18 种全精度代码切换语言；Scribe v2 最多 32 人；Melia 1 为 batch early access 且无 confidence/speaker identification；供应商自测不能互相直接比较 |
+| 私有任意总人数 diarization | Community-1/VBx 当前基线；Community-1 + NeMo cascaded/MSDD + DiariZen 重训候选的校准仲裁 | CAM++/ERes2NetV2、SpeakerKit Core ML | 单个聚类或固定输出模型不能独立解决边界、重叠和人数；N=5 已证明 Community-1 自动漏轨且 exact-N 不保证身份映射 |
+| Dynamic-N 研究上限 | Community-1、DiariZen 与 NeMo 同音频比较 | 以许可兼容数据重训 DiariZen 架构 | DiariZen 最佳公开权重为 CC BY-NC 4.0，只能研究比较，不能进入默认商业模型包 |
+| 低延迟有界人数 diarization | Community-1 仍保留最终审计 | NVIDIA Streaming Sortformer 4spk；第三方 Ultra Sortformer 8spk 仅研究 | 固定 4/8 个输出通道都不是任意人数；第三方 8spk 尚无充分独立跨域结果 |
 | 30 语言/22 中文方言 ASR | Qwen3-ASR-1.7B | Whisper large-v3、Parakeet 欧洲语种、Canary-Qwen 英语 | 路由挑战者的覆盖或硬件路径更窄 |
 | 1600+ 长尾/长音频 ASR | `omniASR_LLM_Unlimited_7B_v2` 服务端 | 普通 LLM-7B/7B-ZS、CTC 300M/1B | Unlimited 7B 下载约 30 GiB、推理约 17 GiB 且暂无微调 recipe；普通 suite 输入 `<40s`；覆盖不等于每种语言都达到发布质量 |
 | 长上下文联合转录/说话人/时间 | MOSS-Transcribe-Diarize 0.9B 优先挑战；VibeVoice-ASR-7B 独立挑战 | MOSS Pro 仅在供应商数据策略审核并逐次授权后参加 | 生成式单模型必须单列幻觉、漏轨、人数、overlap、时间边界和远程代码供应链风险，不能覆盖声学多轨证据 |
@@ -57,9 +58,9 @@ flowchart TD
   PROBE --> GATE["VAD + 音频事件 + lexical-speech 门控"]
   GATE -->|"无可转写人声"| NOSPEECH["completed_no_speech + 证据"]
   GATE -->|"有人声"| SEG["Community-1 segmentation / overlap / turn proposals"]
-  SEG --> DIAR["Community-1 VBx Dynamic-N 主时间线"]
-  SEG --> FAST["可选 Sortformer N<=4 低延迟候选"]
-  DIAR --> FUSION["人数后验、匿名轨道、人工上下界与冲突融合"]
+  SEG --> DIAR["Community-1 / NeMo / DiariZen重训候选"]
+  SEG --> FAST["可选 Sortformer 4spk / 8spk隔离挑战"]
+  DIAR --> FUSION["人数后验、轨道一致性、人工约束与校准仲裁"]
   FAST --> FUSION
   FUSION --> LID["逐轨滑窗 LID + 代码切换边界解码"]
   LID --> ROUTER["按语言、场景、置信度和硬件路由 ASR"]
@@ -83,9 +84,10 @@ flowchart TD
 ### 1. 人数与身份
 
 - `auto` 输出人数后验分布、最优人数、候选区间和校准置信度，不只输出一个整数。
-- `manual` 把用户人数作为硬约束，`hybrid` 把上下界和 prior 作为显式约束；任何模式都不能静默丢人或合并人。
+- `manual` 把用户人数作为硬约束，`hybrid` 把上下界和 prior 作为显式约束；约束必须进入每个支持它的模型原生调用、隔离进程协议、缓存身份和结果证据，任何模式都不能静默丢人或合并人。
 - Community-1 常规时间线保存完整模型轨道和重叠并驱动 DER/JER、overlap 与边界评分；model-native exclusive 时间线只用于把粗粒度 ASR 段归属到唯一轨道，不能抹掉真实 overlap、改写或复制文本。两条时间线必须独立持久化并以 SHA-256 绑定，不能从有文本的 ASR segments 反向重建整段 diarization。
-- 现有 CAM++/ERes2NetV2/Dynamic-N 降级为独立挑战者、跨段身份稳定证据和不变量检查器。只有 held-out 证明更好后才允许覆盖 Community-1。
+- Community-1 是当前生产基线，不是不可挑战的唯一权威。NeMo cascaded/MSDD、许可兼容重训的 DiariZen 和联合模型输出必须保留独立轨道与模型 revision；仲裁只有在同一冻结音频上通过人数、DER/JER、cpWER/tcpWER、overlap 和映射置信门禁后才能覆盖基线。
+- 现有 CAM++/ERes2NetV2/Dynamic-N 降级为独立挑战者、跨段身份稳定证据和不变量检查器。它们或 LLM 都不得仅凭已知人数强行接受低置信 local-to-canonical 映射。
 - 跨文件实名识别必须是另一个带用户授权的 voiceprint enrollment 功能。普通 diarization 只产生匿名 `speaker-N`，不能从声音猜姓名。
 
 ### 2. 多语言与代码切换
@@ -124,7 +126,9 @@ flowchart TD
 
 - Precision-2 只接收公开样本、合成样本或用户对该次作业明确批准上传的媒体；授权、区域、供应商保留策略、请求 ID、模型版本、成本和删除状态进入审计链。
 - 用同一冻结音频比较 Precision-2 与 Community-1/NeMo 的 DER/JER、人数、overlap 和 tcpWER。只有目标分桶 held-out 胜出才允许成为该分桶的 opt-in 路由，不能用供应商平均指标代替。
-- 托管 ASR 也采用登记制 challenger pool：必须锁定模型版本、语言/场景适用域、数据策略和预算，再与自托管 Qwen/Whisper/Omnilingual 同音频比较。不存在未经本项目验证的“全球所有语言统一最佳 API”。
+- 联合说话人转录优先加入 AssemblyAI `Universal-3.5 Pro`。其 2026-07-07 官方发布页报告 18 种原生代码切换语言，并在 AMI、CALLHOME、DiPCo、NOTSOFAR 六个分桶的供应商同表中得到平均 cpWER `30.17`，低于该表中的 Scribe v2 `35.26`、Nova-3 `37.92`、Voxtral Mini Transcribe V2 `37.52` 与 Soniox v5 Async `44.58`。这是供应商自选数据和实现的结果，不等于独立排名；必须锁定 API 模型 ID、实际返回版本和请求证据后重跑本项目 held-out。
+- ElevenLabs `Scribe v2` 作为 90+ 语言、最多 32 人、词级时间戳的广覆盖挑战者；Speechmatics `Melia 1` 作为逐词语言、同一说话人中途切换的 batch 挑战者。Scribe 的 32 人仍是固定上限；Melia 1 是 early access、准确率仅声明与 Standard 相当，当前不返回 confidence、speaker identification 或 speech intelligence。这些边界必须进入路由，不得被“多语”标签掩盖。
+- 托管 ASR 采用登记制 challenger pool：必须锁定模型版本、语言/场景适用域、数据策略和预算，再与自托管 Qwen/Whisper/Omnilingual 同音频比较。不存在未经本项目验证的“全球所有语言统一最佳 API”。
 
 ### 当前 M4 16 GB 质量档
 
@@ -138,11 +142,13 @@ flowchart TD
 - 同配置对经过 RTTM 事件边界验证、确实包含两人的 90 秒 VoxConverse N=2 真实重叠窗口输出 `2/2` 人和 27 段，DER/JER 为 `0.198998179 / 0.201952120`、speaker confusion `0.010382514`；但串行生成没有恢复并发轨道，overlap F1 为 `0`，末时间戳 `90.03 秒` 超出媒体 `30 ms`，所以不能覆盖 Community-1 regular timeline。推理 `315.5265 秒`、冷启动端到端 `404.30 秒`，对应 RTF `3.5059 / 4.4922`，最大 RSS 约 `3.93 GiB`、macOS peak memory footprint 约 `17.09 GiB`、swap `0`；raw transcript/segments SHA-256 分别为 `a7311b19fdc73c689d134eeae53a7c529d2b573e162cc8a91d12130b564c39e6` / `06919bc36260d6a8b4b73f0750452db0a8650736a5791e80769831ab544138d3`。这支持继续在旗舰 GPU 服务器评测官方基模上限，同时否决其在当前 M4 上直接成为长音频默认路由。
 - Community-1 regular/exclusive 双时间线已作为第一类生产输出落地。真实 90 秒 VoxConverse `N=2` 冷运行自动人数 `2/2`，regular/exclusive 分别为 `15/21` 段并通过独立哈希、映射双射、边界、完整 speaker coverage 和 exclusive 非重叠校验；DER/JER `0.036183971 / 0.041564942`、speaker confusion `0.006092896`、overlap F1 `0.930924004` 与此前 canonical 权威完全一致。边界预测由 ASR segments 改为 `speakerTimeline.regular` 后，预测/真值均为 `27/27`，mean/p50/p95/max 误差从先前 `4777/2060/16983/19240 ms` 改善到 `505/90/3796.1/5170 ms`。v6/v7 的 95 段 `rawText/normalizedText/displayText` 逐项一致，raw text 与三文本字段数组 SHA-256 分别为 `4c6f9a4e160123b62aca0d1d7792c02814ebbe0591a9a10b50c753ce799c3ee9` / `ab1b803b1aaa024700275f46437db5e14c54dab595eeffa0269c9c511cfd12a8`，证明本轮 ownership/timeline 修复没有改写 ASR 文本。但终态仍为 `review.required`，open review `194`，冷流水线 RTF `3.257265048`、峰值 RAM `1126.9375 MB`；它只通过 N=2 的时间线回归，不代表整体门禁、其他人数或交付闭环通过。
 - 同一架构的真实 90 秒 VoxConverse `N=3` 回归自动人数 `3/3`，regular/exclusive 为 `22/19` turns 且哈希与 exclusive 非重叠校验通过；DER/JER `0.088232932 / 0.107817798`、speaker confusion `0.015240964`、overlap F1 `0.848613448`，边界预测/真值 `41/41`，mean/p50/p95/max 为 `518.682927/164/2953/5243 ms`。终态仍为 `review.required`、open review `176`；本次 ASR 来自同模型缓存，流水线 RTF `2.871221103`，其中 Pyannote overlap 阶段 `253.334 秒`、峰值 RAM `1355.28125 MB`，不能写成完整冷启动或 ASR 质量通过。
+- 真实 90 秒 VoxConverse `N=5` 暴露了当前基线的上限。RTTM 选窗事先验证五人都实际发言，其中最短轨也有 `7.56 秒`，不是任取前 60 秒。自动 Community-1 只产生 4 个 local tracks；直接用原生 regular timeline 对 RTTM 评分为 DER/JER `0.203690760 / 0.395497618`、confusion `0.083873167`、overlap F1 `0.823224206`。早期 `oracle-v5` 仍复用了这条四轨缓存，`speakerCountConstraints=null`，因此是无效实验，禁止引用其人数结论。修复约束、隔离协议和缓存身份后，有效 `oracle-v6` 将 `num_speakers=5` 传入模型并得到 5 轨、regular/exclusive `36/32` turns；原生时间线 JER 改善到 `0.311625267`，但 DER 稍退到 `0.210023866`、confusion `0.090206273`，映射 margin 只有 `0.012279307 < 0.05`，所以系统按 `PYANNOTE_MAPPING_MARGIN_BELOW_THRESHOLD` 正确拒绝第一类 `speakerTimeline`。最终生产段评分同样没有晋级：自动/强制五人的 DER/JER 分别为 `0.425178998 / 0.646047627` 与 `0.427889533 / 0.503024358`。这证明 exact-N 可以恢复轨道并改善一项指标，但不能替代身份声学质量或多系统仲裁。
 - 不在本机运行 `omniASR_LLM_Unlimited_7B_v2` FP32；本机只允许先测 CTC 300M/1B 或量化实现，且结果不能代表旗舰 unlimited 7B。
 
 ### 旗舰服务器质量档
 
 - NVIDIA GPU worker 使用 Qwen 官方 vLLM/FlashAttention 路径；`omniASR_LLM_Unlimited_7B_v2` 和 NeMo 候选在独立进程/GPU 池中运行。
+- 私有 diarization 旗舰不以 Community-1 单模型封顶：至少保留 Community-1/VBx、NeMo cascaded/MSDD 和许可兼容 DiariZen 重训三路独立候选；MOSS/VibeVoice 只提供联合 who/when/what 审计。每路都输出原生轨道、人数后验、映射置信和资源证据，校准仲裁可以选择、保留冲突或 abstain，不能平均掉漏轨与 overlap 硬失败。
 - 每类模型一个有界 stage queue 和常驻 worker，跨 job 复用权重；相同音频窗口按 `audio hash + model revision + parameters + normalization version` 缓存。
 - 多 GPU 通过流水线并行不同作业，不对同一片段默认全模型齐跑。第二意见只由不确定性或已登记分桶触发。
 
@@ -188,14 +194,15 @@ flowchart TD
 ## 落地顺序
 
 1. 保持 60/60 独立终态，并用有界 worker 会话、hard deadline 和统一内存峰值持续验证失败隔离。
-2. 在已完成 Community-1 整段 regular/exclusive 第一类输出和真实 N=2 回归的基础上，重跑 N=1/3/5/8、派生 N=13 和新 held-out；现有 Dynamic-N 只做冲突融合和不变量审计。研究环境并行比较 DiariZen，商业默认不得使用其 NC 权重；对公开可上传盲测另跑 Precision-2 同音频挑战。
+2. 在已完成 Community-1 整段 regular/exclusive 第一类输出和真实 N=2/3/5 回归的基础上，继续重跑 N=1/8、派生 N=13 和新 held-out；N=5 的自动漏轨与低映射 margin 保持硬失败，不能被 exact-N 的 JER 单项改善覆盖。研究环境并行比较 DiariZen 与 NeMo，商业默认不得使用 DiariZen 的 NC 权重；对公开可上传盲测另跑 Precision-2 同音频挑战。
 3. 在已完成 MOSS-Transcribe-Diarize 0.9B 快照/remote-code 审计和本机 N=1/N=2 烟测的基础上，优先落地带 heartbeat、硬截止时间和边界裁剪检查的隔离 worker；先补齐真实 N=3/5、代码切换和 overlap 分桶，再在旗舰 GPU 服务器与 Community-1 + Qwen 级联及 VibeVoice-ASR-7B 做同音频联合转录挑战。必须同时比较 cpWER/tcpWER、DER/JER、漏轨、overlap、时间边界、幻觉、语言和资源，不因参数规模小而降低其优先级，也不因本机 FP16 MPS 边缘结果限制官方基模上限。
 4. 固化 Qwen3-ASR-1.7B 支持集内基线，增加 Whisper large-v3 第二意见；按相同音频、相同切分比较 WER/CER、LID、时间和 RTF。
 5. 在服务器烟测 `omniASR_LLM_Unlimited_7B_v2`，并用支持集外语言和长音频 held-out 验证；普通 LLM-7B/7B-ZS 单列短音频对照，不用 300M、普通 7B 或第三方转换结果替代 unlimited 7B。
 6. 评测 FireRedASR2S 的中文方言/歌声/VAD-LID 分桶、Parakeet 欧洲语种、Canary-Qwen 英语和 Sortformer 1-4 人；只有分桶胜出才启用路由。
 7. 建立真实代码切换和重叠多说话人门禁，再决定 LID 序列模型、分离模型或多说话人 ASR 的微调方向。
 8. 在 M4 上完整评测 `qwen3.5:9b`，服务器评测 35B-A3B；先通过 suggestion-only，再分别评估翻译、润色、摘要和 N-best 重排。
-9. 同一批 held-out 输出真实 SRT/WebVTT/ASS、soft-mux、burn-in、Java PDF 和证据报告，任何上游 blocker 都必须传递到发布状态。
+9. 对逐次授权上传的同一冻结音频运行 Universal-3.5 Pro、Scribe v2、Melia 1 与其他登记 API，单列语言覆盖、说话人数上限、cpWER/tcpWER、DER/JER、代码切换、时间轴、成本、区域与删除证据；供应商自报胜负只用于候选排序。
+10. 同一批 held-out 输出真实 SRT/WebVTT/ASS、soft-mux、burn-in、Java PDF 和证据报告，任何上游 blocker 都必须传递到发布状态。
 
 ## 官方来源
 
@@ -208,10 +215,14 @@ flowchart TD
 - [Argmax open-source Swift speech stack](https://github.com/argmaxinc/argmax-oss-swift), MIT；WhisperKit 与 SpeakerKit 提供 Apple Core ML 路径，模型许可证仍需逐项随包审计。
 - [Community-1 model card](https://huggingface.co/pyannote/speaker-diarization-community-1), revision `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee`, CC BY 4.0；本机隔离镜像已固定并验证。
 - [pyannote Community-1 / Precision-2 official benchmark](https://huggingface.co/pyannote/speaker-diarization-community-1#benchmark)，采用无 collar、保留 overlap 的统一 DER 表；Precision-2 为托管远端模型，不得写成离线依赖。
+- [AssemblyAI Universal-3.5 Pro official release](https://www.assemblyai.com/blog/universal-3-5-pro-async)，2026-07-07；公开 18 种原生代码切换语言及 AMI/CALLHOME/DiPCo/NOTSOFAR 的供应商 cpWER 同表，必须标注为 vendor-reported 并独立复测。
+- [ElevenLabs Scribe v2 official model documentation](https://elevenlabs.io/docs/overview/models#scribe-v2)，公开 90+ 语言、词级时间戳和最多 32 人 diarization；固定人数上限不能外推为任意人数。
+- [Speechmatics model documentation](https://docs.speechmatics.com/speech-to-text/models#melia-1)，Melia 1 为 batch early access，逐词语言、支持同一说话人中途切换；当前无 confidence、speaker identification 和 speech intelligence。
 - [MOSS-Transcribe-Diarize 0.9B model card](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize), revision `e5118b411bf5a77d7a90c4941066bec93c967312`, Apache-2.0；[official repository](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize) revision `0e3d1403fd8f1f1c674e883ece96b9f630794ebe`，提供 Transformers、SGLang/vLLM 和字幕工作流；[paper](https://arxiv.org/abs/2601.01554) 说明 128k/90 分钟、2–12 人模拟训练、逐段多语、事件/overlap 和当前评测边界。
 - [Benchmarking Diarization Models](https://arxiv.org/abs/2509.26177) 在 196.6 小时、五语言、保留 overlap 的统一比较中报告 PyannoteAI `11.2%` 与 DiariZen `13.3%` 总体 DER；[DiariZen code](https://github.com/BUTSpeechFIT/DiariZen) 为 MIT，但 [最佳公开权重](https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md-v2) 为 CC BY-NC 4.0，不能进入默认商业包。
 - [NeMo diarization overview](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/asr/speaker_diarization/intro.html), 明确说明 cascaded 系统对人数和会话长度限制更少。
 - [Streaming Sortformer 4spk v2.1](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1), revision `fafaab5faa1617a0ca52d38dd3dc4bd636800d3d`；官方输出 `S=4`，5 人以上 DER 明显退化。
+- [Ultra Diar Streaming Sortformer 8spk v1](https://huggingface.co/mago-ai/ultra_diar_streaming_sortformer_8spk_v1)，第三方 Apache-2.0 权重，由 NVIDIA 4spk 基模经 2×H100 微调与结构修改扩到最多 8 人；不是 NVIDIA 官方模型，也没有证明任意人数或充分跨域泛化。
 - [SpeechBrain VoxLingua107 LID](https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa), revision `0253049ae131d6a4be1c4f0d8b0ff483a0f8c8e9`, Apache-2.0。
 - [MMS-LID-4017](https://huggingface.co/facebook/mms-lid-4017), CC BY-NC 4.0；仅作研究比较，不进入默认商业包。
 - [VibeVoice-ASR-7B model card](https://huggingface.co/microsoft/VibeVoice-ASR) 与 [technical report](https://arxiv.org/abs/2601.18184), MIT；公开报告明确 60 分钟/50+ 语言/代码切换和 overlap serialized-output 限制。

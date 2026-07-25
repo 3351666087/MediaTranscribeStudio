@@ -2852,7 +2852,7 @@ class LocalPyannoteAuditAdapter:
     """
 
     adapter_id = "pyannote-community-1"
-    version = "2.3.0"
+    version = "2.4.0"
     telemetry_enabled = False
 
     def __init__(
@@ -3031,8 +3031,12 @@ class LocalPyannoteAuditAdapter:
         failure_code: str,
         failure_message: str,
         details: Mapping[str, Any],
+        speaker_count_constraints: Mapping[str, int] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
         context.raise_if_cancelled()
+        constraints, _ = self._speaker_count_constraints(
+            speaker_count_constraints
+        )
         if self._isolated_inference_runner is not None:
             raw_result = self._isolated_inference_runner(
                 audio_path=audio_path,
@@ -3041,6 +3045,7 @@ class LocalPyannoteAuditAdapter:
                 start_ms=start_ms,
                 end_ms=end_ms,
                 context=context,
+                speaker_count_constraints=constraints or None,
             )
             regular_raw = (
                 raw_result.get("speakerTurns")
@@ -3084,12 +3089,13 @@ class LocalPyannoteAuditAdapter:
                 "isolated pyannote runtime entrypoint is missing",
             )
         request = {
-            "schemaVersion": "1.0.0",
+            "schemaVersion": "1.1.0",
             "modelPath": str(self.model_path),
             "audioPath": str(audio_path.resolve(strict=True)),
             "device": self.device,
             "startMs": start_ms,
             "endMs": end_ms,
+            "speakerCountConstraints": constraints or None,
         }
         environment = dict(os.environ)
         environment.update(
@@ -3189,6 +3195,7 @@ class LocalPyannoteAuditAdapter:
         failure_code: str,
         failure_message: str,
         details: Mapping[str, Any],
+        speaker_count_constraints: Mapping[str, int] | None = None,
     ) -> Any:
         context.raise_if_cancelled()
         try:
@@ -3199,11 +3206,15 @@ class LocalPyannoteAuditAdapter:
                 "torch is required for pyannote inference",
             ) from exc
         waveform = torch.from_numpy(samples).unsqueeze(0)
+        _, inference_kwargs = self._speaker_count_constraints(
+            speaker_count_constraints
+        )
         try:
             with self._inference_lock:
                 pipeline = self._pipeline()
                 result = pipeline(
-                    {"waveform": waveform, "sample_rate": sample_rate}
+                    {"waveform": waveform, "sample_rate": sample_rate},
+                    **inference_kwargs,
                 )
         except WorkerError:
             raise
@@ -3218,6 +3229,60 @@ class LocalPyannoteAuditAdapter:
             ) from exc
         context.raise_if_cancelled()
         return result
+
+    @staticmethod
+    def _speaker_count_constraints(
+        value: Mapping[str, int] | None,
+    ) -> tuple[dict[str, int], dict[str, int]]:
+        if value is None:
+            return {}, {}
+        if not isinstance(value, Mapping):
+            raise WorkerError(
+                "PYANNOTE_SPEAKER_COUNT_CONSTRAINT_INVALID",
+                "pyannote speaker-count constraints must be an object",
+            )
+        constraints = dict(value)
+        keys = set(constraints)
+        if keys == {"numSpeakers"}:
+            count = constraints["numSpeakers"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise WorkerError(
+                    "PYANNOTE_SPEAKER_COUNT_CONSTRAINT_INVALID",
+                    "pyannote numSpeakers must be a positive integer",
+                )
+            return (
+                {"numSpeakers": count},
+                {"num_speakers": count},
+            )
+        if keys == {"minSpeakers", "maxSpeakers"}:
+            minimum = constraints["minSpeakers"]
+            maximum = constraints["maxSpeakers"]
+            if (
+                isinstance(minimum, bool)
+                or not isinstance(minimum, int)
+                or isinstance(maximum, bool)
+                or not isinstance(maximum, int)
+                or minimum < 1
+                or maximum < minimum
+            ):
+                raise WorkerError(
+                    "PYANNOTE_SPEAKER_COUNT_CONSTRAINT_INVALID",
+                    "pyannote speaker-count bounds are invalid",
+                )
+            return (
+                {
+                    "minSpeakers": minimum,
+                    "maxSpeakers": maximum,
+                },
+                {
+                    "min_speakers": minimum,
+                    "max_speakers": maximum,
+                },
+            )
+        raise WorkerError(
+            "PYANNOTE_SPEAKER_COUNT_CONSTRAINT_INVALID",
+            "pyannote speaker-count constraints use unsupported fields",
+        )
 
     @staticmethod
     def _annotation_from_result(
@@ -3386,6 +3451,8 @@ class LocalPyannoteAuditAdapter:
         prepared: PreparedAudio,
         windows: Sequence[SpeechWindow],
         context: AdapterContext,
+        *,
+        speaker_count_constraints: Mapping[str, int] | None = None,
     ) -> list[OverlapDecision]:
         """Detect exact overlap intervals once for the normalized timeline."""
 
@@ -3397,6 +3464,9 @@ class LocalPyannoteAuditAdapter:
                 "pyannote overlap detection requires persisted normalized audio",
             )
         pcm_buffer_id = _pcm_buffer_id(prepared)
+        constraints, _ = self._speaker_count_constraints(
+            speaker_count_constraints
+        )
         if self._uses_isolated_runtime:
             turns, exclusive_turns = self._run_isolated_inference(
                 Path(prepared.audio_path),
@@ -3406,6 +3476,7 @@ class LocalPyannoteAuditAdapter:
                 failure_code="PYANNOTE_OVERLAP_INFERENCE_FAILED",
                 failure_message="pyannote failed while detecting overlap",
                 details={"windowCount": len(windows)},
+                speaker_count_constraints=constraints or None,
             )
         else:
             samples, sample_rate, pcm_buffer_id = _shared_pcm_for_prepared(
@@ -3418,6 +3489,7 @@ class LocalPyannoteAuditAdapter:
                 failure_code="PYANNOTE_OVERLAP_INFERENCE_FAILED",
                 failure_message="pyannote failed while detecting overlap",
                 details={"windowCount": len(windows)},
+                speaker_count_constraints=constraints or None,
             )
             timeline = type(
                 "_PyannoteTimeline",
@@ -3456,6 +3528,7 @@ class LocalPyannoteAuditAdapter:
             "speakerTurns": [dict(turn) for turn in turns],
             "speakerTurnsSha256": hashlib.sha256(serialized_turns).hexdigest(),
             "exclusiveNative": exclusive_turns is not None,
+            "speakerCountConstraints": constraints or None,
         }
         if exclusive_turns is not None:
             serialized_exclusive_turns = json.dumps(

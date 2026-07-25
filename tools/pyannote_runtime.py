@@ -19,7 +19,10 @@ def _request() -> dict[str, Any]:
     if not payload or len(payload) > MAX_REQUEST_BYTES:
         raise ValueError("request size is invalid")
     value = json.loads(payload.decode("utf-8"))
-    if not isinstance(value, dict) or value.get("schemaVersion") != "1.0.0":
+    if (
+        not isinstance(value, dict)
+        or value.get("schemaVersion") not in {"1.0.0", "1.1.0"}
+    ):
         raise ValueError("request contract is invalid")
     return value
 
@@ -39,6 +42,38 @@ def _local_path(value: Any, *, field: str, directory: bool) -> Path:
     if not directory and not path.is_file():
         raise ValueError(f"{field} is not a file")
     return path
+
+
+def _speaker_count_kwargs(value: Any) -> dict[str, int]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("speakerCountConstraints is invalid")
+    if set(value) == {"numSpeakers"}:
+        count = _bounded_integer(
+            value.get("numSpeakers"),
+            field="speakerCountConstraints.numSpeakers",
+            minimum=1,
+        )
+        return {"num_speakers": count}
+    if set(value) == {"minSpeakers", "maxSpeakers"}:
+        minimum = _bounded_integer(
+            value.get("minSpeakers"),
+            field="speakerCountConstraints.minSpeakers",
+            minimum=1,
+        )
+        maximum = _bounded_integer(
+            value.get("maxSpeakers"),
+            field="speakerCountConstraints.maxSpeakers",
+            minimum=1,
+        )
+        if maximum < minimum:
+            raise ValueError("speakerCountConstraints bounds are invalid")
+        return {
+            "min_speakers": minimum,
+            "max_speakers": maximum,
+        }
+    raise ValueError("speakerCountConstraints uses unsupported fields")
 
 
 def _annotation(result: Any, *, field: str) -> Any:
@@ -139,6 +174,9 @@ def run() -> dict[str, Any]:
     end_ms = _bounded_integer(request.get("endMs"), field="endMs", minimum=1)
     if end_ms <= start_ms:
         raise ValueError("inference interval is invalid")
+    speaker_count_kwargs = _speaker_count_kwargs(
+        request.get("speakerCountConstraints")
+    )
 
     with redirect_stdout(sys.stderr):
         import soundfile
@@ -165,7 +203,8 @@ def run() -> dict[str, Any]:
             {
                 "waveform": torch.from_numpy(clip).unsqueeze(0),
                 "sample_rate": sample_rate,
-            }
+            },
+            **speaker_count_kwargs,
         )
     return {
         "schemaVersion": "1.1.0",

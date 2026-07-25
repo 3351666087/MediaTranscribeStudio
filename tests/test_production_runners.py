@@ -152,8 +152,10 @@ class FakePyannotePipeline:
         self.result = result
         self.calls = []
 
-    def __call__(self, payload):
+    def __call__(self, payload, **kwargs):
         self.calls.append(payload)
+        self.keyword_calls = getattr(self, "keyword_calls", [])
+        self.keyword_calls.append(kwargs)
         return self.result
 
 
@@ -2511,6 +2513,7 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["start_ms"], 0)
         self.assertEqual(calls[0]["end_ms"], 4000)
+        self.assertIsNone(calls[0]["speaker_count_constraints"])
         self.assertEqual(
             decisions[0].evidence["fullTimelineInference"],
             decisions[1].evidence["fullTimelineInference"],
@@ -2533,6 +2536,80 @@ class ProductionRunnerTests(unittest.TestCase):
                     }
                 ],
             ],
+        )
+
+    def test_pyannote_receives_exact_manual_speaker_count(self) -> None:
+        annotation = FakeAnnotation(
+            [
+                (
+                    SimpleNamespace(start=0.0, end=1.0),
+                    "track-1",
+                    "LOCAL_A",
+                )
+            ]
+        )
+        pipeline = FakePyannotePipeline(
+            SimpleNamespace(speaker_diarization=annotation)
+        )
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            pipeline_factory=lambda **kwargs: pipeline,
+        )
+
+        decisions = adapter.detect_batch(
+            self.prepared(),
+            (SpeechWindow("window-1", 0, 1000),),
+            self.context,
+            speaker_count_constraints={"numSpeakers": 5},
+        )
+
+        self.assertEqual(pipeline.keyword_calls, [{"num_speakers": 5}])
+        self.assertEqual(
+            decisions[0].evidence["fullTimelineInference"][
+                "speakerCountConstraints"
+            ],
+            {"numSpeakers": 5},
+        )
+
+    def test_pyannote_receives_hybrid_speaker_count_bounds(self) -> None:
+        annotation = FakeAnnotation(
+            [
+                (
+                    SimpleNamespace(start=0.0, end=1.0),
+                    "track-1",
+                    "LOCAL_A",
+                )
+            ]
+        )
+        pipeline = FakePyannotePipeline(
+            SimpleNamespace(speaker_diarization=annotation)
+        )
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            pipeline_factory=lambda **kwargs: pipeline,
+        )
+
+        decisions = adapter.detect_batch(
+            self.prepared(),
+            (SpeechWindow("window-1", 0, 1000),),
+            self.context,
+            speaker_count_constraints={
+                "minSpeakers": 3,
+                "maxSpeakers": 8,
+            },
+        )
+
+        self.assertEqual(
+            pipeline.keyword_calls,
+            [{"min_speakers": 3, "max_speakers": 8}],
+        )
+        self.assertEqual(
+            decisions[0].evidence["fullTimelineInference"][
+                "speakerCountConstraints"
+            ],
+            {"minSpeakers": 3, "maxSpeakers": 8},
         )
 
     def test_pyannote_review_reuses_isolated_overlap_turns(self) -> None:

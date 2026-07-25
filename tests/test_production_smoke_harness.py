@@ -16,6 +16,7 @@ from tools.run_production_smoke import (
     ProductionBatchSmokeHarness,
     ProductionSmokeHarness,
     SmokePaths,
+    absolute_python_executable,
     build_parser,
     build_start_payload,
     calculate_job_hard_timeout_seconds,
@@ -214,6 +215,18 @@ emit(
     }
 )
 """
+
+
+def test_absolute_python_executable_preserves_venv_symlink(
+    tmp_path: Path,
+) -> None:
+    base_python = tmp_path / "base-python"
+    base_python.write_text("", encoding="utf-8")
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(base_python)
+
+    assert absolute_python_executable(venv_python) == str(venv_python)
 
 BATCH_FAKE_WORKER = r"""
 from __future__ import annotations

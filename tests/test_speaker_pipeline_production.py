@@ -252,10 +252,19 @@ class FakeOverlapAdapter:
     def __init__(self, overlapping_ids: set[str] | None = None) -> None:
         self.overlapping_ids = overlapping_ids or set()
         self.calls: list[tuple[str, ...]] = []
+        self.constraint_calls: list[Mapping[str, int] | None] = []
 
-    def detect_batch(self, prepared, windows, context):
+    def detect_batch(
+        self,
+        prepared,
+        windows,
+        context,
+        *,
+        speaker_count_constraints=None,
+    ):
         context.raise_if_cancelled()
         self.calls.append(tuple(window.window_id for window in windows))
+        self.constraint_calls.append(speaker_count_constraints)
         return [
             OverlapDecision(
                 window_id=window.window_id,
@@ -281,9 +290,17 @@ class FakePyannoteOverlapAdapter(FakeOverlapAdapter):
         self.inconsistent_digest = inconsistent_digest
         self.observed_speaker_count = observed_speaker_count
 
-    def detect_batch(self, prepared, windows, context):
+    def detect_batch(
+        self,
+        prepared,
+        windows,
+        context,
+        *,
+        speaker_count_constraints=None,
+    ):
         context.raise_if_cancelled()
         self.calls.append(tuple(window.window_id for window in windows))
+        self.constraint_calls.append(speaker_count_constraints)
         output = []
         for index, window in enumerate(windows):
             local_speaker = (
@@ -1864,6 +1881,10 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertEqual(asr.calls, [("window-1",)])
         self.assertEqual(cam.calls, [expected_windows])
         self.assertEqual(overlap.calls, [expected_windows])
+        self.assertEqual(
+            overlap.constraint_calls,
+            [{"numSpeakers": 5}],
+        )
         self.assertTrue(
             result.pipeline_metrics["policy"]["speakerCountPartitionApplied"]
         )
@@ -2597,7 +2618,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         for count in (1, 2, 5, 8, 13):
             for mode in ("auto", "manual", "hybrid"):
                 with self.subTest(count=count, mode=mode):
-                    pipeline, _, _, cam, _ = self.pipeline(count)
+                    pipeline, _, _, cam, overlap = self.pipeline(count)
                     result = pipeline.transcribe(
                         self.request(
                             count,
@@ -2618,6 +2639,22 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                         },
                     )
                     self.assertEqual(sum(len(batch) for batch in cam.calls), count)
+                    expected_constraints = (
+                        None
+                        if mode == "auto"
+                        else (
+                            {"numSpeakers": count}
+                            if mode == "manual"
+                            else {
+                                "minSpeakers": count,
+                                "maxSpeakers": count,
+                            }
+                        )
+                    )
+                    self.assertEqual(
+                        overlap.constraint_calls,
+                        [expected_constraints],
+                    )
                     self.assertEqual(
                         result.pipeline_metrics["policy"]["localLlmMode"],
                         "disabled",

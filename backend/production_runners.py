@@ -2852,7 +2852,7 @@ class LocalPyannoteAuditAdapter:
     """
 
     adapter_id = "pyannote-community-1"
-    version = "2.2.0"
+    version = "2.3.0"
     telemetry_enabled = False
 
     def __init__(
@@ -3031,10 +3031,10 @@ class LocalPyannoteAuditAdapter:
         failure_code: str,
         failure_message: str,
         details: Mapping[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
         context.raise_if_cancelled()
         if self._isolated_inference_runner is not None:
-            raw_turns = self._isolated_inference_runner(
+            raw_result = self._isolated_inference_runner(
                 audio_path=audio_path,
                 model_path=self.model_path,
                 device=self.device,
@@ -3042,10 +3042,31 @@ class LocalPyannoteAuditAdapter:
                 end_ms=end_ms,
                 context=context,
             )
-            return self._normalize_isolated_turns(
-                raw_turns,
-                start_ms=start_ms,
-                end_ms=end_ms,
+            regular_raw = (
+                raw_result.get("speakerTurns")
+                if isinstance(raw_result, Mapping)
+                else raw_result
+            )
+            exclusive_raw = (
+                raw_result.get("exclusiveSpeakerTurns")
+                if isinstance(raw_result, Mapping)
+                else None
+            )
+            return (
+                self._normalize_isolated_turns(
+                    regular_raw,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                ),
+                (
+                    self._normalize_isolated_turns(
+                        exclusive_raw,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                    )
+                    if exclusive_raw is not None
+                    else None
+                ),
             )
         if self.python_executable is None:
             raise WorkerError(
@@ -3121,7 +3142,7 @@ class LocalPyannoteAuditAdapter:
             response = json.loads(stdout.decode("utf-8"))
             if (
                 not isinstance(response, Mapping)
-                or response.get("schemaVersion") != "1.0.0"
+                or response.get("schemaVersion") not in {"1.0.0", "1.1.0"}
                 or response.get("status") != "ok"
             ):
                 raise ValueError("isolated pyannote response is malformed")
@@ -3129,6 +3150,15 @@ class LocalPyannoteAuditAdapter:
                 response.get("speakerTurns"),
                 start_ms=start_ms,
                 end_ms=end_ms,
+            )
+            exclusive_turns = (
+                self._normalize_isolated_turns(
+                    response.get("exclusiveSpeakerTurns"),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                )
+                if response.get("schemaVersion") == "1.1.0"
+                else None
             )
         except WorkerError:
             if process is not None and process.poll() is None:
@@ -3148,7 +3178,7 @@ class LocalPyannoteAuditAdapter:
                 },
             ) from exc
         context.raise_if_cancelled()
-        return turns
+        return turns, exclusive_turns
 
     def _infer_waveform(
         self,
@@ -3190,14 +3220,25 @@ class LocalPyannoteAuditAdapter:
         return result
 
     @staticmethod
-    def _annotation_from_result(result: Any) -> Any:
+    def _annotation_from_result(
+        result: Any,
+        *,
+        field: str = "speaker_diarization",
+        required: bool = True,
+    ) -> Any:
         annotation = None
         if isinstance(result, Mapping):
-            annotation = result.get("speaker_diarization")
+            annotation = result.get(field)
         else:
-            annotation = getattr(result, "speaker_diarization", None)
-        if annotation is None and callable(getattr(result, "itertracks", None)):
+            annotation = getattr(result, field, None)
+        if (
+            field == "speaker_diarization"
+            and annotation is None
+            and callable(getattr(result, "itertracks", None))
+        ):
             annotation = result
+        if annotation is None and not required:
+            return None
         if annotation is None or not callable(
             getattr(annotation, "itertracks", None)
         ):
@@ -3211,8 +3252,17 @@ class LocalPyannoteAuditAdapter:
     def _speaker_turns(
         result: Any,
         segment: TranscriptSegment,
-    ) -> list[dict[str, Any]]:
-        annotation = LocalPyannoteAuditAdapter._annotation_from_result(result)
+        *,
+        field: str = "speaker_diarization",
+        required: bool = True,
+    ) -> list[dict[str, Any]] | None:
+        annotation = LocalPyannoteAuditAdapter._annotation_from_result(
+            result,
+            field=field,
+            required=required,
+        )
+        if annotation is None:
+            return None
         try:
             tracks = annotation.itertracks(yield_label=True)
         except Exception as exc:
@@ -3348,7 +3398,7 @@ class LocalPyannoteAuditAdapter:
             )
         pcm_buffer_id = _pcm_buffer_id(prepared)
         if self._uses_isolated_runtime:
-            turns = self._run_isolated_inference(
+            turns, exclusive_turns = self._run_isolated_inference(
                 Path(prepared.audio_path),
                 start_ms=0,
                 end_ms=prepared.duration_ms,
@@ -3375,6 +3425,17 @@ class LocalPyannoteAuditAdapter:
                 {"start_ms": 0, "end_ms": prepared.duration_ms},
             )()
             turns = self._speaker_turns(result, timeline)
+            exclusive_turns = self._speaker_turns(
+                result,
+                timeline,
+                field="exclusive_speaker_diarization",
+                required=False,
+            )
+        if turns is None:
+            raise WorkerError(
+                "PYANNOTE_RESULT_INVALID",
+                "pyannote regular speaker timeline is missing",
+            )
         overlap_intervals = self._overlap_intervals(turns)
         global_local_speakers = sorted(
             {str(turn["localSpeaker"]) for turn in turns}
@@ -3392,8 +3453,28 @@ class LocalPyannoteAuditAdapter:
             "turnCount": len(turns),
             "localSpeakerCount": len(global_local_speakers),
             "localSpeakers": global_local_speakers,
+            "speakerTurns": [dict(turn) for turn in turns],
             "speakerTurnsSha256": hashlib.sha256(serialized_turns).hexdigest(),
+            "exclusiveNative": exclusive_turns is not None,
         }
+        if exclusive_turns is not None:
+            serialized_exclusive_turns = json.dumps(
+                exclusive_turns,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            full_timeline_inference.update(
+                {
+                    "exclusiveTurnCount": len(exclusive_turns),
+                    "exclusiveSpeakerTurns": [
+                        dict(turn) for turn in exclusive_turns
+                    ],
+                    "exclusiveSpeakerTurnsSha256": hashlib.sha256(
+                        serialized_exclusive_turns
+                    ).hexdigest(),
+                }
+            )
 
         output: list[OverlapDecision] = []
         for window in windows:
@@ -3424,6 +3505,26 @@ class LocalPyannoteAuditAdapter:
                 if int(interval["startMs"]) < window.end_ms
                 and int(interval["endMs"]) > window.start_ms
             ]
+            window_exclusive_turns = (
+                [
+                    {
+                        **dict(turn),
+                        "startMs": max(
+                            window.start_ms,
+                            int(turn["startMs"]),
+                        ),
+                        "endMs": min(
+                            window.end_ms,
+                            int(turn["endMs"]),
+                        ),
+                    }
+                    for turn in exclusive_turns
+                    if int(turn["startMs"]) < window.end_ms
+                    and int(turn["endMs"]) > window.start_ms
+                ]
+                if exclusive_turns is not None
+                else None
+            )
             overlapping = bool(window_overlap)
             evidence: dict[str, Any] = {
                 "detectorStatus": "EVALUATED",
@@ -3445,6 +3546,8 @@ class LocalPyannoteAuditAdapter:
                     }
                 ),
             }
+            if window_exclusive_turns is not None:
+                evidence["exclusiveSpeakerTurns"] = window_exclusive_turns
             if overlapping:
                 evidence["reasonCode"] = "PYANNOTE_OVERLAP_DETECTED"
             output.append(

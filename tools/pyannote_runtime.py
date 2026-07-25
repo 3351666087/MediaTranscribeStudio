@@ -41,27 +41,34 @@ def _local_path(value: Any, *, field: str, directory: bool) -> Path:
     return path
 
 
-def _annotation(result: Any) -> Any:
+def _annotation(result: Any, *, field: str) -> Any:
     candidate = (
-        result.get("speaker_diarization")
+        result.get(field)
         if isinstance(result, Mapping)
-        else getattr(result, "speaker_diarization", None)
+        else getattr(result, field, None)
     )
-    if candidate is None and callable(getattr(result, "itertracks", None)):
+    if (
+        field == "speaker_diarization"
+        and candidate is None
+        and callable(getattr(result, "itertracks", None))
+    ):
         candidate = result
     if candidate is None or not callable(getattr(candidate, "itertracks", None)):
-        raise ValueError("result has no diarization annotation")
+        raise ValueError(f"result has no {field} annotation")
     return candidate
 
 
 def _turns(
     result: Any,
     *,
+    field: str,
     start_ms: int,
     end_ms: int,
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
-    for index, raw in enumerate(_annotation(result).itertracks(yield_label=True)):
+    for index, raw in enumerate(
+        _annotation(result, field=field).itertracks(yield_label=True)
+    ):
         if (
             not isinstance(raw, Sequence)
             or isinstance(raw, (str, bytes, bytearray))
@@ -161,10 +168,17 @@ def run() -> dict[str, Any]:
             }
         )
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "status": "ok",
         "speakerTurns": _turns(
             result,
+            field="speaker_diarization",
+            start_ms=start_ms,
+            end_ms=end_ms,
+        ),
+        "exclusiveSpeakerTurns": _turns(
+            result,
+            field="exclusive_speaker_diarization",
             start_ms=start_ms,
             end_ms=end_ms,
         ),

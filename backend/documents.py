@@ -173,6 +173,16 @@ def validate_segments(
                 raise WorkerError(
                     "OVERLAP_OVERRIDE_FORBIDDEN",
                     f"{segment.segment_id} overlap/串话 structure requires manual review",
+                    details={
+                        "segmentId": segment.segment_id,
+                        "revisionId": revision.revision_id,
+                        "revisionSource": revision.source,
+                        "revisionType": revision.revision_type,
+                        "reasonCode": revision.reason_code,
+                        "verifiedPyannoteRevisionIds": sorted(
+                            verified_pyannote_revisions
+                        ),
+                    },
                 )
         non_manual_revisions = [
             item for item in revisions if item.source != "manual"
@@ -589,6 +599,8 @@ def assemble_transcript_document(
         document["provenance"]["pipelineMetricsSchemaVersion"] = str(
             result.pipeline_metrics.get("schemaVersion") or ""
         )
+    if result.speaker_timeline is not None:
+        document["speakerTimeline"] = dict(result.speaker_timeline)
     if title:
         document["title"] = title
     return document

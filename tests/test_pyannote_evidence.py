@@ -61,6 +61,53 @@ def mapping_evidence() -> dict[str, object]:
     }
 
 
+def exclusive_mapping_evidence() -> dict[str, object]:
+    evidence = copy.deepcopy(mapping_evidence())
+    overlap = evidence["overlap"]
+    assert isinstance(overlap, dict)
+    overlap["canonicalSpeakerTurns"] = [
+        {
+            "startMs": 0,
+            "endMs": 1_000,
+            "speakerId": "speaker-1",
+            "localSpeaker": "LOCAL_A",
+        },
+        {
+            "startMs": 0,
+            "endMs": 1_000,
+            "speakerId": "speaker-2",
+            "localSpeaker": "LOCAL_B",
+        },
+    ]
+    overlap["canonicalExclusiveSpeakerTurns"] = [
+        {
+            "startMs": 0,
+            "endMs": 750,
+            "speakerId": "speaker-2",
+            "localSpeaker": "LOCAL_B",
+        },
+        {
+            "startMs": 750,
+            "endMs": 1_000,
+            "speakerId": "speaker-1",
+            "localSpeaker": "LOCAL_A",
+        },
+    ]
+    proof = evidence["pyannoteCanonicalMapping"]
+    assert isinstance(proof, dict)
+    proof["localDurationsMs"] = {
+        "LOCAL_A": 1_000,
+        "LOCAL_B": 1_000,
+    }
+    proof["exclusiveLocalDurationsMs"] = {
+        "LOCAL_A": 250,
+        "LOCAL_B": 750,
+    }
+    proof["dominanceSource"] = "native-exclusive-speaker-diarization"
+    proof["dominance"] = 0.75
+    return evidence
+
+
 def mapping_revision() -> Revision:
     return Revision(
         revision_id="segment-001:speaker:1",
@@ -127,6 +174,69 @@ def test_complete_pyannote_mapping_proof_allows_audited_override() -> None:
         speaker_count=2,
         duration_ms=2_000,
         high_margin_threshold=0.4,
+    )
+
+
+def test_native_exclusive_dominance_allows_audited_overlap_override() -> None:
+    evidence = exclusive_mapping_evidence()
+    assert is_verified_pyannote_speaker_revision(
+        mapping_revision(),
+        evidence,
+        {"speaker-1", "speaker-2"},
+    )
+
+    validate_segments(
+        transcript_segments(evidence),
+        speaker_count=2,
+        duration_ms=2_000,
+        high_margin_threshold=0.4,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("exclusiveLocalDurationsMs", {"LOCAL_A": 251, "LOCAL_B": 749}),
+        ("dominance", 0.749),
+        ("dominanceSource", "synthetic-exclusive"),
+    ),
+)
+def test_native_exclusive_dominance_tampering_fails_closed(
+    field: str,
+    value: object,
+) -> None:
+    evidence = exclusive_mapping_evidence()
+    proof = evidence["pyannoteCanonicalMapping"]
+    assert isinstance(proof, dict)
+    proof[field] = value
+
+    assert not is_verified_pyannote_speaker_revision(
+        mapping_revision(),
+        evidence,
+        {"speaker-1", "speaker-2"},
+    )
+    with pytest.raises(WorkerError) as caught:
+        validate_segments(
+            transcript_segments(evidence),
+            speaker_count=2,
+            duration_ms=2_000,
+            high_margin_threshold=0.4,
+        )
+    assert caught.value.code == "OVERLAP_OVERRIDE_FORBIDDEN"
+
+
+def test_native_exclusive_turn_overlap_fails_closed() -> None:
+    evidence = exclusive_mapping_evidence()
+    overlap = evidence["overlap"]
+    assert isinstance(overlap, dict)
+    turns = overlap["canonicalExclusiveSpeakerTurns"]
+    assert isinstance(turns, list)
+    turns[1]["startMs"] = 700
+
+    assert not is_verified_pyannote_speaker_revision(
+        mapping_revision(),
+        evidence,
+        {"speaker-1", "speaker-2"},
     )
 
 

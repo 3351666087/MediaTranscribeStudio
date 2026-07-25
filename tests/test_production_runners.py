@@ -2266,7 +2266,28 @@ class ProductionRunnerTests(unittest.TestCase):
             ]
         )
         pipeline = FakePyannotePipeline(
-            SimpleNamespace(speaker_diarization=annotation)
+            SimpleNamespace(
+                speaker_diarization=annotation,
+                exclusive_speaker_diarization=FakeAnnotation(
+                    [
+                        (
+                            SimpleNamespace(start=0.0, end=0.65),
+                            "exclusive-1",
+                            "LOCAL_A",
+                        ),
+                        (
+                            SimpleNamespace(start=0.65, end=1.5),
+                            "exclusive-2",
+                            "LOCAL_B",
+                        ),
+                        (
+                            SimpleNamespace(start=1.5, end=2.2),
+                            "exclusive-3",
+                            "LOCAL_A",
+                        ),
+                    ]
+                ),
+            )
         )
         adapter = LocalPyannoteAuditAdapter(
             model_path=self.pyannote_model,
@@ -2336,7 +2357,28 @@ class ProductionRunnerTests(unittest.TestCase):
             ]
         )
         pipeline = FakePyannotePipeline(
-            SimpleNamespace(speaker_diarization=annotation)
+            SimpleNamespace(
+                speaker_diarization=annotation,
+                exclusive_speaker_diarization=FakeAnnotation(
+                    [
+                        (
+                            SimpleNamespace(start=0.0, end=0.65),
+                            "exclusive-1",
+                            "LOCAL_A",
+                        ),
+                        (
+                            SimpleNamespace(start=0.65, end=1.5),
+                            "exclusive-2",
+                            "LOCAL_B",
+                        ),
+                        (
+                            SimpleNamespace(start=1.5, end=2.2),
+                            "exclusive-3",
+                            "LOCAL_A",
+                        ),
+                    ]
+                ),
+            )
         )
         adapter = LocalPyannoteAuditAdapter(
             model_path=self.pyannote_model,
@@ -2397,10 +2439,47 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(full_timeline["turnCount"], 3)
         self.assertEqual(full_timeline["localSpeakerCount"], 2)
         self.assertEqual(
+            full_timeline["speakerTurns"],
+            [
+                {"startMs": 0, "endMs": 800, "localSpeaker": "LOCAL_A"},
+                {"startMs": 500, "endMs": 1500, "localSpeaker": "LOCAL_B"},
+                {"startMs": 1200, "endMs": 2200, "localSpeaker": "LOCAL_A"},
+            ],
+        )
+        self.assertTrue(full_timeline["exclusiveNative"])
+        self.assertEqual(full_timeline["exclusiveTurnCount"], 3)
+        self.assertEqual(
+            full_timeline["exclusiveSpeakerTurns"],
+            [
+                {"startMs": 0, "endMs": 650, "localSpeaker": "LOCAL_A"},
+                {"startMs": 650, "endMs": 1500, "localSpeaker": "LOCAL_B"},
+                {"startMs": 1500, "endMs": 2200, "localSpeaker": "LOCAL_A"},
+            ],
+        )
+        self.assertRegex(
+            full_timeline["exclusiveSpeakerTurnsSha256"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(
             full_timeline["localSpeakers"],
             ["LOCAL_A", "LOCAL_B"],
         )
         self.assertRegex(full_timeline["speakerTurnsSha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            decisions[0].evidence["exclusiveSpeakerTurns"],
+            [
+                {
+                    "startMs": 0,
+                    "endMs": 650,
+                    "localSpeaker": "LOCAL_A",
+                },
+                {
+                    "startMs": 650,
+                    "endMs": 1000,
+                    "localSpeaker": "LOCAL_B",
+                },
+            ],
+        )
 
     def test_pyannote_isolated_runtime_receives_one_full_timeline(
         self,

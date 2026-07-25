@@ -17,6 +17,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.language import normalize_language_tag
 from backend.pipeline_metrics import ReferenceTurn, evaluate_reference_quality
+from backend.speaker_timeline import (
+    speaker_timeline_turns,
+    validate_speaker_timeline,
+)
 from tools.sample_library import word_error_rate
 
 _SRT_TIMESTAMP = re.compile(
@@ -388,16 +392,35 @@ def _code_switch_language_quality(
 def _boundary_quality(
     segments: Sequence[dict[str, Any]],
     reference_turns: Sequence[ReferenceTurn],
+    *,
+    speaker_timeline: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    predicted_boundaries = sorted(
-        {
-            int(segment[key])
-            for segment in segments
-            if isinstance(segment, dict)
-            for key in ("startMs", "endMs")
-            if isinstance(segment.get(key), int)
-        }
-    )
+    if speaker_timeline is not None:
+        predicted_boundaries = sorted(
+            {
+                int(turn[key])
+                for turn in speaker_timeline_turns(
+                    speaker_timeline,
+                    mode="regular",
+                )
+                for key in ("startMs", "endMs")
+                if isinstance(turn.get(key), int)
+                and not isinstance(turn.get(key), bool)
+            }
+        )
+        prediction_source = "speakerTimeline.regular"
+    else:
+        predicted_boundaries = sorted(
+            {
+                int(segment[key])
+                for segment in segments
+                if isinstance(segment, dict)
+                for key in ("startMs", "endMs")
+                if isinstance(segment.get(key), int)
+                and not isinstance(segment.get(key), bool)
+            }
+        )
+        prediction_source = "segments"
     reference_boundaries = sorted(
         {
             value
@@ -423,6 +446,7 @@ def _boundary_quality(
         return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
     return {
+        "predictionSource": prediction_source,
         "referenceBoundaryCount": len(reference_boundaries),
         "predictedBoundaryCount": len(predicted_boundaries),
         "meanAbsoluteErrorMs": round(statistics.fmean(errors), 6),
@@ -435,6 +459,8 @@ def _boundary_quality(
 def _diarization_quality(
     case: dict[str, Any],
     segments: Sequence[dict[str, Any]],
+    *,
+    speaker_timeline: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     eligibility = case.get("truthEligibility")
     turns = case.get("turns")
@@ -476,10 +502,18 @@ def _diarization_quality(
         and isinstance(segment.get("endMs"), int)
         and isinstance(segment.get("speakerId"), str)
     ]
-    quality = evaluate_reference_quality(predicted, reference_turns)
+    quality = evaluate_reference_quality(
+        predicted,
+        reference_turns,
+        speaker_timeline=speaker_timeline,
+    )
     return (
         {key: round(value, 9) for key, value in quality.items()},
-        _boundary_quality(segments, reference_turns),
+        _boundary_quality(
+            segments,
+            reference_turns,
+            speaker_timeline=speaker_timeline,
+        ),
     )
 
 
@@ -527,6 +561,34 @@ def evaluate_case(
     if not isinstance(segments, list):
         base["evidence"] = {"transcript": "missing-segments"}
         return base
+    speaker_timeline = None
+    raw_speaker_timeline = transcript.get("speakerTimeline")
+    if raw_speaker_timeline is not None:
+        source = transcript.get("source")
+        policy = transcript.get("speakerPolicy")
+        duration_ms = (
+            source.get("durationMs")
+            if isinstance(source, Mapping)
+            else None
+        )
+        canonical_ids = (
+            policy.get("speakerIds")
+            if isinstance(policy, Mapping)
+            else None
+        )
+        if (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or not isinstance(canonical_ids, list)
+        ):
+            raise ValueError(
+                "speakerTimeline requires transcript duration and canonical speaker IDs"
+            )
+        speaker_timeline = validate_speaker_timeline(
+            raw_speaker_timeline,
+            duration_ms=duration_ms,
+            canonical_speaker_ids=tuple(canonical_ids),
+        )
     hypothesis = " ".join(
         str(segment.get("displayText") or segment.get("normalizedText") or "")
         for segment in segments
@@ -556,7 +618,11 @@ def evaluate_case(
             or truth_eligibility.get("speakerCount") is not False
         )
     )
-    diarization, boundary = _diarization_quality(case, segments)
+    diarization, boundary = _diarization_quality(
+        case,
+        segments,
+        speaker_timeline=speaker_timeline,
+    )
     base["evidence"] = {
         "transcript": str(transcript_path),
         "segmentCount": len(segments),
@@ -579,6 +645,11 @@ def evaluate_case(
             else None
         ),
         "actualDistinctSpeakerSequence": actual_distinct_sequence,
+        "speakerTimelineAuthority": (
+            speaker_timeline.get("authority")
+            if speaker_timeline is not None
+            else None
+        ),
         "expectedDistinctSpeakerCount": expected_count,
         "distinctSpeakerCountMatch": (
             len(actual_distinct_sequence) == expected_count

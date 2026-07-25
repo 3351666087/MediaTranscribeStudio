@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from .errors import WorkerError
+from .speaker_timeline import speaker_timeline_turns
 
 
 METRICS_SCHEMA_VERSION = "1.0.0"
@@ -633,6 +634,51 @@ def _active_prediction(
     return active
 
 
+def _active_timeline_prediction(
+    turns: Sequence[tuple[int, int, str]],
+    start_ms: int,
+    end_ms: int,
+) -> set[str]:
+    return {
+        speaker_id
+        for turn_start, turn_end, speaker_id in turns
+        if turn_start < end_ms and turn_end > start_ms
+    }
+
+
+def _regular_timeline_turns(
+    speaker_timeline: Mapping[str, Any],
+) -> tuple[tuple[int, int, str], ...]:
+    turns: list[tuple[int, int, str]] = []
+    for index, raw in enumerate(
+        speaker_timeline_turns(speaker_timeline, mode="regular")
+    ):
+        start_ms = raw.get("startMs")
+        end_ms = raw.get("endMs")
+        speaker_id = raw.get("speakerId")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or end_ms <= start_ms
+            or not isinstance(speaker_id, str)
+            or not speaker_id.strip()
+        ):
+            raise WorkerError(
+                "SPEAKER_TIMELINE_INVALID",
+                "regular speaker timeline contains a malformed turn",
+                details={"turnIndex": index},
+            )
+        turns.append((start_ms, end_ms, speaker_id.strip()))
+    if not turns:
+        raise WorkerError(
+            "SPEAKER_TIMELINE_INVALID",
+            "regular speaker timeline must contain at least one turn",
+        )
+    return tuple(turns)
+
+
 def _canonical_speaker_turns(
     segment: Any,
 ) -> tuple[tuple[int, int, str], ...] | None:
@@ -738,6 +784,8 @@ def _predicted_overlap(
 def evaluate_reference_quality(
     segments: Sequence[Any],
     reference_turns: Sequence[ReferenceTurn],
+    *,
+    speaker_timeline: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
     """Compute time-weighted DER/JER/confusion/overlap F1.
 
@@ -750,31 +798,43 @@ def evaluate_reference_quality(
             "REFERENCE_LABELS_INVALID",
             "reference metrics require at least one labelled interval",
         )
+    timeline_turns = (
+        _regular_timeline_turns(speaker_timeline)
+        if speaker_timeline is not None
+        else None
+    )
     boundaries = {
         boundary
         for turn in reference_turns
         for boundary in (turn.start_ms, turn.end_ms)
     }
-    boundaries.update(
-        boundary
-        for segment in segments
-        for boundary in (
-            int(getattr(segment, "start_ms")),
-            int(getattr(segment, "end_ms")),
+    if timeline_turns is not None:
+        boundaries.update(
+            boundary
+            for turn in timeline_turns
+            for boundary in turn[:2]
         )
-    )
-    boundaries.update(
-        boundary
-        for segment in segments
-        for interval in (_exact_overlap_intervals(segment) or ())
-        for boundary in interval
-    )
-    boundaries.update(
-        boundary
-        for segment in segments
-        for turn in (_canonical_speaker_turns(segment) or ())
-        for boundary in turn[:2]
-    )
+    else:
+        boundaries.update(
+            boundary
+            for segment in segments
+            for boundary in (
+                int(getattr(segment, "start_ms")),
+                int(getattr(segment, "end_ms")),
+            )
+        )
+        boundaries.update(
+            boundary
+            for segment in segments
+            for interval in (_exact_overlap_intervals(segment) or ())
+            for boundary in interval
+        )
+        boundaries.update(
+            boundary
+            for segment in segments
+            for turn in (_canonical_speaker_turns(segment) or ())
+            for boundary in turn[:2]
+        )
     ordered = sorted(boundaries)
     intervals: list[tuple[int, int, set[str], set[str], bool]] = []
     reference_speakers: set[str] = set()
@@ -784,12 +844,24 @@ def evaluate_reference_quality(
         if end_ms <= start_ms:
             continue
         reference = _active_reference(reference_turns, start_ms, end_ms)
-        predicted = _active_prediction(segments, start_ms, end_ms)
-        predicted_overlap = _predicted_overlap(
-            segments,
-            start_ms,
-            end_ms,
-            predicted,
+        predicted = (
+            _active_timeline_prediction(
+                timeline_turns,
+                start_ms,
+                end_ms,
+            )
+            if timeline_turns is not None
+            else _active_prediction(segments, start_ms, end_ms)
+        )
+        predicted_overlap = (
+            len(predicted) > 1
+            if timeline_turns is not None
+            else _predicted_overlap(
+                segments,
+                start_ms,
+                end_ms,
+                predicted,
+            )
         )
         intervals.append(
             (start_ms, end_ms, reference, predicted, predicted_overlap)

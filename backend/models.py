@@ -14,6 +14,7 @@ from .business_processing import BusinessProcessingConfig
 from .errors import WorkerError, invalid_request
 from .language import normalize_language_tag
 from .output_recipe import OutputRecipe
+from .speaker_timeline import validate_speaker_timeline
 from .voice_activity import validate_voice_activity
 
 
@@ -596,6 +597,7 @@ class TranscriptionResult:
     models: tuple[Mapping[str, Any], ...] = ()
     pipeline_metrics: Mapping[str, Any] | None = None
     voice_activity: Mapping[str, Any] | None = None
+    speaker_timeline: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -614,6 +616,26 @@ class TranscriptionResult:
                 self,
                 "voice_activity",
                 validate_voice_activity(self.voice_activity),
+            )
+        if self.speaker_timeline is not None:
+            canonical_ids = tuple(
+                sorted(
+                    {
+                        score.speaker_id
+                        for segment in self.segments
+                        for score in segment.speaker_scores
+                    },
+                    key=lambda item: int(item.removeprefix("speaker-")),
+                )
+            )
+            object.__setattr__(
+                self,
+                "speaker_timeline",
+                validate_speaker_timeline(
+                    self.speaker_timeline,
+                    duration_ms=self.duration_ms,
+                    canonical_speaker_ids=canonical_ids,
+                ),
             )
 
     @classmethod
@@ -667,6 +689,15 @@ class TranscriptionResult:
                 "ADAPTER_RESULT_INVALID",
                 "voiceActivity must be an object when provided",
             )
+        speaker_timeline = value.get("speakerTimeline")
+        if speaker_timeline is not None and not isinstance(
+            speaker_timeline,
+            Mapping,
+        ):
+            raise WorkerError(
+                "ADAPTER_RESULT_INVALID",
+                "speakerTimeline must be an object when provided",
+            )
         segments = tuple(
             TranscriptSegment.from_mapping(item, index)
             for index, item in enumerate(raw_segments)
@@ -706,6 +737,11 @@ class TranscriptionResult:
             voice_activity=(
                 validate_voice_activity(voice_activity)
                 if voice_activity is not None
+                else None
+            ),
+            speaker_timeline=(
+                dict(speaker_timeline)
+                if speaker_timeline is not None
                 else None
             ),
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import tempfile
 import threading
 import unittest
@@ -650,6 +651,61 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             decoded[0].evidence["speakerSequenceDecode"]["reasonCodes"],
         )
 
+    def test_global_sequence_decode_overlap_is_a_hard_constraint(self) -> None:
+        pipeline, _, _, _, _ = self.pipeline(2)
+        segments = (
+            self.transcript_segment(
+                "left",
+                0,
+                900,
+                "speaker-1",
+                scores=(("speaker-1", 0.95), ("speaker-2", 0.05)),
+            ),
+            replace(
+                self.transcript_segment(
+                    "ambiguous-overlap",
+                    900,
+                    1_200,
+                    "speaker-2",
+                    margin=0.01,
+                    scores=(("speaker-2", 0.60), ("speaker-1", 0.59)),
+                ),
+                overlapping=True,
+            ),
+            self.transcript_segment(
+                "right",
+                1_200,
+                2_100,
+                "speaker-1",
+                scores=(("speaker-1", 0.95), ("speaker-2", 0.05)),
+            ),
+            self.transcript_segment(
+                "speaker-2-anchor",
+                2_100,
+                3_000,
+                "speaker-2",
+                scores=(("speaker-2", 0.96), ("speaker-1", 0.04)),
+            ),
+        )
+
+        decoded = pipeline._decode_global_speaker_sequence(segments)
+        protected = decoded[1]
+
+        self.assertEqual(protected.speaker_id, "speaker-2")
+        self.assertEqual(protected.revisions, ())
+        self.assertEqual(
+            protected.evidence["speakerSequenceDecode"]["reviewStatus"],
+            "REVIEW_REQUIRED",
+        )
+        self.assertIn(
+            "OVERLAP_PROTECTED",
+            protected.evidence["speakerSequenceDecode"]["reasonCodes"],
+        )
+        self.assertNotIn(
+            "HUMAN_LOCKED",
+            protected.evidence["speakerSequenceDecode"]["reasonCodes"],
+        )
+
     def test_global_sequence_decode_preserves_cardinality_and_escalates(self) -> None:
         pipeline, _, _, _, _ = self.pipeline(2)
         segments = (
@@ -778,6 +834,32 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             "three": "LOCAL_B",
             "four": "LOCAL_B",
         }
+        full_regular_turns = [
+            {
+                "startMs": segment.start_ms,
+                "endMs": segment.end_ms,
+                "localSpeaker": local_by_segment[segment.segment_id],
+            }
+            for segment in base
+        ]
+        full_regular_turns[-1]["endMs"] = 4_500
+        full_exclusive_turns = [dict(turn) for turn in full_regular_turns]
+        regular_sha256 = hashlib.sha256(
+            json.dumps(
+                full_regular_turns,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        exclusive_sha256 = hashlib.sha256(
+            json.dumps(
+                full_exclusive_turns,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         segments = tuple(
             replace(
                 segment,
@@ -788,7 +870,34 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                             "id": "pyannote-community-1",
                             "version": "2.0.0",
                         },
+                        "fullTimelineInference": {
+                            "scope": "full-normalized-timeline",
+                            "startMs": 0,
+                            "endMs": 4_500,
+                            "turnCount": len(full_regular_turns),
+                            "speakerTurns": full_regular_turns,
+                            "speakerTurnsSha256": regular_sha256,
+                            "exclusiveNative": True,
+                            "exclusiveTurnCount": len(
+                                full_exclusive_turns
+                            ),
+                            "exclusiveSpeakerTurns": (
+                                full_exclusive_turns
+                            ),
+                            "exclusiveSpeakerTurnsSha256": (
+                                exclusive_sha256
+                            ),
+                        },
                         "speakerTurns": [
+                            {
+                                "startMs": segment.start_ms,
+                                "endMs": segment.end_ms,
+                                "localSpeaker": local_by_segment[
+                                    segment.segment_id
+                                ],
+                            }
+                        ],
+                        "exclusiveSpeakerTurns": [
                             {
                                 "startMs": segment.start_ms,
                                 "endMs": segment.end_ms,
@@ -836,6 +945,48 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                     "localSpeaker": "LOCAL_B",
                 }
             ],
+        )
+        self.assertEqual(
+            changed.evidence["overlap"]["canonicalExclusiveSpeakerTurns"],
+            changed.evidence["overlap"]["canonicalSpeakerTurns"],
+        )
+        timeline = pipeline._build_pyannote_speaker_timeline(
+            mapped,
+            duration_ms=4_500,
+        )
+        self.assertIsNotNone(timeline)
+        assert timeline is not None
+        self.assertEqual(
+            timeline["regular"]["semantics"],
+            "overlap-preserving",
+        )
+        self.assertEqual(
+            timeline["exclusive"]["semantics"],
+            "single-speaker",
+        )
+        self.assertEqual(
+            [
+                (turn["startMs"], turn["endMs"])
+                for turn in timeline["regular"]["turns"]
+            ],
+            [(0, 2_000), (2_000, 4_500)],
+        )
+        self.assertEqual(
+            [segment.raw_text for segment in mapped],
+            [segment.raw_text for segment in base],
+        )
+
+        human_locked = list(segments)
+        human_locked[2] = replace(human_locked[2], human_locked=True)
+        locked_mapping = pipeline._apply_pyannote_canonical_mapping(
+            tuple(human_locked)
+        )
+        self.assertEqual(locked_mapping[2].speaker_id, "speaker-1")
+        self.assertIsNone(
+            pipeline._build_pyannote_speaker_timeline(
+                locked_mapping,
+                duration_ms=4_500,
+            )
         )
 
     def test_ambiguous_pyannote_mapping_fails_closed(self) -> None:

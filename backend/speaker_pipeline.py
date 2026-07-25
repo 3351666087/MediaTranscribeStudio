@@ -45,6 +45,7 @@ from .speaker_sequence_decoder import (
     SpeakerEmission,
     decode_speaker_sequence,
 )
+from .speaker_timeline import build_speaker_timeline
 from .voice_activity import (
     build_voice_activity,
     with_voice_activity_classification,
@@ -5780,9 +5781,10 @@ class SpeakerPipeline:
         """Decode one acoustic-first global path while preserving cardinality.
 
         Every candidate emission comes from the segment's voiceprint score
-        inventory. Human locks remain hard constraints, and the sequence
-        decoder derives strong anchors only from acoustic score and margin.
-        Semantic context is deliberately excluded from this production path.
+        inventory. Human locks and overlap-protected segments remain hard
+        constraints, and the sequence decoder derives strong anchors only
+        from acoustic score and margin. Semantic context is deliberately
+        excluded from this production path.
         """
 
         result = decode_speaker_sequence(
@@ -5801,7 +5803,7 @@ class SpeakerPipeline:
                     ),
                     human_locked_speaker_id=(
                         segment.speaker_id
-                        if segment.human_locked
+                        if segment.human_locked or segment.overlapping
                         else None
                     ),
                 )
@@ -5818,13 +5820,24 @@ class SpeakerPipeline:
         decoded: list[TranscriptSegment] = []
         for segment in segments:
             assignment = assignments_by_id[segment.segment_id]
+            reason_codes = list(assignment.reason_codes)
+            review_status = assignment.review_status
+            if segment.overlapping:
+                reason_codes = [
+                    code
+                    for code in reason_codes
+                    if code != "HUMAN_LOCKED" or segment.human_locked
+                ]
+                if "OVERLAP_PROTECTED" not in reason_codes:
+                    reason_codes.append("OVERLAP_PROTECTED")
+                review_status = "REVIEW_REQUIRED"
             sequence_evidence: dict[str, Any] = {
                 "method": result.method,
                 "beforeSpeakerId": assignment.original_speaker_id,
                 "afterSpeakerId": assignment.speaker_id,
                 "acousticScore": assignment.acoustic_score,
-                "reviewStatus": assignment.review_status,
-                "reasonCodes": list(assignment.reason_codes),
+                "reviewStatus": review_status,
+                "reasonCodes": reason_codes,
                 "applied": assignment.changed,
             }
             revisions = segment.revisions
@@ -5891,6 +5904,8 @@ class SpeakerPipeline:
             return tuple(segments)
 
         turns_by_segment: dict[str, list[Mapping[str, Any]]] = {}
+        exclusive_turns_by_segment: dict[str, list[Mapping[str, Any]]] = {}
+        native_exclusive_available = True
         local_speakers: set[str] = set()
         for segment in segments:
             overlap = segment.evidence.get("overlap")
@@ -5908,6 +5923,14 @@ class SpeakerPipeline:
             )
             if not isinstance(raw_turns, list):
                 return tuple(segments)
+            raw_exclusive_turns = (
+                overlap.get("exclusiveSpeakerTurns")
+                if isinstance(overlap, Mapping)
+                else None
+            )
+            if not isinstance(raw_exclusive_turns, list):
+                native_exclusive_available = False
+                raw_exclusive_turns = []
             validated: list[Mapping[str, Any]] = []
             for raw in raw_turns:
                 if not isinstance(raw, Mapping):
@@ -5930,6 +5953,35 @@ class SpeakerPipeline:
                 validated.append(raw)
                 local_speakers.add(local_speaker.strip())
             turns_by_segment[segment.segment_id] = validated
+            validated_exclusive: list[Mapping[str, Any]] = []
+            for raw in raw_exclusive_turns:
+                if not isinstance(raw, Mapping):
+                    raise WorkerError(
+                        "SPEAKER_TIMELINE_INVALID",
+                        "pyannote exclusive speaker turn is malformed",
+                    )
+                start_ms = raw.get("startMs")
+                end_ms = raw.get("endMs")
+                local_speaker = raw.get("localSpeaker")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or not isinstance(local_speaker, str)
+                    or not local_speaker.strip()
+                    or start_ms < segment.start_ms
+                    or end_ms > segment.end_ms
+                    or end_ms <= start_ms
+                ):
+                    raise WorkerError(
+                        "SPEAKER_TIMELINE_INVALID",
+                        "pyannote exclusive speaker turn is out of range",
+                    )
+                validated_exclusive.append(raw)
+            exclusive_turns_by_segment[segment.segment_id] = (
+                validated_exclusive
+            )
 
         ordered_local = sorted(local_speakers)
         if len(ordered_local) != len(canonical_speakers):
@@ -6041,7 +6093,9 @@ class SpeakerPipeline:
         proposed: list[TranscriptSegment] = []
         for segment in segments:
             local_durations: dict[str, int] = {}
+            exclusive_local_durations: dict[str, int] = {}
             canonical_turns: list[dict[str, Any]] = []
+            canonical_exclusive_turns: list[dict[str, Any]] = []
             for turn in turns_by_segment[segment.segment_id]:
                 local_speaker = str(turn["localSpeaker"]).strip()
                 duration_ms = int(turn["endMs"]) - int(turn["startMs"])
@@ -6057,11 +6111,37 @@ class SpeakerPipeline:
                             "localSpeaker": local_speaker,
                         }
                     )
+            if mapping_accepted and native_exclusive_available:
+                for turn in exclusive_turns_by_segment[segment.segment_id]:
+                    local_speaker = str(turn["localSpeaker"]).strip()
+                    if local_speaker not in mapping:
+                        raise WorkerError(
+                            "SPEAKER_TIMELINE_INVALID",
+                            "pyannote exclusive timeline contains an unmapped speaker",
+                        )
+                    canonical_exclusive_turns.append(
+                        {
+                            "startMs": int(turn["startMs"]),
+                            "endMs": int(turn["endMs"]),
+                            "speakerId": mapping[local_speaker],
+                            "localSpeaker": local_speaker,
+                        }
+                    )
+                    exclusive_local_durations[local_speaker] = (
+                        exclusive_local_durations.get(local_speaker, 0)
+                        + int(turn["endMs"])
+                        - int(turn["startMs"])
+                    )
+            attribution_durations = (
+                exclusive_local_durations
+                if exclusive_local_durations
+                else local_durations
+            )
             ranked_local = sorted(
-                local_durations.items(),
+                attribution_durations.items(),
                 key=lambda item: (-item[1], item[0]),
             )
-            tracked_ms = sum(local_durations.values())
+            tracked_ms = sum(attribution_durations.values())
             dominant_local = ranked_local[0][0] if ranked_local else None
             dominance = (
                 ranked_local[0][1] / tracked_ms
@@ -6110,6 +6190,10 @@ class SpeakerPipeline:
             overlap = dict(segment.evidence.get("overlap", {}))
             if mapping_accepted:
                 overlap["canonicalSpeakerTurns"] = canonical_turns
+                if native_exclusive_available:
+                    overlap["canonicalExclusiveSpeakerTurns"] = (
+                        canonical_exclusive_turns
+                    )
             proposed.append(
                 replace(
                     segment,
@@ -6122,6 +6206,14 @@ class SpeakerPipeline:
                             **mapping_evidence,
                             "localDurationsMs": dict(
                                 sorted(local_durations.items())
+                            ),
+                            "exclusiveLocalDurationsMs": dict(
+                                sorted(exclusive_local_durations.items())
+                            ),
+                            "dominanceSource": (
+                                "native-exclusive-speaker-diarization"
+                                if exclusive_local_durations
+                                else "regular-speaker-diarization"
                             ),
                             "dominantLocalSpeaker": dominant_local,
                             "dominance": round(dominance, 9),
@@ -6172,6 +6264,218 @@ class SpeakerPipeline:
                 )
             )
         return tuple(reverted)
+
+    @staticmethod
+    def _build_pyannote_speaker_timeline(
+        segments: Sequence[TranscriptSegment],
+        *,
+        duration_ms: int,
+    ) -> Mapping[str, Any] | None:
+        if not segments:
+            return None
+        canonical_ids = tuple(
+            sorted(
+                {
+                    score.speaker_id
+                    for segment in segments
+                    for score in segment.speaker_scores
+                },
+                key=lambda item: _speaker_number(item) or math.inf,
+            )
+        )
+        full_regular_snapshot: list[Mapping[str, Any]] | None = None
+        full_exclusive_snapshot: list[Mapping[str, Any]] | None = None
+        full_regular_sha256: str | None = None
+        full_exclusive_sha256: str | None = None
+        mapping_snapshot: dict[str, str] | None = None
+        provider_version: str | None = None
+        mapping_margin: float | None = None
+        for segment in segments:
+            mapping_evidence = segment.evidence.get(
+                "pyannoteCanonicalMapping"
+            )
+            overlap = segment.evidence.get("overlap")
+            if (
+                not isinstance(mapping_evidence, Mapping)
+                or mapping_evidence.get("accepted") is not True
+                or not isinstance(overlap, Mapping)
+            ):
+                return None
+            if "CARDINALITY_CHANGE_REVIEW_REQUIRED" in set(
+                mapping_evidence.get("blockers", ())
+            ):
+                return None
+            raw_mapping = mapping_evidence.get("mapping")
+            provider = mapping_evidence.get("provider")
+            margin = mapping_evidence.get("mappingMargin")
+            raw_regular = overlap.get("canonicalSpeakerTurns")
+            raw_exclusive = overlap.get("canonicalExclusiveSpeakerTurns")
+            full_timeline = overlap.get("fullTimelineInference")
+            if (
+                not isinstance(raw_mapping, Mapping)
+                or not isinstance(provider, Mapping)
+                or provider.get("id") != "pyannote-community-1"
+                or not isinstance(provider.get("version"), str)
+                or isinstance(margin, bool)
+                or not isinstance(margin, (int, float))
+                or not isinstance(raw_regular, list)
+                or not isinstance(raw_exclusive, list)
+                or not isinstance(full_timeline, Mapping)
+            ):
+                return None
+            full_regular = full_timeline.get("speakerTurns")
+            full_exclusive = full_timeline.get("exclusiveSpeakerTurns")
+            current_regular_sha256 = full_timeline.get(
+                "speakerTurnsSha256"
+            )
+            current_exclusive_sha256 = full_timeline.get(
+                "exclusiveSpeakerTurnsSha256"
+            )
+            if (
+                full_timeline.get("scope") != "full-normalized-timeline"
+                or full_timeline.get("startMs") != 0
+                or full_timeline.get("endMs") != duration_ms
+                or full_timeline.get("exclusiveNative") is not True
+                or not isinstance(full_regular, list)
+                or not isinstance(full_exclusive, list)
+                or any(
+                    not isinstance(turn, Mapping)
+                    for turn in (*full_regular, *full_exclusive)
+                )
+                or full_timeline.get("turnCount") != len(full_regular)
+                or full_timeline.get("exclusiveTurnCount")
+                != len(full_exclusive)
+                or not isinstance(current_regular_sha256, str)
+                or not isinstance(current_exclusive_sha256, str)
+            ):
+                return None
+            serialized_regular = json.dumps(
+                full_regular,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            serialized_exclusive = json.dumps(
+                full_exclusive,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if (
+                hashlib.sha256(serialized_regular).hexdigest()
+                != current_regular_sha256
+                or hashlib.sha256(serialized_exclusive).hexdigest()
+                != current_exclusive_sha256
+            ):
+                raise WorkerError(
+                    "SPEAKER_TIMELINE_INVALID",
+                    "pyannote full timeline hashes do not bind their turns",
+                )
+            current_mapping = {
+                str(local): str(speaker)
+                for local, speaker in raw_mapping.items()
+            }
+            current_provider_version = str(provider["version"])
+            current_margin = float(margin)
+            if mapping_snapshot is None:
+                mapping_snapshot = current_mapping
+                provider_version = current_provider_version
+                mapping_margin = current_margin
+                full_regular_snapshot = [
+                    dict(turn) for turn in full_regular
+                ]
+                full_exclusive_snapshot = [
+                    dict(turn) for turn in full_exclusive
+                ]
+                full_regular_sha256 = current_regular_sha256
+                full_exclusive_sha256 = current_exclusive_sha256
+            elif (
+                current_mapping != mapping_snapshot
+                or current_provider_version != provider_version
+                or current_margin != mapping_margin
+                or current_regular_sha256 != full_regular_sha256
+                or current_exclusive_sha256 != full_exclusive_sha256
+                or full_regular != full_regular_snapshot
+                or full_exclusive != full_exclusive_snapshot
+            ):
+                raise WorkerError(
+                    "SPEAKER_TIMELINE_INVALID",
+                    "pyannote canonical mapping evidence is inconsistent",
+                )
+
+            if segment.human_locked:
+                durations: dict[str, int] = {}
+                for turn in raw_exclusive:
+                    start_ms = max(segment.start_ms, int(turn["startMs"]))
+                    end_ms = min(segment.end_ms, int(turn["endMs"]))
+                    if end_ms > start_ms:
+                        speaker_id = str(turn["speakerId"])
+                        durations[speaker_id] = (
+                            durations.get(speaker_id, 0)
+                            + end_ms
+                            - start_ms
+                        )
+                if not durations:
+                    return None
+                dominant = min(
+                    durations,
+                    key=lambda speaker_id: (
+                        -durations[speaker_id],
+                        _speaker_number(speaker_id) or math.inf,
+                    ),
+                )
+                if dominant != segment.speaker_id:
+                    return None
+        if (
+            mapping_snapshot is None
+            or provider_version is None
+            or mapping_margin is None
+            or not full_regular_snapshot
+            or not full_exclusive_snapshot
+        ):
+            return None
+        regular_turns: list[dict[str, Any]] = []
+        exclusive_turns: list[dict[str, Any]] = []
+        for raw_turns, destination in (
+            (full_regular_snapshot, regular_turns),
+            (full_exclusive_snapshot, exclusive_turns),
+        ):
+            for raw in raw_turns:
+                start_ms = raw.get("startMs")
+                end_ms = raw.get("endMs")
+                local_speaker = raw.get("localSpeaker")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or not isinstance(local_speaker, str)
+                    or local_speaker not in mapping_snapshot
+                    or start_ms < 0
+                    or end_ms <= start_ms
+                    or end_ms > duration_ms
+                ):
+                    raise WorkerError(
+                        "SPEAKER_TIMELINE_INVALID",
+                        "pyannote full timeline contains a malformed turn",
+                    )
+                destination.append(
+                    {
+                        "startMs": start_ms,
+                        "endMs": end_ms,
+                        "speakerId": mapping_snapshot[local_speaker],
+                        "localSpeaker": local_speaker,
+                    }
+                )
+        return build_speaker_timeline(
+            provider_version=provider_version,
+            local_to_canonical=mapping_snapshot,
+            mapping_margin=mapping_margin,
+            regular_turns=regular_turns,
+            exclusive_turns=exclusive_turns,
+            duration_ms=duration_ms,
+            canonical_speaker_ids=canonical_ids,
+        )
 
     def _select_candidates(
         self,
@@ -7563,9 +7867,17 @@ class SpeakerPipeline:
             stage="post-review",
             expected_ids=baseline_speaker_ids,
         )
+        speaker_timeline = self._build_pyannote_speaker_timeline(
+            segments,
+            duration_ms=prepared.duration_ms,
+        )
         if prepared.reference_turns:
             metrics.set_reference_quality(
-                evaluate_reference_quality(segments, prepared.reference_turns)
+                evaluate_reference_quality(
+                    segments,
+                    prepared.reference_turns,
+                    speaker_timeline=speaker_timeline,
+                )
             )
 
         estimate = SpeakerCountEstimate(
@@ -7655,6 +7967,7 @@ class SpeakerPipeline:
             speaker_count_estimate=estimate,
             models=tuple(models),
             pipeline_metrics=metrics.as_dict(),
+            speaker_timeline=speaker_timeline,
             voice_activity=with_voice_activity_classification(
                 voice_activity,
                 classification="transcribable-speech-detected",

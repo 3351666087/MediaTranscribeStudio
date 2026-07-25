@@ -20,6 +20,44 @@ def _finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _validated_turn_durations(
+    raw_turns: Any,
+    mapping: Mapping[str, Any],
+    *,
+    exclusive: bool,
+) -> dict[str, int] | None:
+    if not isinstance(raw_turns, Sequence) or isinstance(
+        raw_turns,
+        (str, bytes, bytearray),
+    ):
+        return None
+    durations: dict[str, int] = {}
+    previous_end = -1
+    for turn in raw_turns:
+        if not isinstance(turn, Mapping):
+            return None
+        local_speaker = turn.get("localSpeaker")
+        start_ms = turn.get("startMs")
+        end_ms = turn.get("endMs")
+        if (
+            not isinstance(local_speaker, str)
+            or local_speaker not in mapping
+            or turn.get("speakerId") != mapping[local_speaker]
+            or isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or end_ms <= start_ms
+            or (exclusive and start_ms < previous_end)
+        ):
+            return None
+        previous_end = max(previous_end, end_ms)
+        durations[local_speaker] = (
+            durations.get(local_speaker, 0) + end_ms - start_ms
+        )
+    return durations
+
+
 def is_verified_pyannote_speaker_revision(
     revision: Any,
     evidence: Mapping[str, Any],
@@ -66,6 +104,11 @@ def is_verified_pyannote_speaker_revision(
     dominance = proof.get("dominance")
     dominance_threshold = proof.get("primaryDominanceThreshold")
     local_durations = proof.get("localDurationsMs")
+    exclusive_local_durations = proof.get("exclusiveLocalDurationsMs")
+    dominance_source = proof.get(
+        "dominanceSource",
+        "regular-speaker-diarization",
+    )
     dominant = proof.get("dominantLocalSpeaker")
     if (
         not isinstance(provider, Mapping)
@@ -95,6 +138,19 @@ def is_verified_pyannote_speaker_revision(
         or not isinstance(local_durations, Mapping)
         or set(local_durations) - set(mapping)
         or dominant not in local_durations
+        or dominance_source
+        not in {
+            "regular-speaker-diarization",
+            "native-exclusive-speaker-diarization",
+        }
+        or (
+            dominance_source == "native-exclusive-speaker-diarization"
+            and (
+                not isinstance(exclusive_local_durations, Mapping)
+                or set(exclusive_local_durations) - set(mapping)
+                or dominant not in exclusive_local_durations
+            )
+        )
     ):
         return False
 
@@ -164,17 +220,34 @@ def is_verified_pyannote_speaker_revision(
         ):
             return False
         normalized_durations[local_speaker] = raw_duration
-    tracked_segment_ms = sum(normalized_durations.values())
+    normalized_attribution_durations = normalized_durations
+    if dominance_source == "native-exclusive-speaker-diarization":
+        assert isinstance(exclusive_local_durations, Mapping)
+        normalized_exclusive_durations: dict[str, int] = {}
+        for local_speaker, raw_duration in exclusive_local_durations.items():
+            if (
+                not isinstance(local_speaker, str)
+                or isinstance(raw_duration, bool)
+                or not isinstance(raw_duration, int)
+                or raw_duration <= 0
+            ):
+                return False
+            normalized_exclusive_durations[local_speaker] = raw_duration
+        normalized_attribution_durations = normalized_exclusive_durations
+    tracked_segment_ms = sum(normalized_attribution_durations.values())
     expected_dominant = sorted(
-        normalized_durations,
-        key=lambda speaker: (-normalized_durations[speaker], speaker),
+        normalized_attribution_durations,
+        key=lambda speaker: (
+            -normalized_attribution_durations[speaker],
+            speaker,
+        ),
     )[0]
     if (
         tracked_segment_ms > total_track_ms
         or dominant != expected_dominant
         or not math.isclose(
             normalized_dominance,
-            normalized_durations[dominant] / tracked_segment_ms,
+            normalized_attribution_durations[dominant] / tracked_segment_ms,
             abs_tol=1e-9,
         )
     ):
@@ -186,36 +259,27 @@ def is_verified_pyannote_speaker_revision(
         if isinstance(overlap, Mapping)
         else None
     )
-    if not isinstance(canonical_turns, Sequence) or isinstance(
+    turn_durations = _validated_turn_durations(
         canonical_turns,
-        (str, bytes, bytearray),
-    ):
-        return False
-    turn_durations: dict[str, int] = {}
-    for turn in canonical_turns:
-        if not isinstance(turn, Mapping):
-            return False
-        local_speaker = turn.get("localSpeaker")
-        start_ms = turn.get("startMs")
-        end_ms = turn.get("endMs")
-        if (
-            not isinstance(local_speaker, str)
-            or local_speaker not in mapping
-            or turn.get("speakerId") != mapping[local_speaker]
-            or isinstance(start_ms, bool)
-            or not isinstance(start_ms, int)
-            or isinstance(end_ms, bool)
-            or not isinstance(end_ms, int)
-            or end_ms <= start_ms
-        ):
-            return False
-        turn_durations[local_speaker] = (
-            turn_durations.get(local_speaker, 0) + end_ms - start_ms
-        )
-    return (
-        turn_durations == normalized_durations
-        and turn_durations.get(dominant, 0) > 0
+        mapping,
+        exclusive=False,
     )
+    if turn_durations != normalized_durations:
+        return False
+    if dominance_source == "native-exclusive-speaker-diarization":
+        canonical_exclusive_turns = (
+            overlap.get("canonicalExclusiveSpeakerTurns")
+            if isinstance(overlap, Mapping)
+            else None
+        )
+        exclusive_turn_durations = _validated_turn_durations(
+            canonical_exclusive_turns,
+            mapping,
+            exclusive=True,
+        )
+        if exclusive_turn_durations != normalized_attribution_durations:
+            return False
+    return normalized_attribution_durations.get(dominant, 0) > 0
 
 
 __all__ = ["is_verified_pyannote_speaker_revision"]

@@ -154,7 +154,7 @@
 - [x] 发布 manifest 绑定 recipe、customization、完整 execution plan、源媒体和每个客户产物哈希。
 - [x] rerender 复用通过验证的字幕/视频产物；任何篡改都必须 fail closed。
 - [x] 通过字幕、输出编排、代表帧 QA、输出发布和 WorkerService 全套测试。
-- [ ] 用真实视频分别验收 sidecar、soft-mux 和 burn-in 的同步、字体、颜色、清晰度和兼容性。
+- [x] 用真实视频分别验收 sidecar、soft-mux 和 burn-in 的同步、字体、颜色、清晰度和兼容性：选择用户 MOV 的全时段分层中段窗口 `1341.5–1401.5 秒`，不再使用前 60 秒；生产事务原子发布 SRT/WebVTT/ASS、`h264+aac+mov_text` soft-mux MP4 和 `h264+aac` burn-in MP4，三者时长均为 `60.000 秒`。soft-mux 解封装为 `7/7` cue 且保留说话人标签，burn-in 与同一 ASS carrier 在 5 个代表 cue 中点的像素遮罩一致，字体使用本机 `PingFang SC`/`Arial Unicode MS`，5 份客户产物大小和 SHA-256 全部复算匹配、源视频不变、隔离文件为 0。默认 Homebrew FFmpeg 缺少 libass 的首轮失败正确回滚；已安装并固定 keg-only `ffmpeg-full 8.1.2_1` 的绝对路径，两份本地生产配置固定到该工具链后，普通与 Pyannote 配置的严格 preflight 分别为 `19/19`、`22/22` 通过。可重复工具和证据分别位于 `tools/run_real_video_delivery_acceptance.py` 与 `.runtime_cache/outputs/long-media-20260724/video-delivery-w02-v1/production-transaction-v4/`。该窗口仍有 14 个 open review items 且无人数字幕真值，因此这里只勾选交付技术与视觉兼容性，不代表语言、说话人、文本或发布质量通过。
 
 ### 7.4 报告、字体和 DIY
 

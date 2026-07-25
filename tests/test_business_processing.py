@@ -4,6 +4,7 @@ import ast
 import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -707,6 +708,135 @@ def test_summary_requires_valid_evidence_references(tmp_path: Path) -> None:
     assert error.value.code == "BUSINESS_OUTPUT_INVALID"
 
 
+def test_summary_retries_when_prose_does_not_match_requested_script(
+    tmp_path: Path,
+) -> None:
+    invalid = {
+        "executiveSummary": "Ang buod ay nasa maling wika.",
+        "keyPoints": [_summary_item("Maling wika.", "segment-1", 0, 1200)],
+        "topics": [],
+        "actionItems": [],
+    }
+    valid = {
+        "executiveSummary": "会议摘要使用请求的中文输出。",
+        "keyPoints": [_summary_item("确认发布计划。", "segment-1", 0, 1200)],
+        "topics": [],
+        "actionItems": [],
+    }
+
+    class RetryingProvider(MappingLocalLLMProvider):
+        business_generation_attempts = 2
+
+        def __init__(self) -> None:
+            super().__init__([invalid, valid])
+            self.prompts: list[str] = []
+
+        def generate_json(self, **kwargs: object) -> Mapping[str, object]:
+            self.prompts.append(str(kwargs["user_prompt"]))
+            return super().generate_json(**kwargs)
+
+    provider = RetryingProvider()
+    BusinessProcessingRunner(provider=provider).run(
+        _document(),
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(summary=True, output_locale="zh-CN"),
+    )
+
+    output = _read_json(tmp_path / "business" / "summary.v1.json")
+    assert output["executiveSummary"] == "会议摘要使用请求的中文输出。"
+    assert "retryCorrection=" not in provider.prompts[0]
+    assert "retryAttempt=2" in provider.prompts[1]
+
+
+def test_translation_rejects_short_untranslated_source_copy(tmp_path: Path) -> None:
+    source = "kasi"
+    copied = {
+        "id": "segment-1",
+        "speakerId": "speaker-1",
+        "startMs": 0,
+        "endMs": 1200,
+        "sourceTextHash": _source_hash(source),
+        "text": source,
+        "language": "zh-CN",
+    }
+
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(
+            provider=MappingLocalLLMProvider([copied])
+        ).run(
+            _single_segment_document(source, language="tl"),
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_OUTPUT_INVALID"
+    assert not (tmp_path / "business" / "translation-zh-CN.v1.json").exists()
+
+
+def test_translation_retry_adds_fixed_validation_feedback(tmp_path: Path) -> None:
+    source = "kasi"
+    prompts: list[str] = []
+
+    class RetryingProvider:
+        provider_id = "retrying-fixture"
+        provider_version = "1"
+        network_policy = "loopback-only"
+        business_batch_size = 1
+        business_translation_segment_attempts = 2
+
+        def generate_json(self, **kwargs: object) -> dict[str, object]:
+            prompt = str(kwargs["user_prompt"])
+            prompts.append(prompt)
+            return {
+                "id": "segment-1",
+                "speakerId": "speaker-1",
+                "startMs": 0,
+                "endMs": 1200,
+                "sourceTextHash": _source_hash(source),
+                "text": "因为" if "retryCorrection=" in prompt else source,
+                "language": "zh-CN",
+            }
+
+    BusinessProcessingRunner(provider=RetryingProvider()).run(
+        _single_segment_document(source, language="tl"),
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+    )
+
+    assert len(prompts) == 2
+    assert "retryCorrection=" not in prompts[0]
+    assert "retryAttempt=2" in prompts[1]
+    output = _read_json(tmp_path / "business" / "translation-zh-CN.v1.json")
+    assert output["segments"][0]["text"] == "因为"
+
+
+def test_translation_rejects_punctuation_only_output_for_lexical_source(
+    tmp_path: Path,
+) -> None:
+    source = "na"
+    punctuation_only = {
+        "id": "segment-1",
+        "speakerId": "speaker-1",
+        "startMs": 0,
+        "endMs": 1200,
+        "sourceTextHash": _source_hash(source),
+        "text": "。",
+        "language": "zh-CN",
+    }
+
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(
+            provider=MappingLocalLLMProvider([punctuation_only])
+        ).run(
+            _single_segment_document(source, language="tl"),
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+        )
+
+    assert error.value.code == "BUSINESS_OUTPUT_INVALID"
+    assert not (tmp_path / "business" / "translation-zh-CN.v1.json").exists()
+
+
 def test_summary_derives_multi_segment_time_range_and_discards_model_range(
     tmp_path: Path,
 ) -> None:
@@ -770,9 +900,9 @@ def test_prompt_registry_drives_executed_prompt_and_provenance(
     output = _read_json(tmp_path / "business" / "summary.v1.json")
     assert output["promptVersion"] == BUSINESS_PROMPT_VERSION
     assert "Do not return or infer timeRange" in str(captured["user_prompt"])
-    assert captured["system_prompt"] == (
-        "You are an offline evidence-grounded meeting summarizer. "
-        "Output strict JSON only."
+    assert "requested outputLanguage" in str(captured["system_prompt"])
+    assert "language label never substitutes" in str(
+        captured["system_prompt"]
     )
 
 

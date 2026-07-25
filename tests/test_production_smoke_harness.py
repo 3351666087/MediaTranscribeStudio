@@ -300,7 +300,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(args.business_prompt_version, "business-v2")
+        self.assertEqual(args.business_prompt_version, "business-v3")
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -497,7 +497,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
         )
         self.assertEqual(auto["localLlmEndpointPolicy"], "loopback-only")
         self.assertEqual(auto["outputLocale"], "en")
-        self.assertEqual(auto["businessPromptVersion"], "business-v2")
+        self.assertEqual(auto["businessPromptVersion"], "business-v3")
 
     def test_builds_business_local_llm_acceptance_payload(self) -> None:
         payload = build_start_payload(

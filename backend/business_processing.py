@@ -42,8 +42,8 @@ from .persistence import (
 )
 
 BUSINESS_SCHEMA_VERSION = "1.1.0"
-BUSINESS_PROMPT_VERSION = "business-v2"
-_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v5"
+BUSINESS_PROMPT_VERSION = "business-v3"
+_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v7"
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _SPEAKER_ID_PATTERN = re.compile(r"^speaker-[1-9][0-9]*$")
 _TRANSLATION_PROGRESS_KIND = "translation-segment-progress"
@@ -417,8 +417,8 @@ class _BusinessPromptSet:
 
 
 _PROMPT_REGISTRY: dict[str, _BusinessPromptSet] = {
-    BUSINESS_PROMPT_VERSION: _BusinessPromptSet(
-        version=BUSINESS_PROMPT_VERSION,
+    "business-v2": _BusinessPromptSet(
+        version="business-v2",
         translation_system=(
             "You are an offline translation engine. Translate every requested "
             "source-language segment completely into the target language and output "
@@ -434,7 +434,28 @@ _PROMPT_REGISTRY: dict[str, _BusinessPromptSet] = {
             "You are an offline evidence-grounded meeting summarizer. "
             "Output strict JSON only."
         ),
-    )
+    ),
+    BUSINESS_PROMPT_VERSION: _BusinessPromptSet(
+        version=BUSINESS_PROMPT_VERSION,
+        translation_system=(
+            "You are an offline translation engine. Translate every requested "
+            "source-language segment completely into the target language and output "
+            "strict JSON only. Never copy ordinary source-language words while merely "
+            "changing the language label; preserve only genuine proper nouns and "
+            "protected literals when translation conventions require it."
+        ),
+        polish_system=(
+            "You are an offline, conservative transcript-polish suggestion engine. "
+            "Meaning preservation outranks stylistic improvement. Output strict JSON "
+            "only."
+        ),
+        summary_system=(
+            "You are an offline evidence-grounded meeting summarizer. Write every "
+            "prose field in the requested outputLanguage, regardless of the source "
+            "language. A language label never substitutes for actual output in that "
+            "language. Output strict JSON only."
+        ),
+    ),
 }
 
 
@@ -1275,10 +1296,19 @@ def _translation_text_remains_source_language(
     source_profile = _script_profile(source_text)
     translated_profile = _script_profile(translated_text)
     source_letters = sum(source_profile.values())
-    if (
-        source_letters >= 6
-        and _normalized_translation_text(source_text)
+    translated_letters = sum(translated_profile.values())
+    if source_letters >= 1 and translated_letters == 0:
+        return True
+    exact_source_copy = (
+        _normalized_translation_text(source_text)
         == _normalized_translation_text(translated_text)
+    )
+    if exact_source_copy and source_letters >= 6:
+        return True
+    if (
+        exact_source_copy
+        and source_letters >= 3
+        and not _semantic_literal_inventory(source_text)
     ):
         return True
 
@@ -2289,12 +2319,31 @@ def _single_translation_result(
     item: Mapping[str, Any],
     target: str,
     model: str,
+    attempt_number: int,
+    previous_error: WorkerError | None,
     cancellation_check: Callable[[], None] | None,
 ) -> dict[str, Any]:
+    user_prompt = prompt_set.translation_user(item=item, target=target)
+    if previous_error is not None:
+        correction = (
+            "Previous output failed target-language validation. Return the actual "
+            "translated meaning, not the sourceText with a new language label. "
+            "Ordinary vocabulary must use the target-language script."
+        )
+        if attempt_number >= 3:
+            correction += (
+                " If sourceText is a short ordinary word, translate its concise "
+                "dictionary meaning instead of copying or transliterating it."
+            )
+        user_prompt = user_prompt.replace(
+            "\nsegment=",
+            f"\nretryAttempt={attempt_number}\nretryCorrection={correction}\nsegment=",
+            1,
+        )
     result = _provider_call(
         provider,
         system_prompt=prompt_set.translation_system,
-        user_prompt=prompt_set.translation_user(item=item, target=target),
+        user_prompt=user_prompt,
         model=model,
         response_schema=_TRANSFORMED_SEGMENT_SCHEMA,
         cancellation_check=cancellation_check,
@@ -2514,6 +2563,8 @@ def _translation(
                         item=item,
                         target=target,
                         model=config.model,
+                        attempt_number=run_attempts[segment_id],
+                        previous_error=last_errors.get(segment_id),
                         cancellation_check=cancellation_check,
                     )
                 except WorkerError as exc:
@@ -2816,6 +2867,7 @@ def _normalize_summary_result(
     result: Mapping[str, Any],
     *,
     segments: Sequence[Mapping[str, Any]],
+    output_language: str,
     label: str,
 ) -> dict[str, Any]:
     normalized_result = dict(result)
@@ -2895,6 +2947,35 @@ def _normalize_summary_result(
             }
             normalized_items.append(normalized_item)
         normalized_result[field] = normalized_items
+    summary_text = "\n".join(
+        [
+            normalized_result["executiveSummary"],
+            *(
+                str(item["text"])
+                for field in ("keyPoints", "topics", "actionItems")
+                for item in normalized_result[field]
+            ),
+        ]
+    )
+    profile = _script_profile(summary_text)
+    total_letters = sum(profile.values())
+    expected_script_score = _expected_script_score(profile, output_language)
+    if (
+        expected_script_score is not None
+        and total_letters >= 6
+        and expected_script_score < max(2, total_letters // 5)
+    ):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} prose does not match the requested output-language script",
+            details={
+                "guard": "target-script",
+                "targetLanguage": output_language,
+                "expectedScriptLetters": expected_script_score,
+                "totalLetters": total_letters,
+            },
+            retryable=True,
+        )
     return normalized_result
 
 
@@ -2939,6 +3020,65 @@ def _summary_evidence_ids(
     return evidence
 
 
+def _summary_provider_attempts(
+    *,
+    provider: LocalLLMProvider,
+    prompt_set: _BusinessPromptSet,
+    prompt: str,
+    model: str,
+    output_language: str,
+    segments: Sequence[Mapping[str, Any]],
+    label: str,
+    cancellation_check: Callable[[], None] | None,
+) -> dict[str, Any]:
+    """Retry summaries with fixed validation feedback, never model output."""
+
+    state: dict[str, Any] = {"attempt": 0, "previousError": None}
+
+    def execute() -> dict[str, Any]:
+        state["attempt"] += 1
+        user_prompt = prompt
+        previous_error = state["previousError"]
+        if isinstance(previous_error, WorkerError):
+            correction = (
+                "Previous output failed trusted validation. Rewrite every prose field "
+                f"in {output_language}; do not preserve source-language prose except "
+                "genuine proper nouns. Keep all evidence IDs inside the supplied "
+                "source set and return the exact requested JSON shape."
+            )
+            user_prompt += (
+                f"\nretryAttempt={state['attempt']}"
+                f"\nretryCorrection={correction}"
+            )
+        return _provider_call(
+            provider,
+            system_prompt=prompt_set.summary_system,
+            user_prompt=user_prompt,
+            model=model,
+            response_schema=_SUMMARY_RESPONSE_SCHEMA,
+            cancellation_check=cancellation_check,
+        )
+
+    def validate(result: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _normalize_summary_result(
+                result,
+                segments=segments,
+                output_language=output_language,
+                label=label,
+            )
+        except WorkerError as exc:
+            state["previousError"] = exc
+            raise
+
+    return _validated_provider_attempts(
+        provider,
+        operation=label,
+        execute=execute,
+        validate=validate,
+    )
+
+
 def _summary(
     *,
     document: Mapping[str, Any],
@@ -2975,22 +3115,15 @@ def _summary(
             output_language=config.output_locale,
             segments=segments,
         )
-        result = _validated_provider_attempts(
-            provider,
-            operation="summary",
-            execute=lambda: _provider_call(
-                provider,
-                system_prompt=prompt_set.summary_system,
-                user_prompt=prompt,
-                model=config.model,
-                response_schema=_SUMMARY_RESPONSE_SCHEMA,
-                cancellation_check=cancellation_check,
-            ),
-            validate=lambda raw_result: _normalize_summary_result(
-                raw_result,
-                segments=segments,
-                label="summary",
-            ),
+        result = _summary_provider_attempts(
+            provider=provider,
+            prompt_set=prompt_set,
+            prompt=prompt,
+            model=config.model,
+            output_language=config.output_locale,
+            segments=segments,
+            label="summary",
+            cancellation_check=cancellation_check,
         )
     else:
         partials: list[dict[str, Any]] = []
@@ -3008,24 +3141,15 @@ def _summary(
             )
             partials.append(
                 _summary_reduction_projection(
-                    _validated_provider_attempts(
-                        provider,
-                        operation=f"summary chunk {index + 1}",
-                        execute=lambda prompt=prompt: _provider_call(
-                            provider,
-                            system_prompt=prompt_set.summary_system,
-                            user_prompt=prompt,
-                            model=config.model,
-                            response_schema=_SUMMARY_RESPONSE_SCHEMA,
-                            cancellation_check=cancellation_check,
-                        ),
-                        validate=lambda partial, chunk=chunk, index=index: (
-                            _normalize_summary_result(
-                                partial,
-                                segments=chunk,
-                                label=f"summary chunk {index + 1}",
-                            )
-                        ),
+                    _summary_provider_attempts(
+                        provider=provider,
+                        prompt_set=prompt_set,
+                        prompt=prompt,
+                        model=config.model,
+                        output_language=config.output_locale,
+                        segments=chunk,
+                        label=f"summary chunk {index + 1}",
+                        cancellation_check=cancellation_check,
                     )
                 )
             )
@@ -3063,25 +3187,16 @@ def _summary(
                 )
                 reduced.append(
                     _summary_reduction_projection(
-                        _validated_provider_attempts(
-                            provider,
-                            operation="summary reduction",
-                            execute=lambda prompt=prompt: _provider_call(
-                                provider,
-                                system_prompt=prompt_set.summary_system,
-                                user_prompt=prompt,
+                            _summary_provider_attempts(
+                                provider=provider,
+                                prompt_set=prompt_set,
+                                prompt=prompt,
                                 model=config.model,
-                                response_schema=_SUMMARY_RESPONSE_SCHEMA,
+                                output_language=config.output_locale,
+                                segments=evidence_scope,
+                                label="summary reduction",
                                 cancellation_check=cancellation_check,
-                            ),
-                            validate=lambda merged, evidence_scope=evidence_scope: (
-                                _normalize_summary_result(
-                                    merged,
-                                    segments=evidence_scope,
-                                    label="summary reduction",
-                                )
-                            ),
-                        )
+                            )
                     )
                 )
             partials = reduced
@@ -3103,6 +3218,7 @@ def _summary(
         result = _normalize_summary_result(
             partials[0],
             segments=segments,
+            output_language=config.output_locale,
             label="summary",
         )
     return {

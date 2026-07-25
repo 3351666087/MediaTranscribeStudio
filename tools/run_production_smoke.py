@@ -163,7 +163,7 @@ def build_start_payload(
     polish: bool = False,
     summary: bool = False,
     output_locale: str = "en",
-    business_prompt_version: str = "business-v2",
+    business_prompt_version: str = "business-v3",
 ) -> dict[str, Any]:
     """Build a worker payload while enforcing mode-specific cardinality fields."""
 
@@ -1351,7 +1351,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-locale", default="en")
     parser.add_argument(
         "--business-prompt-version",
-        default="business-v2",
+        default="business-v3",
     )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--timeout-seconds", type=float, default=7200.0)

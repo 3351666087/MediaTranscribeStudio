@@ -178,6 +178,92 @@ def test_summarizes_content_free_audit_and_separate_gates(
     assert "displayText" not in serialized
 
 
+def test_summarizes_long_media_source_terminal_without_overclaiming(
+    tmp_path: Path,
+) -> None:
+    manifest, results, outputs = _fixture(tmp_path)
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["selectionPolicy"] = {
+        "requiredStrata": [
+            "stratum-start",
+            "stratum-middle",
+            "stratum-end",
+            "seeded-active-random",
+            "acoustic-change",
+        ],
+        "modelScoresUsed": False,
+    }
+    manifest_value["sources"] = [
+        {
+            "id": "source-a",
+            "sha256": "b" * 64,
+            "durationMs": 14_000,
+            "windowCount": 1,
+            "windowCoverageRatio": 13 / 14,
+            "analysis": {
+                "algorithm": "fixture-full-timeline",
+                "frameCount": 14,
+                "frameDurationMs": 1000,
+                "activeFrameRatio": 0.75,
+                "activityThresholdDb": -30.0,
+                "rmsDbPercentiles": {
+                    "p05": -42.0,
+                    "p50": -20.0,
+                    "p95": -12.0,
+                },
+            },
+        }
+    ]
+    _write(manifest, manifest_value)
+
+    summary = summarize_run(
+        manifest_path=manifest,
+        results_root=results,
+        outputs_root=outputs,
+    )
+
+    assert summary["schemaVersion"] == "1.1.0"
+    source = summary["sourceSummaries"][0]
+    assert source["sourceSha256"] == "b" * 64
+    assert source["fullTimelineAcousticScan"] == {
+        "available": True,
+        "algorithm": "fixture-full-timeline",
+        "frameCount": 14,
+        "frameDurationMs": 1000,
+        "analyzedDurationMs": 14_000,
+        "coverageRatio": 1.0,
+        "activeFrameRatio": 0.75,
+        "activityThresholdDb": -30.0,
+        "rmsDbPercentiles": {
+            "p05": -42.0,
+            "p50": -20.0,
+            "p95": -12.0,
+        },
+        "isSpeechClassification": False,
+    }
+    assert source["stratifiedWindows"]["requiredStrataCovered"] == {
+        "stratum-start": False,
+        "stratum-middle": True,
+        "stratum-end": False,
+        "seeded-active-random": False,
+        "acoustic-change": False,
+    }
+    assert source["speakerCountStability"]["distribution"] == {"2": 1}
+    assert source["terminal"] == {
+        "windowTechnicalExecutionPassed": True,
+        "fullTimelineAcousticScanPassed": True,
+        "requiredStrataCovered": False,
+        "windowSetComplete": True,
+        "completeSourceProductionRunObserved": False,
+        "speakerCountStableAcrossWindows": True,
+        "referenceQualityScored": False,
+        "manualFiveQualityEligible": False,
+        "releaseApproved": False,
+        "qualityConclusion": "not_scored_missing_reference_truth",
+        "disposition": "review.required",
+    }
+
+
 def test_rejects_language_window_over_configured_limit(
     tmp_path: Path,
 ) -> None:

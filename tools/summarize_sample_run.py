@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -475,6 +476,290 @@ def _case_summary(
     }
 
 
+def _required_stratum_is_covered(
+    required: str,
+    observed_reasons: set[str],
+) -> bool:
+    return any(
+        reason == required or reason.startswith(f"{required}-")
+        for reason in observed_reasons
+    )
+
+
+def _source_summaries(
+    manifest: Mapping[str, Any],
+    *,
+    cases: Sequence[Mapping[str, Any]],
+    summaries: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    raw_sources = manifest.get("sources", [])
+    sources = _list(raw_sources, field="manifest.sources")
+    source_records: dict[str, Mapping[str, Any]] = {}
+    for index, raw_source in enumerate(sources):
+        source = _mapping(raw_source, field=f"manifest.sources[{index}]")
+        source_id = source.get("id")
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError(f"manifest.sources[{index}].id must be non-empty")
+        if source_id in source_records:
+            raise ValueError(f"duplicate manifest source id: {source_id}")
+        source_records[source_id] = source
+
+    case_records: dict[str, Mapping[str, Any]] = {}
+    for case in cases:
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError("manifest case id must be a non-empty string")
+        case_records[case_id] = case
+
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for summary in summaries:
+        source_id = summary.get("sourceId")
+        if not isinstance(source_id, str) or not source_id:
+            continue
+        grouped.setdefault(source_id, []).append(summary)
+
+    selection_policy = manifest.get("selectionPolicy", {})
+    if not isinstance(selection_policy, Mapping):
+        raise ValueError("manifest.selectionPolicy must be an object")
+    required_strata = selection_policy.get("requiredStrata", [])
+    if not isinstance(required_strata, list) or any(
+        not isinstance(value, str) or not value for value in required_strata
+    ):
+        raise ValueError("manifest.selectionPolicy.requiredStrata must be text")
+
+    results: list[dict[str, Any]] = []
+    for source_id in sorted(grouped):
+        rows = grouped[source_id]
+        source = source_records.get(source_id, {})
+        raw_analysis = source.get("analysis")
+        analysis = (
+            _mapping(raw_analysis, field=f"manifest.sources[{source_id}].analysis")
+            if raw_analysis is not None
+            else None
+        )
+        duration_ms = source.get("durationMs")
+        frame_count = analysis.get("frameCount") if analysis is not None else None
+        frame_duration_ms = (
+            analysis.get("frameDurationMs") if analysis is not None else None
+        )
+        analyzed_duration_ms: int | None = None
+        acoustic_coverage_ratio: float | None = None
+        if analysis is not None:
+            frame_count = _positive_int(
+                frame_count,
+                field=f"manifest.sources[{source_id}].analysis.frameCount",
+            )
+            frame_duration_ms = _positive_int(
+                frame_duration_ms,
+                field=f"manifest.sources[{source_id}].analysis.frameDurationMs",
+            )
+            duration_ms = _positive_int(
+                duration_ms,
+                field=f"manifest.sources[{source_id}].durationMs",
+            )
+            analyzed_duration_ms = min(duration_ms, frame_count * frame_duration_ms)
+            acoustic_coverage_ratio = round(analyzed_duration_ms / duration_ms, 9)
+
+        observed_reasons = {
+            str(row["windowSelection"]["reason"])
+            for row in rows
+            if row["windowSelection"].get("reason")
+        }
+        strata_coverage = {
+            stratum: _required_stratum_is_covered(stratum, observed_reasons)
+            for stratum in required_strata
+        }
+        speaker_counts = [
+            int(row["transcription"]["speakerCount"])
+            for row in rows
+            if row.get("transcription") is not None
+        ]
+        speaker_distribution = Counter(str(value) for value in speaker_counts)
+        modal_frequency = max(speaker_distribution.values(), default=0)
+        modal_counts = sorted(
+            int(value)
+            for value, frequency in speaker_distribution.items()
+            if frequency == modal_frequency
+        )
+        segment_counts = [
+            int(row["transcription"]["segmentCount"])
+            for row in rows
+            if row.get("transcription") is not None
+        ]
+        split_counts = [
+            int(row["transcription"]["appliedSplitCount"])
+            for row in rows
+            if row.get("transcription") is not None
+        ]
+        review_counts = [int(row["review"]["openCount"]) for row in rows]
+        metrics = [row["metrics"] for row in rows if row.get("metrics") is not None]
+        rtfs = [float(value["pipelineRtf"]) for value in metrics]
+        peak_ram = [
+            float(value["peakRamMb"])
+            for value in metrics
+            if value.get("peakRamMb") is not None
+        ]
+        peak_vram = [
+            float(value["peakVramMb"])
+            for value in metrics
+            if value.get("peakVramMb") is not None
+        ]
+        truth_counts: Counter[str] = Counter()
+        for row in rows:
+            for metric, eligible in row["truthEligibility"].items():
+                if eligible is True:
+                    truth_counts[metric] += 1
+        manual_five_eligible_cases = 0
+        for row in rows:
+            case = case_records[str(row["caseId"])]
+            selection = case.get("windowSelection", case.get("selection", {}))
+            speaker_set = (
+                selection.get("speakerSet")
+                if isinstance(selection, Mapping)
+                else None
+            )
+            if (
+                row["truthEligibility"].get("speakerCount") is True
+                and isinstance(speaker_set, list)
+                and all(
+                    isinstance(speaker_id, str) and speaker_id
+                    for speaker_id in speaker_set
+                )
+                and len(set(speaker_set)) == 5
+            ):
+                manual_five_eligible_cases += 1
+
+        expected_window_count = source.get("windowCount")
+        window_set_complete = (
+            isinstance(expected_window_count, int)
+            and not isinstance(expected_window_count, bool)
+            and expected_window_count == len(rows)
+        )
+        speaker_count_stable = bool(speaker_counts) and len(set(speaker_counts)) == 1
+
+        all_technical = all(
+            row["runner"]["status"] == "observed"
+            and row["runner"]["exitCode"] == 0
+            and row["runner"]["shutdownAcknowledged"] is True
+            and row["runner"]["forcedCleanupProcessCount"] == 0
+            for row in rows
+        )
+        all_review_required = all(
+            row["runner"]["terminalType"] == "review.required" for row in rows
+        )
+        reference_scored = any(
+            row.get("metrics") is not None
+            and row["metrics"]["referenceEvaluationAvailable"]
+            for row in rows
+        )
+        source_sha = source.get("sha256")
+        results.append(
+            {
+                "sourceId": source_id,
+                "sourceSha256": (
+                    source_sha if isinstance(source_sha, str) else None
+                ),
+                "durationMs": duration_ms,
+                "fullTimelineAcousticScan": {
+                    "available": analysis is not None,
+                    "algorithm": analysis.get("algorithm") if analysis else None,
+                    "frameCount": frame_count,
+                    "frameDurationMs": frame_duration_ms,
+                    "analyzedDurationMs": analyzed_duration_ms,
+                    "coverageRatio": acoustic_coverage_ratio,
+                    "activeFrameRatio": (
+                        analysis.get("activeFrameRatio") if analysis else None
+                    ),
+                    "activityThresholdDb": (
+                        analysis.get("activityThresholdDb") if analysis else None
+                    ),
+                    "rmsDbPercentiles": (
+                        analysis.get("rmsDbPercentiles") if analysis else None
+                    ),
+                    "isSpeechClassification": False,
+                },
+                "stratifiedWindows": {
+                    "expectedCount": expected_window_count,
+                    "observedCount": len(rows),
+                    "windowSetComplete": window_set_complete,
+                    "coverageRatio": source.get("windowCoverageRatio"),
+                    "observedReasons": sorted(observed_reasons),
+                    "requiredStrataCovered": strata_coverage,
+                    "selectionUsesModelScores": selection_policy.get(
+                        "modelScoresUsed"
+                    ),
+                },
+                "speakerCountStability": {
+                    "observedWindowCount": len(speaker_counts),
+                    "distribution": dict(
+                        sorted(
+                            speaker_distribution.items(),
+                            key=lambda item: int(item[0]),
+                        )
+                    ),
+                    "minimum": min(speaker_counts) if speaker_counts else None,
+                    "maximum": max(speaker_counts) if speaker_counts else None,
+                    "modalCounts": modal_counts,
+                    "modalAgreementRate": (
+                        round(modal_frequency / len(speaker_counts), 9)
+                        if speaker_counts
+                        else None
+                    ),
+                    "stableAcrossWindows": speaker_count_stable,
+                },
+                "turnGranularity": {
+                    "segmentCountTotal": sum(segment_counts),
+                    "segmentCountMin": min(segment_counts) if segment_counts else None,
+                    "segmentCountMax": max(segment_counts) if segment_counts else None,
+                    "appliedSplitCountTotal": sum(split_counts),
+                },
+                "review": {
+                    "openCountTotal": sum(review_counts),
+                    "openCountMin": min(review_counts),
+                    "openCountMax": max(review_counts),
+                    "allWindowsRequireReview": all_review_required,
+                },
+                "performance": {
+                    "pipelineRtfMin": min(rtfs) if rtfs else None,
+                    "pipelineRtfMedian": (
+                        round(statistics.median(rtfs), 9) if rtfs else None
+                    ),
+                    "pipelineRtfMax": max(rtfs) if rtfs else None,
+                    "peakRamMbMax": max(peak_ram) if peak_ram else None,
+                    "peakVramMbMax": max(peak_vram) if peak_vram else None,
+                },
+                "truthEligibility": {
+                    "eligibleWindowCounts": dict(sorted(truth_counts.items())),
+                    "referenceQualityScored": reference_scored,
+                    "manualFiveEligibleWindowCount": manual_five_eligible_cases,
+                },
+                "terminal": {
+                    "windowTechnicalExecutionPassed": all_technical,
+                    "fullTimelineAcousticScanPassed": (
+                        acoustic_coverage_ratio is not None
+                        and acoustic_coverage_ratio >= 0.999
+                    ),
+                    "requiredStrataCovered": (
+                        all(strata_coverage.values()) if strata_coverage else None
+                    ),
+                    "windowSetComplete": window_set_complete,
+                    "completeSourceProductionRunObserved": False,
+                    "speakerCountStableAcrossWindows": speaker_count_stable,
+                    "referenceQualityScored": reference_scored,
+                    "manualFiveQualityEligible": manual_five_eligible_cases > 0,
+                    "releaseApproved": False,
+                    "qualityConclusion": (
+                        "quality_scored_review_required"
+                        if reference_scored
+                        else "not_scored_missing_reference_truth"
+                    ),
+                    "disposition": "review.required",
+                },
+            }
+        )
+    return results
+
+
 def summarize_run(
     *,
     manifest_path: Path,
@@ -486,6 +771,7 @@ def summarize_run(
     if not cases:
         raise ValueError("manifest.cases must not be empty")
     summaries: list[dict[str, Any]] = []
+    case_records: list[Mapping[str, Any]] = []
     seen: set[str] = set()
     for raw_case in cases:
         case = _mapping(raw_case, field="manifest.cases")
@@ -495,6 +781,7 @@ def summarize_run(
         if case_id in seen:
             raise ValueError(f"duplicate manifest case id: {case_id}")
         seen.add(case_id)
+        case_records.append(case)
         summaries.append(
             _case_summary(
                 case,
@@ -573,8 +860,13 @@ def summarize_run(
         and row["metrics"]["referenceEvaluationAvailable"]
         for row in summaries
     )
+    source_summaries = _source_summaries(
+        manifest,
+        cases=case_records,
+        summaries=summaries,
+    )
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "artifactType": "sample-run-audit-summary",
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "libraryId": manifest.get("libraryId"),
@@ -661,6 +953,7 @@ def summarize_run(
                 )
             ),
         },
+        "sourceSummaries": source_summaries,
         "cases": summaries,
     }
 

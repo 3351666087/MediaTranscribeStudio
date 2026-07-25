@@ -79,6 +79,7 @@ def _recipe(
 
 def _document() -> dict[str, Any]:
     return {
+        "source": {"durationMs": 5000},
         "speakers": [
             {"id": "speaker-1", "displayName": "Alice"},
             {"id": "speaker-2", "displayName": "Bob"},
@@ -457,6 +458,12 @@ def test_multimode_publication_deduplicates_sidecars_and_hides_private_ass(
         "cleanup": "removed",
         "reason": "internal-media-carrier",
     }
+    assert manifest["internalEvidence"]["subtitleTimingPolicy"][
+        "sourceBoundFallbackApplied"
+    ] is False
+    assert manifest["internalEvidence"]["subtitleTimingPolicy"][
+        "withinSourceDuration"
+    ] is True
     assert before == hashlib.sha256(source.read_bytes()).hexdigest()
 
 

@@ -15,7 +15,7 @@ import ntpath
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -431,6 +431,52 @@ class SubtitleArrangement:
         )
 
 
+@dataclass(frozen=True)
+class SourceBoundCueResult:
+    """Cue arrangement plus evidence for any source-timeline fallback."""
+
+    arrangement: SubtitleArrangement
+    configured_policy: CuePolicy
+    effective_policy: CuePolicy
+    configured_policy_qa: SubtitleQAReport
+    source_duration_ms: int
+    source_segments_monotonic_nonoverlapping: bool
+    source_bound_fallback_applied: bool
+
+    def timing_policy_evidence(self) -> dict[str, Any]:
+        return {
+            "configuredGapMs": self.configured_policy.gap_ms,
+            "effectiveGapMs": self.effective_policy.gap_ms,
+            "configuredMinCueMs": self.configured_policy.min_cue_ms,
+            "effectiveMinCueMs": self.effective_policy.min_cue_ms,
+            "configuredMaxReadingSpeed": (
+                self.configured_policy.max_reading_speed
+            ),
+            "effectiveMaxReadingSpeed": (
+                self.effective_policy.max_reading_speed
+            ),
+            "sourceDurationMs": self.source_duration_ms,
+            "lastCueEndMs": self.arrangement.cues[-1].end_ms,
+            "withinSourceDuration": True,
+            "sourceSegmentsMonotonicNonoverlapping": (
+                self.source_segments_monotonic_nonoverlapping
+            ),
+            "zeroGapApplied": self.effective_policy.gap_ms == 0,
+            "sourceBoundFallbackApplied": (
+                self.source_bound_fallback_applied
+            ),
+            "configuredPolicyQaPassed": self.configured_policy_qa.passed,
+            "configuredPolicyIssues": [
+                {
+                    "code": issue.code,
+                    "message": issue.message,
+                    "cueNumber": issue.cue_number,
+                }
+                for issue in self.configured_policy_qa.issues
+            ],
+        }
+
+
 def arrange_cues(
     segments: Sequence[SubtitleSegment | Mapping[str, Any]],
     *,
@@ -647,6 +693,77 @@ def audit_cues(
         source_text_preserved=source_preserved,
         maximum_observed_reading_speed=maximum_speed,
         repairs=tuple(repairs),
+    )
+
+
+def arrange_cues_within_source_duration(
+    segments: Sequence[SubtitleSegment | Mapping[str, Any]],
+    *,
+    source_duration_ms: int,
+    policy: CuePolicy | None = None,
+) -> SourceBoundCueResult:
+    """Arrange cues without allowing presentation timing to outlive the source.
+
+    When already-monotonic source segments overflow only because presentation
+    timing is stricter than their persisted timeline, a zero-gap preview is
+    attempted. The original policy is still audited and returned as evidence;
+    this fallback does not grant readability or release approval.
+    """
+
+    if (
+        isinstance(source_duration_ms, bool)
+        or not isinstance(source_duration_ms, int)
+        or source_duration_ms < 1
+    ):
+        raise SubtitleError("source_duration_ms must be a positive integer")
+    resolved_policy = policy or CuePolicy()
+    normalized = tuple(SubtitleSegment.from_value(value) for value in segments)
+    configured_arrangement = arrange_cues(
+        normalized,
+        policy=resolved_policy,
+    )
+    source_segments_are_monotonic = all(
+        right.start_ms >= left.end_ms
+        for left, right in zip(normalized, normalized[1:], strict=False)
+    )
+    fallback_applied = (
+        source_segments_are_monotonic
+        and configured_arrangement.cues[-1].end_ms > source_duration_ms
+    )
+    effective_policy = (
+        replace(
+            resolved_policy,
+            gap_ms=0,
+            max_reading_speed=100.0,
+        )
+        if fallback_applied
+        else resolved_policy
+    )
+    arrangement = (
+        arrange_cues(normalized, policy=effective_policy)
+        if fallback_applied
+        else configured_arrangement
+    )
+    if arrangement.cues[-1].end_ms > source_duration_ms:
+        raise SubtitleQAError(
+            "generated subtitle cues exceed the persisted source duration"
+        )
+    configured_policy_qa = audit_cues(
+        arrangement.cues,
+        policy=resolved_policy,
+        source_segments=normalized,
+        repairs=arrangement.qa.repairs,
+    )
+    return SourceBoundCueResult(
+        arrangement=arrangement,
+        configured_policy=resolved_policy,
+        effective_policy=effective_policy,
+        configured_policy_qa=configured_policy_qa,
+        source_duration_ms=source_duration_ms,
+        source_segments_monotonic_nonoverlapping=(
+            source_segments_are_monotonic
+        ),
+        source_bound_fallback_applied=fallback_applied,
     )
 
 
@@ -1690,6 +1807,7 @@ __all__ = [
     "CuePolicy",
     "FFmpegExecutionPlan",
     "SpeakerColorAssignment",
+    "SourceBoundCueResult",
     "SourceProtectionError",
     "SUBTITLE_SCHEMA_VERSION",
     "SubtitleArrangement",
@@ -1705,6 +1823,7 @@ __all__ = [
     "SubtitleStyle",
     "SubtitleTheme",
     "arrange_cues",
+    "arrange_cues_within_source_duration",
     "audit_cues",
     "build_subtitle_output_plan",
     "export_subtitles",

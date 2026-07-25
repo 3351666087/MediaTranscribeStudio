@@ -130,6 +130,7 @@ def _admitted_probe(
 
 def _transcript() -> dict[str, Any]:
     return {
+        "source": {"durationMs": 6500},
         "speakers": [
             {"id": "speaker-1", "displayName": "Alice"},
             {"id": "speaker-2", "displayName": "Bob"},
@@ -318,6 +319,44 @@ def test_plan_plumbs_canonical_diy_settings_and_existing_subtitle_modules(
         renderer_config["mediaProbeArtifact"]["sha256"]
         == artifact.sha256
     )
+
+
+def test_subtitle_generation_records_source_bound_timing_fallback(
+    tmp_path: Path,
+) -> None:
+    source, output, probe, artifact = _artifact(tmp_path)
+    plan = compile_output_execution_plan(
+        default_output_customization(),
+        source_path=source,
+        output_directory=output,
+        media_probe=probe,
+        media_probe_artifact=artifact,
+        language="en",
+        speaker_count=2,
+        generated_date="2026-07-23",
+    )
+    document = _transcript()
+    document["source"]["durationMs"] = 3000
+    document["segments"] = [
+        {
+            "startMs": (index - 1) * 1000,
+            "endMs": index * 1000,
+            "speakerId": "speaker-1",
+            "rawText": f"Line {index}.",
+        }
+        for index in range(1, 4)
+    ]
+
+    prepared = prepare_subtitle_outputs(plan, document)
+
+    assert prepared.arrangement.cues[-1].end_ms == 3000
+    evidence = prepared.timing_policy_evidence
+    assert evidence["sourceBoundFallbackApplied"] is True
+    assert evidence["sourceSegmentsMonotonicNonoverlapping"] is True
+    assert evidence["configuredGapMs"] == 80
+    assert evidence["effectiveGapMs"] == 0
+    assert evidence["configuredPolicyQaPassed"] is False
+    assert evidence["withinSourceDuration"] is True
 
 
 def test_speaker_color_override_wins_for_stable_id_not_display_name(

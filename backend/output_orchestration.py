@@ -49,7 +49,7 @@ from .subtitles import (
     SubtitleOutputPlan,
     SubtitleStyle,
     SubtitleTheme,
-    arrange_cues,
+    arrange_cues_within_source_duration,
     build_subtitle_output_plan,
     export_subtitles,
     resolve_speaker_colors,
@@ -276,6 +276,7 @@ class PreparedSubtitleOutputs:
     sidecars: tuple[PreparedSubtitleArtifact, ...]
     media_delivery_plan: SubtitleOutputPlan | None
     visual_qa_required: bool
+    timing_policy_evidence: dict[str, Any]
 
     @property
     def visual_qa_speakers(self) -> tuple[dict[str, str], ...]:
@@ -654,10 +655,13 @@ def prepare_subtitle_outputs(
             "the subtitle execution plan is incomplete",
         )
     try:
-        arrangement = arrange_cues(
+        source_duration_ms = document.get("source", {}).get("durationMs")
+        source_bound = arrange_cues_within_source_duration(
             transcript_subtitle_segments(document),
+            source_duration_ms=source_duration_ms,
             policy=plan.cue_policy,
         )
+        arrangement = source_bound.arrangement
         speaker_color_config = plan.subtitle_config["speakerColors"]
         assignments = resolve_speaker_colors(
             arrangement.cues,
@@ -741,6 +745,7 @@ def prepare_subtitle_outputs(
         sidecars=tuple(sidecars),
         media_delivery_plan=media_delivery_plan,
         visual_qa_required=media_delivery_plan is not None,
+        timing_policy_evidence=source_bound.timing_policy_evidence(),
     )
 
 

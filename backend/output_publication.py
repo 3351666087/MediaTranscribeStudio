@@ -1202,6 +1202,11 @@ def _build_manifest(
         )
     )
     private_created = state.private_payload_sha256 is not None
+    timing_policy_evidence = (
+        dict(preflight.prepared_plans[0].prepared.timing_policy_evidence)
+        if preflight.prepared_plans
+        else None
+    )
     internal = {
         "privateAssCarrier": {
             "created": private_created,
@@ -1226,6 +1231,7 @@ def _build_manifest(
             ),
         },
         "mediaQuarantine": quarantine_evidence,
+        "subtitleTimingPolicy": timing_policy_evidence,
         "customerAndInternalEvidenceSeparated": True,
         "privatePathsExcluded": True,
     }

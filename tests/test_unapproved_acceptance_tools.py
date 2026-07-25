@@ -130,8 +130,13 @@ def test_subtitle_preview_preserves_dense_monotonic_source_duration(
     assert manifest["cueQa"]["timingPolicy"] == {
         "configuredGapMs": 80,
         "effectiveGapMs": 0,
+        "configuredMinCueMs": 900,
+        "effectiveMinCueMs": 900,
         "configuredMaxReadingSpeed": 17.0,
         "effectiveMaxReadingSpeed": 100.0,
+        "sourceDurationMs": 3000,
+        "lastCueEndMs": 3000,
+        "withinSourceDuration": True,
         "sourceSegmentsMonotonicNonoverlapping": True,
         "zeroGapApplied": True,
         "sourceBoundFallbackApplied": True,

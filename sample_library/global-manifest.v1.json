@@ -40,6 +40,15 @@
       "license": "cc-by-4.0",
       "homepage": "https://huggingface.co/datasets/diarizers-community/voxconverse",
       "attribution": "VoxConverse derivative published by diarizers-community; CC BY 4.0."
+    },
+    {
+      "id": "aishell4",
+      "provider": "huggingface",
+      "dataset": "shenyunhang/AISHELL-4",
+      "revision": "df062e4993eeb9873605f8c74d6fac1db0560799",
+      "license": "cc-by-sa-4.0",
+      "homepage": "https://huggingface.co/datasets/shenyunhang/AISHELL-4",
+      "attribution": "AISHELL-4, Beijing Shell Shell Technology Co., Ltd.; data license CC BY-SA 4.0 per the upstream OpenSLR 111 dataset notice. The Hugging Face card metadata says Apache-2.0, but its embedded upstream notice says CC BY-SA 4.0; this manifest applies the stricter data license."
     }
   ],
   "cases": [
@@ -326,6 +335,16 @@
         {"rowIndex": 25, "targetSpeakerCount": 8}
       ],
       "windowSelection": "deterministic-max-speaker-and-overlap-coverage"
+    },
+    {
+      "sourceId": "aishell4",
+      "split": "test",
+      "sessionId": "L_R003S01C02",
+      "targetSpeakerCounts": [5],
+      "audioLayout": "first-textgrid-tier-contiguous-8-channel-shards",
+      "officialEvaluationRepository": "https://github.com/felixfuyihui/AISHELL-4",
+      "officialEvaluationRevision": "bad82b77c3753df1b232c5c6491cd3e2f2e32d24",
+      "windowSelection": "event-boundary-shortest-coverage-v2"
     }
   ]
 }

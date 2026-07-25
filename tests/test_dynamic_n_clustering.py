@@ -480,7 +480,7 @@ def test_embedded_close_voice_pair_uses_residual_collapse_correction(
     result = _cluster(case, request)
 
     assert result.count == speaker_count
-    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v11"
+    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v12"
     assert result.under_split_detected
     assert "CLOSE_VOICE_RESIDUAL_COLLAPSE" in result.correction_path
     assert result.candidate_min <= speaker_count - 1
@@ -702,6 +702,35 @@ def test_partition_degeneracy_guard_precedes_weak_pyannote_prior() -> None:
         for item in reconciled.correction_path
     )
     assert "PYANNOTE_COUNT_PRIOR_CONFLICT" in reconciled.confidence_reasons
+
+
+def test_confirmed_change_does_not_validate_every_cardinality_partition() -> None:
+    case = _as_review_only_count_partitions(_basis_case((1,) * 8))
+    case = replace(
+        case,
+        windows=tuple(
+            replace(
+                window,
+                metadata={
+                    **window.metadata,
+                    "speakerChangeRefinement": {
+                        "speakerChangeSplitsMs": [4000],
+                        "automaticSplitsMs": [4000],
+                    },
+                },
+            )
+            for window in case.windows
+        ),
+    )
+
+    result = _cluster(case, _request("auto"))
+
+    assert result.count < len(case.windows)
+    assert "ALL_SINGLETON_PARTITION_DEGENERACY" in result.correction_path
+    assert (
+        "PARTITION_DERIVED_ALL_SINGLETON_REVIEW_REQUIRED"
+        in result.confidence_reasons
+    )
 
 
 @pytest.mark.parametrize("speaker_count", (3, 5, 8))

@@ -140,7 +140,12 @@ def _source(value: Any, index: int) -> GlobalSampleSource:
     if not _REVISION.fullmatch(revision):
         raise GlobalSampleLibraryError(f"{field}.revision must be a 40-character commit")
     license_id = _text(value["license"], f"{field}.license").casefold()
-    if license_id not in {"cc-by-4.0", "mit", "apache-2.0"}:
+    if license_id not in {
+        "cc-by-4.0",
+        "cc-by-sa-4.0",
+        "mit",
+        "apache-2.0",
+    }:
         raise GlobalSampleLibraryError(f"{field}.license is not approved")
     homepage = _text(value["homepage"], f"{field}.homepage")
     if homepage != f"https://huggingface.co/datasets/{dataset}":

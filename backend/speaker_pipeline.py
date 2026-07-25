@@ -81,7 +81,7 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
     }
 )
-_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v11"
+_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v12"
 _STABILITY_MASK_ALGORITHM = "sha256-ranked-retained-mask-v1"
 _PARTITION_DEGENERACY_MIN_STABILITY = 0.70
 _PARTITION_DEGENERACY_MIN_BOOTSTRAP_SUPPORT = 0.80
@@ -3327,7 +3327,13 @@ def _is_resolvable_close_voice_step(
 def _uses_only_unconfirmed_count_partitions(
     windows: Sequence[SpeechWindow],
 ) -> bool:
-    """Return whether every window is review-only cardinality evidence."""
+    """Return whether every identity sample is review-only cardinality evidence.
+
+    A confirmed change point proves that at least one transition exists, but it
+    does not make every uniform cardinality partition an independently
+    confirmed identity. Human locks and non-partition windows remain the
+    evidence that can make an all-singleton solution legitimate.
+    """
 
     if not windows or any(window.locked_speaker_id for window in windows):
         return False
@@ -3345,22 +3351,6 @@ def _uses_only_unconfirmed_count_partitions(
             or not str(partition["sourceWindowId"]).strip()
         ):
             return False
-        refinement = window.metadata.get("speakerChangeRefinement")
-        if isinstance(refinement, Mapping):
-            for field_name in (
-                "speakerChangeSplitsMs",
-                "automaticSplitsMs",
-            ):
-                confirmed_splits = refinement.get(field_name)
-                if (
-                    isinstance(confirmed_splits, Sequence)
-                    and not isinstance(
-                        confirmed_splits,
-                        (str, bytes, bytearray),
-                    )
-                    and confirmed_splits
-                ):
-                    return False
     return True
 
 
@@ -4246,7 +4236,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.10.0"
+    version = "2.11.0"
 
     def __init__(
         self,

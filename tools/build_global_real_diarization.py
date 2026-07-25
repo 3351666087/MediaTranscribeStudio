@@ -1,4 +1,4 @@
-"""Build short real diarization windows from pinned AMI and VoxConverse rows."""
+"""Build short real diarization windows from pinned public datasets."""
 
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
-
-import pyarrow.parquet as pq
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +36,7 @@ RESOLVED_NAME = "global-real-diarization.resolved.v1.json"
 USER_AGENT = "MediaTranscribeStudio-real-diarization-library/1.0"
 WINDOW_DURATIONS = (10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0)
 MIN_SPEAKER_SECONDS = 0.5
+AISHELL4_MAX_DURATION = 30.0
 
 
 def _sha256(path: Path) -> str:
@@ -63,6 +62,35 @@ def _request_json(url: str, *, attempts: int = 5) -> dict[str, Any]:
             UnicodeError,
             json.JSONDecodeError,
             urllib.error.URLError,
+        ) as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(float(attempt))
+    raise GlobalSampleLibraryError(
+        f"remote JSON failed after {attempts} attempts: {url}: {last_error}"
+    )
+
+
+def _request_json_array(url: str, *, attempts: int = 5) -> list[dict[str, Any]]:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                value = json.load(response)
+            if not isinstance(value, list) or any(
+                not isinstance(item, dict) for item in value
+            ):
+                raise GlobalSampleLibraryError(
+                    f"remote JSON is not an object array: {url}"
+                )
+            return value
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            urllib.error.URLError,
+            GlobalSampleLibraryError,
         ) as exc:
             last_error = exc
             if attempt < attempts:
@@ -165,6 +193,212 @@ def _turns(row: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return turns
+
+
+def parse_aishell4_rttm(
+    value: str,
+    recording_id: str,
+) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for line_number, raw_line in enumerate(value.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        fields = line.split()
+        if (
+            len(fields) != 10
+            or fields[0] != "SPEAKER"
+            or fields[1] != recording_id
+            or fields[2] != "1"
+        ):
+            raise GlobalSampleLibraryError(
+                f"AISHELL-4 RTTM line {line_number} is invalid"
+            )
+        try:
+            start = float(fields[3])
+            duration = float(fields[4])
+        except ValueError as exc:
+            raise GlobalSampleLibraryError(
+                f"AISHELL-4 RTTM line {line_number} has invalid time"
+            ) from exc
+        speaker = fields[7]
+        if start < 0 or duration <= 0 or not speaker:
+            raise GlobalSampleLibraryError(
+                f"AISHELL-4 RTTM line {line_number} has invalid turn"
+            )
+        turns.append(
+            {
+                "speakerId": speaker,
+                "startSeconds": start,
+                "endSeconds": start + duration,
+            }
+        )
+    if not turns:
+        raise GlobalSampleLibraryError("AISHELL-4 RTTM has no turns")
+    return sorted(
+        turns,
+        key=lambda turn: (
+            float(turn["startSeconds"]),
+            float(turn["endSeconds"]),
+            str(turn["speakerId"]),
+        ),
+    )
+
+
+def parse_aishell4_stm(
+    value: str,
+    recording_id: str,
+) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for line_number, raw_line in enumerate(value.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        fields = line.split(maxsplit=5)
+        if len(fields) != 6 or fields[0] != recording_id:
+            raise GlobalSampleLibraryError(
+                f"AISHELL-4 STM line {line_number} is invalid"
+            )
+        try:
+            start = float(fields[3])
+            end = float(fields[4])
+        except ValueError as exc:
+            raise GlobalSampleLibraryError(
+                f"AISHELL-4 STM line {line_number} has invalid time"
+            ) from exc
+        transcript = "".join(fields[5].split())
+        if start < 0 or end <= start or not fields[2] or not transcript:
+            raise GlobalSampleLibraryError(
+                f"AISHELL-4 STM line {line_number} has invalid turn"
+            )
+        turns.append(
+            {
+                "speakerId": fields[2],
+                "startSeconds": start,
+                "endSeconds": end,
+                "transcript": transcript,
+            }
+        )
+    if not turns:
+        raise GlobalSampleLibraryError("AISHELL-4 STM has no turns")
+    return sorted(
+        turns,
+        key=lambda turn: (
+            float(turn["startSeconds"]),
+            float(turn["endSeconds"]),
+            str(turn["speakerId"]),
+        ),
+    )
+
+
+def parse_aishell4_textgrid_audio_tier(value: str) -> list[dict[str, Any]]:
+    lines = value.splitlines()
+    in_first_item = False
+    intervals: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    expected_count: int | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        if line == "item [1]:":
+            in_first_item = True
+            continue
+        if in_first_item and line.startswith("item [") and line != "item [1]:":
+            break
+        if not in_first_item:
+            continue
+        if line.startswith("intervals: size = "):
+            try:
+                expected_count = int(line.rsplit("=", 1)[1].strip())
+            except ValueError as exc:
+                raise GlobalSampleLibraryError(
+                    "AISHELL-4 TextGrid interval count is invalid"
+                ) from exc
+            continue
+        if line.startswith("intervals [") and line.endswith("]:"):
+            if current is not None:
+                intervals.append(current)
+            try:
+                index = int(line.removeprefix("intervals [").removesuffix("]:"))
+            except ValueError as exc:
+                raise GlobalSampleLibraryError(
+                    "AISHELL-4 TextGrid interval index is invalid"
+                ) from exc
+            current = {"index": index}
+            continue
+        if current is None:
+            continue
+        if line.startswith("xmin = "):
+            current["startSeconds"] = float(line.rsplit("=", 1)[1].strip())
+        elif line.startswith("xmax = "):
+            current["endSeconds"] = float(line.rsplit("=", 1)[1].strip())
+        elif line.startswith('text = "') and line.endswith('"'):
+            current["text"] = line[len('text = "') : -1].replace('""', '"')
+    if current is not None:
+        intervals.append(current)
+    if expected_count is None or len(intervals) != expected_count:
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 TextGrid first tier interval count does not match"
+        )
+    previous_end: float | None = None
+    for expected_index, interval in enumerate(intervals, start=1):
+        if set(interval) != {"index", "startSeconds", "endSeconds", "text"}:
+            raise GlobalSampleLibraryError(
+                "AISHELL-4 TextGrid interval is incomplete"
+            )
+        start = float(interval["startSeconds"])
+        end = float(interval["endSeconds"])
+        if (
+            interval["index"] != expected_index
+            or start < 0
+            or end <= start
+            or (
+                previous_end is not None
+                and abs(start - previous_end) > 0.000_001
+            )
+        ):
+            raise GlobalSampleLibraryError(
+                "AISHELL-4 TextGrid first tier is not contiguous"
+            )
+        previous_end = end
+    return intervals
+
+
+def _clip_reference_transcript(
+    turns: Sequence[dict[str, Any]],
+    window: dict[str, Any],
+) -> list[dict[str, Any]]:
+    start = float(window["sourceStartSeconds"])
+    end = float(window["sourceEndSeconds"])
+    clipped = [
+        {
+            "speakerId": str(turn["speakerId"]),
+            "sourceStartSeconds": round(
+                max(float(turn["startSeconds"]), start),
+                6,
+            ),
+            "sourceEndSeconds": round(
+                min(float(turn["endSeconds"]), end),
+                6,
+            ),
+            "startSeconds": round(
+                max(float(turn["startSeconds"]), start) - start,
+                6,
+            ),
+            "endSeconds": round(
+                min(float(turn["endSeconds"]), end) - start,
+                6,
+            ),
+            "transcript": str(turn["transcript"]),
+        }
+        for turn in turns
+        if float(turn["startSeconds"]) < end
+        and float(turn["endSeconds"]) > start
+    ]
+    if not clipped:
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 selected window has no STM transcript"
+        )
+    return clipped
 
 
 def select_diarization_window(
@@ -279,6 +513,119 @@ def select_diarization_window(
             f"no <=90s window contains exactly {target_speaker_count} speakers"
         )
     return best[1]
+
+
+def align_diarization_window_to_stm(
+    window: dict[str, Any],
+    diarization_turns: Sequence[dict[str, Any]],
+    transcript_turns: Sequence[dict[str, Any]],
+    target_speaker_count: int,
+) -> dict[str, Any]:
+    """Expand a selected window until no official STM utterance is clipped."""
+
+    start = float(window["sourceStartSeconds"])
+    end = float(window["sourceEndSeconds"])
+    for _ in range(len(transcript_turns) + 1):
+        overlapping = [
+            turn
+            for turn in transcript_turns
+            if float(turn["startSeconds"]) < end
+            and float(turn["endSeconds"]) > start
+        ]
+        if not overlapping:
+            raise GlobalSampleLibraryError(
+                "AISHELL-4 selected window has no overlapping STM turns"
+            )
+        aligned_start = min(
+            [start] + [float(turn["startSeconds"]) for turn in overlapping]
+        )
+        aligned_end = max(
+            [end] + [float(turn["endSeconds"]) for turn in overlapping]
+        )
+        if aligned_start == start and aligned_end == end:
+            break
+        start, end = aligned_start, aligned_end
+    else:
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 STM boundary expansion did not converge"
+        )
+    if end - start > AISHELL4_MAX_DURATION:
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 STM-aligned window exceeds 30 seconds"
+        )
+    clipped = [
+        {
+            "speakerId": str(turn["speakerId"]),
+            "startSeconds": max(float(turn["startSeconds"]), start),
+            "endSeconds": min(float(turn["endSeconds"]), end),
+        }
+        for turn in diarization_turns
+        if float(turn["startSeconds"]) < end
+        and float(turn["endSeconds"]) > start
+    ]
+    speaker_set = sorted({str(turn["speakerId"]) for turn in clipped})
+    if len(speaker_set) != target_speaker_count:
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 STM expansion changed the target speaker count"
+        )
+    per_speaker = {
+        speaker: sum(
+            float(turn["endSeconds"]) - float(turn["startSeconds"])
+            for turn in clipped
+            if turn["speakerId"] == speaker
+        )
+        for speaker in speaker_set
+    }
+    if min(per_speaker.values()) < MIN_SPEAKER_SECONDS:
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 STM expansion lacks per-speaker coverage"
+        )
+    relative_turns = [
+        {
+            "speakerId": turn["speakerId"],
+            "sourceStartSeconds": round(float(turn["startSeconds"]), 6),
+            "sourceEndSeconds": round(float(turn["endSeconds"]), 6),
+            "startSeconds": round(float(turn["startSeconds"]) - start, 6),
+            "endSeconds": round(float(turn["endSeconds"]) - start, 6),
+            "transcript": None,
+        }
+        for turn in clipped
+    ]
+    overlaps = overlap_intervals(relative_turns)
+    overlap_duration = sum(
+        float(interval["endSeconds"]) - float(interval["startSeconds"])
+        for interval in overlaps
+    )
+    speech_duration = _union_duration(
+        [
+            (
+                float(turn["startSeconds"]),
+                float(turn["endSeconds"]),
+            )
+            for turn in clipped
+        ]
+    )
+    return {
+        "algorithm": (
+            "event-boundary-shortest-coverage-v2"
+            "+stm-whole-utterance-expansion-v1"
+        ),
+        "baseSourceStartSeconds": window["sourceStartSeconds"],
+        "baseSourceEndSeconds": window["sourceEndSeconds"],
+        "baseDurationSeconds": window["durationSeconds"],
+        "sourceStartSeconds": round(start, 6),
+        "sourceEndSeconds": round(end, 6),
+        "durationSeconds": round(end - start, 6),
+        "speakerSet": speaker_set,
+        "perSpeakerAnnotatedSeconds": {
+            speaker: round(value, 6)
+            for speaker, value in sorted(per_speaker.items())
+        },
+        "annotatedSpeechSeconds": round(speech_duration, 6),
+        "annotatedOverlapSeconds": round(overlap_duration, 6),
+        "turns": relative_turns,
+        "overlapIntervals": overlaps,
+    }
 
 
 def _clip_audio(source: Path, output: Path, window: dict[str, Any]) -> None:
@@ -407,6 +754,373 @@ def _case_record(
     }
 
 
+def _clip_audio_shards(
+    shards: Sequence[Path],
+    output: Path,
+    *,
+    source_span_start: float,
+    window: dict[str, Any],
+) -> dict[str, Any]:
+    if not shards:
+        raise GlobalSampleLibraryError("AISHELL-4 audio shard list is empty")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp.wav")
+    concat_path = output.with_suffix(output.suffix + ".concat.txt")
+    resolved_shards = [path.resolve() for path in shards]
+    if any("'" in str(path) for path in resolved_shards):
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 audio shard path contains an unsupported quote"
+        )
+    concat_path.write_text(
+        "".join(f"file '{path}'\n" for path in resolved_shards),
+        encoding="utf-8",
+    )
+    relative_start = float(window["sourceStartSeconds"]) - source_span_start
+    try:
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_path),
+                "-ss",
+                f"{relative_start:.9f}",
+                "-t",
+                f"{float(window['durationSeconds']):.9f}",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(temporary),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=240,
+        )
+    finally:
+        concat_path.unlink(missing_ok=True)
+    if completed.returncode != 0:
+        raise GlobalSampleLibraryError(
+            f"ffmpeg failed for {output.name}: {completed.stderr.strip()}"
+        )
+    temporary.replace(output)
+    probe = _probe_audio(output)
+    if (
+        probe["codec"] != "pcm_s16le"
+        or probe["sampleRate"] != 16_000
+        or probe["channels"] != 1
+        or abs(
+            probe["durationSeconds"] - float(window["durationSeconds"])
+        )
+        > 0.05
+    ):
+        raise GlobalSampleLibraryError(
+            f"AISHELL-4 normalized audio is invalid: {output.name}"
+        )
+    return probe
+
+
+def _download_aishell4_annotations(
+    *,
+    source: Any,
+    plan: dict[str, Any],
+    output_root: Path,
+) -> tuple[dict[str, Path], dict[str, Any]]:
+    split = plan.get("split")
+    session_id = plan.get("sessionId")
+    official_repository = plan.get("officialEvaluationRepository")
+    official_revision = plan.get("officialEvaluationRevision")
+    if (
+        split != "test"
+        or not isinstance(session_id, str)
+        or not session_id
+        or official_repository != "https://github.com/felixfuyihui/AISHELL-4"
+        or not isinstance(official_revision, str)
+        or len(official_revision) != 40
+    ):
+        raise GlobalSampleLibraryError("AISHELL-4 source plan is invalid")
+    source_root = output_root / "sources" / "aishell4"
+    paths = {
+        "rttm": source_root / f"{session_id}.rttm",
+        "textgrid": source_root / f"{session_id}.TextGrid",
+        "stm": source_root / f"{session_id}.stm",
+    }
+    hf_prefix = (
+        f"https://huggingface.co/datasets/{source.dataset}/resolve/"
+        f"{source.revision}/{split}/TextGrid/{session_id}"
+    )
+    _download_resumable(f"{hf_prefix}.rttm", paths["rttm"])
+    _download_resumable(f"{hf_prefix}.TextGrid", paths["textgrid"])
+    _download_resumable(
+        "https://raw.githubusercontent.com/felixfuyihui/AISHELL-4/"
+        f"{official_revision}/eval/stm/{session_id}.stm",
+        paths["stm"],
+    )
+    evidence = {
+        key: {
+            "path": str(path.relative_to(output_root)),
+            "bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+        }
+        for key, path in paths.items()
+    }
+    return paths, evidence
+
+
+def _aishell4_audio_tree(
+    *,
+    source: Any,
+    split: str,
+    session_id: str,
+) -> list[dict[str, Any]]:
+    tree_url = (
+        f"https://huggingface.co/api/datasets/{source.dataset}/tree/"
+        f"{source.revision}/{split}/wav/{session_id}"
+        "?recursive=false&expand=false&limit=1000"
+    )
+    entries = _request_json_array(tree_url)
+    expected_prefix = f"{split}/wav/{session_id}/"
+    normalized: list[dict[str, Any]] = []
+    for entry in entries:
+        lfs = entry.get("lfs")
+        path = entry.get("path")
+        size = entry.get("size")
+        if (
+            entry.get("type") != "file"
+            or not isinstance(path, str)
+            or not path.startswith(expected_prefix)
+            or not path.endswith(".wav")
+            or not isinstance(size, int)
+            or size <= 44
+            or not isinstance(lfs, dict)
+            or not isinstance(lfs.get("oid"), str)
+            or len(lfs["oid"]) != 64
+            or lfs.get("size") != size
+        ):
+            raise GlobalSampleLibraryError(
+                "AISHELL-4 audio tree contains an invalid entry"
+            )
+        normalized.append(
+            {
+                "path": path,
+                "bytes": size,
+                "sha256": lfs["oid"],
+            }
+        )
+    return sorted(normalized, key=lambda entry: str(entry["path"]))
+
+
+def _build_aishell4(
+    manifest: Any,
+    output_root: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    source = _source_by_id(manifest, "aishell4")
+    plan = _planned_by_id(manifest, "aishell4")
+    session_id = plan.get("sessionId")
+    split = plan.get("split")
+    targets = plan.get("targetSpeakerCounts")
+    if (
+        not isinstance(session_id, str)
+        or split != "test"
+        or not isinstance(targets, list)
+        or not targets
+        or any(
+            isinstance(target, bool)
+            or not isinstance(target, int)
+            or target < 2
+            for target in targets
+        )
+    ):
+        raise GlobalSampleLibraryError("AISHELL-4 target plan is invalid")
+    paths, annotation_evidence = _download_aishell4_annotations(
+        source=source,
+        plan=plan,
+        output_root=output_root,
+    )
+    rttm_turns = parse_aishell4_rttm(
+        paths["rttm"].read_text(encoding="utf-8"),
+        session_id,
+    )
+    stm_turns = parse_aishell4_stm(
+        paths["stm"].read_text(encoding="utf-8"),
+        session_id,
+    )
+    audio_tier = parse_aishell4_textgrid_audio_tier(
+        paths["textgrid"].read_text(encoding="utf-8")
+    )
+    tree = _aishell4_audio_tree(
+        source=source,
+        split=split,
+        session_id=session_id,
+    )
+    if len(tree) != len(audio_tier):
+        raise GlobalSampleLibraryError(
+            "AISHELL-4 audio shard count does not match TextGrid first tier"
+        )
+    source_root = output_root / "sources" / "aishell4" / session_id
+    downloaded_shards: dict[str, dict[str, Any]] = {}
+    cases: list[dict[str, Any]] = []
+    for target in targets:
+        base_window = select_diarization_window(rttm_turns, target)
+        window = align_diarization_window_to_stm(
+            base_window,
+            rttm_turns,
+            stm_turns,
+            target,
+        )
+        selected_intervals = [
+            interval
+            for interval in audio_tier
+            if float(interval["startSeconds"])
+            < float(window["sourceEndSeconds"])
+            and float(interval["endSeconds"])
+            > float(window["sourceStartSeconds"])
+        ]
+        if not selected_intervals:
+            raise GlobalSampleLibraryError(
+                "AISHELL-4 window does not intersect source audio shards"
+            )
+        local_shards: list[Path] = []
+        shard_evidence: list[dict[str, Any]] = []
+        for interval in selected_intervals:
+            shard_index = int(interval["index"]) - 1
+            entry = tree[shard_index]
+            expected_name = f"{shard_index:09d}.wav"
+            if Path(str(entry["path"])).name != expected_name:
+                raise GlobalSampleLibraryError(
+                    "AISHELL-4 audio shard order is not canonical"
+                )
+            local_path = source_root / expected_name
+            source_url = (
+                f"https://huggingface.co/datasets/{source.dataset}/resolve/"
+                f"{source.revision}/{entry['path']}"
+            )
+            _download_resumable(
+                source_url,
+                local_path,
+                expected_bytes=int(entry["bytes"]),
+            )
+            actual_sha256 = _sha256(local_path)
+            if actual_sha256 != entry["sha256"]:
+                raise GlobalSampleLibraryError(
+                    f"AISHELL-4 audio shard hash mismatch: {expected_name}"
+                )
+            evidence = {
+                "path": str(local_path.relative_to(output_root)),
+                "bytes": local_path.stat().st_size,
+                "sha256": actual_sha256,
+                "sourceStartSeconds": round(
+                    float(interval["startSeconds"]),
+                    9,
+                ),
+                "sourceEndSeconds": round(
+                    float(interval["endSeconds"]),
+                    9,
+                ),
+            }
+            downloaded_shards[expected_name] = evidence
+            shard_evidence.append(evidence)
+            local_shards.append(local_path)
+        case_id = f"aishell4-test-{session_id.lower()}-n{target}"
+        output = output_root / "audio" / f"{case_id}.wav"
+        probe = _clip_audio_shards(
+            local_shards,
+            output,
+            source_span_start=float(selected_intervals[0]["startSeconds"]),
+            window=window,
+        )
+        reference_turns = _clip_reference_transcript(stm_turns, window)
+        scoring_transcript = "".join(
+            str(turn["transcript"]) for turn in reference_turns
+        )
+        cases.append(
+            {
+                "id": case_id,
+                "sourceId": source.source_id,
+                "sourceDataset": source.dataset,
+                "sourceRevision": source.revision,
+                "sourceSessionId": session_id,
+                "sourceArtifactPath": annotation_evidence["rttm"]["path"],
+                "sourceArtifactSha256": annotation_evidence["rttm"]["sha256"],
+                "sourceAudioShards": shard_evidence,
+                "path": str(output.relative_to(output_root)),
+                "bytes": output.stat().st_size,
+                "sha256": _sha256(output),
+                "audio": probe,
+                "realOrSynthetic": "real-recording",
+                "language": "zh-CN",
+                "region": "East Asia",
+                "evaluationSplit": "held-out",
+                "scenario": [
+                    "real-recording",
+                    "far-field-meeting",
+                    "multichannel-source",
+                    "overlap",
+                    "rapid-turns",
+                ],
+                "expectedSpeakerCount": len(window["speakerSet"]),
+                "speakerSet": window["speakerSet"],
+                "windowSelection": {
+                    **{
+                        key: value
+                        for key, value in window.items()
+                        if key not in {"turns", "overlapIntervals"}
+                    },
+                    "selectionUsesModelScores": False,
+                },
+                "turns": window["turns"],
+                "overlapIntervals": window["overlapIntervals"],
+                "referenceTranscriptTurns": reference_turns,
+                "scoringTranscript": scoring_transcript,
+                "asrReferenceMode": (
+                    "official-stm-whole-utterances-serialized-by-"
+                    "start-end-speaker-v1"
+                ),
+                "transcript": scoring_transcript,
+                "truthEligibility": {
+                    "speakerCount": True,
+                    "turnBoundaries": True,
+                    "overlap": True,
+                    "derJer": True,
+                    "asr": True,
+                    "language": True,
+                },
+            }
+        )
+    return cases, {
+        "sourceId": source.source_id,
+        "dataset": source.dataset,
+        "revision": source.revision,
+        "license": source.license,
+        "licenseDecision": (
+            "CC BY-SA 4.0 is applied from the upstream OpenSLR 111 data "
+            "notice because it is stricter than the conflicting Apache-2.0 "
+            "Hugging Face card metadata."
+        ),
+        "attribution": source.attribution,
+        "split": split,
+        "sessionId": session_id,
+        "audioLayout": plan["audioLayout"],
+        "annotations": annotation_evidence,
+        "officialEvaluationRepository": plan["officialEvaluationRepository"],
+        "officialEvaluationRevision": plan["officialEvaluationRevision"],
+        "audioShards": [
+            downloaded_shards[key] for key in sorted(downloaded_shards)
+        ],
+    }
+
+
 def _source_by_id(manifest: Any, source_id: str) -> Any:
     for source in manifest.sources:
         if source.source_id == source_id:
@@ -515,6 +1229,8 @@ def _build_voxconverse(
     manifest: Any,
     output_root: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    import pyarrow.parquet as pq
+
     source = _source_by_id(manifest, "voxconverse")
     plan = _planned_by_id(manifest, "voxconverse")
     parquet_path = plan.get("parquetPath")
@@ -623,22 +1339,44 @@ def _build_voxconverse(
 def build_real_diarization_library(
     manifest_path: Path,
     output_root: Path,
+    source_ids: Sequence[str] | None = None,
 ) -> Path:
     manifest = load_global_manifest(manifest_path)
     output_root.mkdir(parents=True, exist_ok=True)
-    ami_cases, ami_source = _build_ami(manifest, output_root)
-    vox_cases, vox_source = _build_voxconverse(manifest, output_root)
+    builders = {
+        "ami": _build_ami,
+        "voxconverse": _build_voxconverse,
+        "aishell4": _build_aishell4,
+    }
+    selected = list(source_ids) if source_ids else list(builders)
+    unknown = sorted(set(selected) - set(builders))
+    if unknown:
+        raise GlobalSampleLibraryError(
+            f"unknown real diarization source(s): {', '.join(unknown)}"
+        )
+    if len(selected) != len(set(selected)):
+        raise GlobalSampleLibraryError(
+            "real diarization sources must not be repeated"
+        )
+    cases: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    for source_id in selected:
+        source_cases, source_record = builders[source_id](
+            manifest,
+            output_root,
+        )
+        cases.extend(source_cases)
+        sources.append(source_record)
     attribution = output_root / "ATTRIBUTION.md"
+    attribution_sections = "".join(
+        f"## {source['dataset']}\n\n"
+        f"- Revision: `{source['revision']}`\n"
+        f"- License: `{source['license']}`\n"
+        f"- Attribution: {source['attribution']}\n\n"
+        for source in sources
+    )
     attribution.write_text(
-        "# Real Diarization Sample Attribution\n\n"
-        f"## {ami_source['dataset']}\n\n"
-        f"- Revision: `{ami_source['revision']}`\n"
-        f"- License: `{ami_source['license']}`\n"
-        f"- Attribution: {ami_source['attribution']}\n\n"
-        f"## {vox_source['dataset']}\n\n"
-        f"- Revision: `{vox_source['revision']}`\n"
-        f"- License: `{vox_source['license']}`\n"
-        f"- Attribution: {vox_source['attribution']}\n",
+        "# Real Diarization Sample Attribution\n\n" + attribution_sections,
         encoding="utf-8",
     )
     resolved = {
@@ -653,8 +1391,8 @@ def build_real_diarization_library(
             "minimumPerSpeakerAnnotatedSeconds": MIN_SPEAKER_SECONDS,
             "maximumDurationSeconds": manifest.max_duration_seconds,
         },
-        "sources": [ami_source, vox_source],
-        "cases": ami_cases + vox_cases,
+        "sources": sources,
+        "cases": cases,
         "failedCases": [],
         "attributionPath": str(attribution.relative_to(output_root)),
     }
@@ -672,12 +1410,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--source",
+        action="append",
+        choices=("ami", "voxconverse", "aishell4"),
+        default=[],
+        help="build only the selected source; repeat to select multiple",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    destination = build_real_diarization_library(args.manifest, args.output_root)
+    destination = build_real_diarization_library(
+        args.manifest,
+        args.output_root,
+        source_ids=args.source,
+    )
     resolved = json.loads(destination.read_text(encoding="utf-8"))
     print(
         json.dumps(

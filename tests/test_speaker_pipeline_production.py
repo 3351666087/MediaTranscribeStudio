@@ -143,7 +143,19 @@ class FakeAsrAdapter:
             return "not-an-array"
         values = []
         for window in windows:
-            evidence = {"model": "Qwen3-ASR-1.7B"}
+            evidence = {
+                "model": "Qwen3-ASR-1.7B",
+                "timestamps": [
+                    {
+                        "text": f"词{index + 1}",
+                        "startMs": start_ms,
+                        "endMs": min(start_ms + 900, window.end_ms),
+                    }
+                    for index, start_ms in enumerate(
+                        range(window.start_ms, window.end_ms, 1_000)
+                    )
+                ],
+            }
             language = self.language_by_window_id.get(window.window_id)
             if language is not None:
                 evidence["language"] = language
@@ -252,6 +264,58 @@ class FakeOverlapAdapter:
             )
             for window in windows
         ]
+
+
+class FakePyannoteOverlapAdapter(FakeOverlapAdapter):
+    adapter_id = "pyannote-community-1"
+    version = "2.2.0"
+
+    def __init__(self, *, inconsistent_digest: bool = False) -> None:
+        super().__init__()
+        self.inconsistent_digest = inconsistent_digest
+
+    def detect_batch(self, prepared, windows, context):
+        context.raise_if_cancelled()
+        self.calls.append(tuple(window.window_id for window in windows))
+        output = []
+        for index, window in enumerate(windows):
+            local_speaker = "LOCAL_A" if window.start_ms < 3_000 else "LOCAL_B"
+            digest_character = (
+                "b" if self.inconsistent_digest and index == 1 else "a"
+            )
+            output.append(
+                OverlapDecision(
+                    window_id=window.window_id,
+                    overlapping=False,
+                    confidence=0.5,
+                    evidence={
+                        "detectorStatus": "EVALUATED",
+                        "overlapDetectorRun": True,
+                        "reviewStatus": "NOT_REQUIRED",
+                        "confidenceKind": "binary-annotation-no-posterior",
+                        "calibratedConfidence": False,
+                        "fullTimelineInference": {
+                            "scope": "full-normalized-timeline",
+                            "startMs": 0,
+                            "endMs": prepared.duration_ms,
+                            "turnCount": 6,
+                            "localSpeakerCount": 2,
+                            "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+                            "speakerTurnsSha256": digest_character * 64,
+                        },
+                        "speakerTurns": [
+                            {
+                                "startMs": window.start_ms,
+                                "endMs": window.end_ms,
+                                "localSpeaker": local_speaker,
+                            }
+                        ],
+                        "overlapIntervals": [],
+                        "localSpeakerCount": 1,
+                    },
+                )
+            )
+        return output
 
 
 class FakeSecondaryVerifier:
@@ -1608,6 +1672,10 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            [segment.raw_text for segment in result.segments],
+            ["词1", "词2", "词3", "词4", "词5"],
+        )
+        self.assertEqual(
             {segment.turn_id for segment in result.segments},
             {"turn-1"},
         )
@@ -1617,10 +1685,17 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 for segment in result.segments
             )
         )
+        self.assertTrue(
+            all(
+                segment.evidence["asr"]["asrProjection"]["sourceWindowId"]
+                == "window-1"
+                for segment in result.segments
+            )
+        )
         expected_windows = tuple(
             f"window-1.cardinality-{index:02d}" for index in range(1, 6)
         )
-        self.assertEqual(asr.calls, [expected_windows])
+        self.assertEqual(asr.calls, [("window-1",)])
         self.assertEqual(cam.calls, [expected_windows])
         self.assertEqual(overlap.calls, [expected_windows])
         self.assertTrue(
@@ -1645,9 +1720,9 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         )
 
         expected_windows = tuple(
-            f"window-1.cardinality-{index:02d}" for index in range(1, 4)
+            f"window-1.cardinality-{index:02d}" for index in range(1, 6)
         )
-        self.assertEqual(asr.calls, [expected_windows])
+        self.assertEqual(asr.calls, [("window-1",)])
         self.assertEqual(cam.calls, [expected_windows])
         self.assertEqual(overlap.calls, [expected_windows])
         self.assertIsNotNone(result.speaker_count_estimate)
@@ -1666,6 +1741,94 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertEqual(
             result.pipeline_metrics["policy"]["speakerCountPartitionMode"],
             "auto",
+        )
+
+    def test_auto_count_uses_audited_full_timeline_pyannote_prior(self) -> None:
+        overlap = FakePyannoteOverlapAdapter()
+        pipeline, _, _, _, _ = self.pipeline(
+            6,
+            overlap=overlap,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        result = pipeline.transcribe(
+            self.request(6, "auto", job_id="pyannote-count-prior"),
+            self.context("pyannote-count-prior"),
+        )
+
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 2)
+        self.assertLessEqual(result.speaker_count_estimate.candidate_min, 2)
+        self.assertGreaterEqual(result.speaker_count_estimate.candidate_max, 6)
+        policy = result.pipeline_metrics["policy"]
+        self.assertEqual(policy["pyannoteSpeakerCountPriorStatus"], "eligible")
+        self.assertEqual(policy["pyannoteSpeakerCountPriorObserved"], 2)
+        self.assertEqual(policy["pyannoteSpeakerCountPriorUsed"], 2)
+        self.assertTrue(policy["pyannoteSpeakerCountPriorApplied"])
+        self.assertFalse(policy["pyannoteSpeakerCountPriorConflict"])
+        self.assertIn(
+            "PYANNOTE_FULL_TIMELINE_PRIOR:6->2",
+            policy["speakerCountCorrectionPath"],
+        )
+
+    def test_inconsistent_pyannote_full_timeline_evidence_is_not_used(
+        self,
+    ) -> None:
+        overlap = FakePyannoteOverlapAdapter(inconsistent_digest=True)
+        pipeline, _, _, _, _ = self.pipeline(
+            6,
+            overlap=overlap,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        result = pipeline.transcribe(
+            self.request(6, "auto", job_id="pyannote-count-inconsistent"),
+            self.context("pyannote-count-inconsistent"),
+        )
+
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 6)
+        policy = result.pipeline_metrics["policy"]
+        self.assertEqual(
+            policy["pyannoteSpeakerCountPriorStatus"],
+            "inconsistent-full-timeline-evidence",
+        )
+        self.assertIsNone(policy["pyannoteSpeakerCountPriorUsed"])
+        self.assertFalse(policy["pyannoteSpeakerCountPriorApplied"])
+
+    def test_speaker_partition_requires_forced_alignment_timestamps(
+        self,
+    ) -> None:
+        class MissingTimestampAsr(FakeAsrAdapter):
+            def transcribe_batch(self, *args, **kwargs):
+                values = super().transcribe_batch(*args, **kwargs)
+                return [
+                    replace(item, evidence={"model": "Qwen3-ASR-1.7B"})
+                    for item in values
+                ]
+
+        preparation = FakePreparationAdapter(
+            1,
+            window_ranges={"window-1": (0, 5_000)},
+        )
+        pipeline, _, _, _, _ = self.pipeline(
+            1,
+            windows=1,
+            preparation=preparation,
+            asr=MissingTimestampAsr(),
+        )
+
+        with self.assertRaises(WorkerError) as captured:
+            pipeline.transcribe(
+                self.request(1, "auto", job_id="auto-missing-alignment"),
+                self.context("auto-missing-alignment"),
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "ASR_TIMESTAMPS_REQUIRED_FOR_SPEAKER_PARTITION",
         )
 
     def test_manual_count_fails_when_audio_cannot_support_evidence_windows(
@@ -2177,7 +2340,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertTrue(cached.hit)
         malformed = copy.deepcopy(cached.value)
         malformed["selectionMethod"] = (
-            "dynamic-n-adaptive-resample-stability-v6"
+            "dynamic-n-adaptive-resample-stability-v7"
         )
         cache.set_raw("clustering", cluster_key, malformed)
 
@@ -2203,7 +2366,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertTrue(repaired.hit)
         self.assertEqual(
             repaired.value["selectionMethod"],
-            "dynamic-n-adaptive-resample-stability-v7",
+            "dynamic-n-adaptive-resample-stability-v8",
         )
 
     def test_asr_language_isolated_cache_reuses_acoustic_stages(self) -> None:

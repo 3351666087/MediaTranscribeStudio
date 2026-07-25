@@ -155,12 +155,15 @@ def _cluster(
     case: _Case,
     request: StartJobRequest,
     config: SpeakerPipelineConfig | None = None,
+    *,
+    pyannote_count_prior: int | None = None,
 ) -> _ClusterResult:
     result = speaker_pipeline._cluster(
         case.embeddings,
         case.windows,
         request,
         config or _config(),
+        pyannote_count_prior=pyannote_count_prior,
     )
     assert 1 <= result.candidate_min <= result.count <= result.candidate_max
     assert len(result.assignments) == len(case.windows)
@@ -192,6 +195,48 @@ def test_auto_dynamic_n_has_no_fixed_cardinality_ceiling(
     assert result.count == speaker_count
     assert result.candidate_min <= speaker_count <= result.candidate_max
     _assert_exact_partition(case, result)
+
+
+def test_pyannote_full_timeline_prior_corrects_singleton_over_split() -> None:
+    case = _basis_case((1,) * 12)
+
+    acoustic_only = _cluster(case, _request("auto"))
+    reconciled = _cluster(
+        case,
+        _request("auto"),
+        pyannote_count_prior=3,
+    )
+
+    assert acoustic_only.count == 12
+    assert reconciled.count == 3
+    assert reconciled.candidate_min <= 3
+    assert reconciled.candidate_max >= 12
+    assert reconciled.low_confidence_fail_closed
+    assert "PYANNOTE_FULL_TIMELINE_PRIOR:12->3" in reconciled.correction_path
+    assert (
+        "PYANNOTE_COUNT_PRIOR_APPLIED_WITH_REVIEW"
+        in reconciled.confidence_reasons
+    )
+
+
+def test_pyannote_prior_cannot_override_persistent_acoustic_contradiction() -> None:
+    case = _basis_case((2,) * 6)
+
+    result = _cluster(
+        case,
+        _request("auto"),
+        pyannote_count_prior=2,
+    )
+
+    assert result.count == 6
+    assert result.candidate_min <= 2
+    assert result.candidate_max >= 6
+    assert result.low_confidence_fail_closed
+    assert not any(
+        item.startswith("PYANNOTE_FULL_TIMELINE_PRIOR:")
+        for item in result.correction_path
+    )
+    assert "PYANNOTE_COUNT_PRIOR_CONFLICT" in result.confidence_reasons
 
 
 def test_manual_129_is_exact_and_never_fail_closed() -> None:

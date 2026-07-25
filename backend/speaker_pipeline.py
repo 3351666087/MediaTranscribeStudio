@@ -13,6 +13,7 @@ import inspect
 import json
 import math
 import os
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
@@ -70,7 +71,7 @@ _OVERLAP_DETECTOR_UNAVAILABLE_REASON = "OVERLAP_DETECTOR_UNAVAILABLE"
 _SPEAKER_CHANGE_REFINEMENT_STAGE = "speaker-change-refinement"
 _SPEAKER_COUNT_PARTITION_STAGE = "speaker-count-partition"
 _MIN_SPEAKER_COUNT_PARTITION_MS = 700
-_AUTO_SPEAKER_EVIDENCE_WINDOW_MS = 2_000
+_AUTO_SPEAKER_EVIDENCE_WINDOW_MS = 1_000
 _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON = (
     "SPEAKER_CHANGE_REFINEMENT_REVIEW_REQUIRED"
 )
@@ -80,7 +81,7 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
     }
 )
-_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v7"
+_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v8"
 _STABILITY_MASK_ALGORITHM = "sha256-ranked-retained-mask-v1"
 _REQUIRED_STABILITY_COMPONENTS = frozenset(
     {
@@ -97,7 +98,11 @@ _SEARCH_TRUNCATION_REASONS = frozenset(
         "adaptive-budget-unresolved-local-bracket",
     }
 )
-_SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v4"
+_SPEAKER_COUNT_ESTIMATE_METHOD = "constrained-spherical-multik-v5"
+_PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE = 0.12
+_PYANNOTE_COUNT_PRIOR_MIN_STABILITY = 0.60
+_PYANNOTE_COUNT_PRIOR_MIN_BOOTSTRAP_SUPPORT = 0.60
+_PYANNOTE_COUNT_PRIOR_OVER_SPLIT_FRACTION = 0.25
 _ASR_NON_LEXICAL_DISPOSITION = "rejected-non-lexical"
 
 
@@ -3322,6 +3327,8 @@ def _cluster(
     windows: Sequence[SpeechWindow],
     request: StartJobRequest,
     config: SpeakerPipelineConfig,
+    *,
+    pyannote_count_prior: int | None = None,
 ) -> _ClusterResult:
     if len(embeddings) != len(windows) or not embeddings:
         raise WorkerError(
@@ -3373,11 +3380,19 @@ def _cluster(
         minimum_locked_count=minimum_locked_count,
     )
     policy = request.speaker_policy
-    prior = (
+    policy_prior = (
         policy.prior
         if policy.mode is SpeakerCountMode.HYBRID
         else None
     )
+    external_prior = (
+        pyannote_count_prior
+        if policy.mode is SpeakerCountMode.AUTO
+        and pyannote_count_prior is not None
+        and lower <= pyannote_count_prior <= upper
+        else None
+    )
+    search_prior = policy_prior if policy_prior is not None else external_prior
     if policy.mode is SpeakerCountMode.MANUAL:
         eigengap_profile = _EigengapProfile(
             scores={leader_estimate: 1.0},
@@ -3466,7 +3481,7 @@ def _cluster(
         upper=planning_upper,
         leader_estimate=leader_estimate,
         spectral_estimate=spectral_estimate,
-        prior=prior,
+        prior=search_prior,
         maximum_candidates=(
             1
             if policy.mode is SpeakerCountMode.MANUAL
@@ -3565,7 +3580,7 @@ def _cluster(
                 eigengap=_clamp_probability(
                     eigengap_profile.scores.get(count, 0.0)
                 ),
-                prior=prior,
+                prior=policy_prior,
             )
         )
         total_work_items = required_work_items
@@ -3683,9 +3698,9 @@ def _cluster(
             under_split_detected = True
             selected_score = upper_score
 
-    if prior is not None:
+    if policy_prior is not None:
         prior_score = next(
-            (item for item in candidate_scores if item.count == prior),
+            (item for item in candidate_scores if item.count == policy_prior),
             None,
         )
         close_voice_ambiguity = (
@@ -3718,6 +3733,44 @@ def _cluster(
                     f"HYBRID_PRIOR_TIE_BREAK:{selected_score.count}->{prior_score.count}"
                 )
             selected_score = prior_score
+
+    acoustic_selected_score = selected_score
+    pyannote_prior_score = (
+        scores_by_count.get(external_prior)
+        if external_prior is not None
+        else None
+    )
+    pyannote_prior_applied = False
+    if (
+        pyannote_prior_score is not None
+        and pyannote_prior_score.count != selected_score.count
+    ):
+        objective_gap = selected_score.objective - pyannote_prior_score.objective
+        selected_looks_over_split = (
+            pyannote_prior_score.count < selected_score.count
+            and (
+                selected_score.tiny_cluster_fraction
+                >= _PYANNOTE_COUNT_PRIOR_OVER_SPLIT_FRACTION
+                or selected_score.over_split_risk >= 0.20
+                or selected_score.outlier_risk >= 0.15
+            )
+        )
+        prior_has_repeatable_support = (
+            pyannote_prior_score.stability
+            >= _PYANNOTE_COUNT_PRIOR_MIN_STABILITY
+            and pyannote_prior_score.bootstrap_support
+            >= _PYANNOTE_COUNT_PRIOR_MIN_BOOTSTRAP_SUPPORT
+        )
+        if prior_has_repeatable_support and (
+            objective_gap <= _PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE
+            or selected_looks_over_split
+        ):
+            correction_path.append(
+                "PYANNOTE_FULL_TIMELINE_PRIOR:"
+                f"{selected_score.count}->{pyannote_prior_score.count}"
+            )
+            selected_score = pyannote_prior_score
+            pyannote_prior_applied = True
 
     requested_resample_runs = config.count_stability_runs
     effective_unique_resample_runs = min(
@@ -3821,6 +3874,17 @@ def _cluster(
     ]
     if selected_score not in plausible:
         plausible.append(selected_score)
+    if (
+        pyannote_prior_score is not None
+        and pyannote_prior_score not in plausible
+        and pyannote_prior_score.count != acoustic_selected_score.count
+    ):
+        plausible.append(pyannote_prior_score)
+    if (
+        pyannote_prior_applied
+        and acoustic_selected_score not in plausible
+    ):
+        plausible.append(acoustic_selected_score)
 
     intrinsic_confidence = (
         0.15 * selected_score.compactness
@@ -3886,6 +3950,15 @@ def _cluster(
     if correction_path:
         confidence = min(confidence, 0.78)
         confidence_reasons.append("COUNT_CORRECTION_APPLIED")
+    if pyannote_prior_applied:
+        confidence = min(confidence, 0.70)
+        confidence_reasons.append("PYANNOTE_COUNT_PRIOR_APPLIED_WITH_REVIEW")
+    elif (
+        pyannote_prior_score is not None
+        and pyannote_prior_score.count != selected_score.count
+    ):
+        confidence = min(confidence, 0.65)
+        confidence_reasons.append("PYANNOTE_COUNT_PRIOR_CONFLICT")
     if count_search_truncated:
         confidence = min(confidence, 0.50)
         confidence_reasons.append("RESOURCE_BOUNDED_SEARCH_TRUNCATED")
@@ -4074,7 +4147,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.2.0"
+    version = "2.5.0"
 
     def __init__(
         self,
@@ -4760,6 +4833,149 @@ class SpeakerPipeline:
         )
         return replace(prepared, windows=tuple(partitioned))
 
+    @staticmethod
+    def _join_aligned_token_text(tokens: Sequence[Mapping[str, Any]]) -> str:
+        text = " ".join(
+            str(token.get("text") or "").strip()
+            for token in tokens
+            if str(token.get("text") or "").strip()
+        )
+        text = re.sub(r"\s+([,.;:!?，。！？；：])", r"\1", text)
+        return re.sub(
+            r"(?<=[\u3400-\u9fff])\s+(?=[\u3400-\u9fff])",
+            "",
+            text,
+        ).strip()
+
+    def _project_asr_to_speaker_windows(
+        self,
+        *,
+        source_windows: Sequence[SpeechWindow],
+        source_hypotheses: Sequence[AsrHypothesis],
+        target_windows: Sequence[SpeechWindow],
+        metrics: PipelineMetricsCollector,
+    ) -> list[AsrHypothesis]:
+        """Project one bounded ASR pass onto finer acoustic evidence windows."""
+
+        started = time.perf_counter()
+        if len(source_windows) != len(source_hypotheses):
+            raise WorkerError(
+                "ASR_PROJECTION_INVALID",
+                "ASR projection requires one source result per language window",
+            )
+        source_by_id = {
+            window.window_id: (window, hypothesis)
+            for window, hypothesis in zip(source_windows, source_hypotheses)
+        }
+        projected: list[AsrHypothesis] = []
+        for target in target_windows:
+            partition = target.metadata.get("speakerCountPartition")
+            if not isinstance(partition, Mapping):
+                source = source_by_id.get(target.window_id)
+                if source is None:
+                    raise WorkerError(
+                        "ASR_PROJECTION_INVALID",
+                        "unpartitioned speaker window has no ASR source",
+                        details={"windowId": target.window_id},
+                    )
+                projected.append(source[1])
+                continue
+            source_id = partition.get("sourceWindowId")
+            if not isinstance(source_id, str) or source_id not in source_by_id:
+                raise WorkerError(
+                    "ASR_PROJECTION_INVALID",
+                    "speaker evidence window has no matching ASR source",
+                    details={"windowId": target.window_id},
+                )
+            source_window, source_hypothesis = source_by_id[source_id]
+            raw_timestamps = source_hypothesis.evidence.get("timestamps")
+            if not isinstance(raw_timestamps, list) or not raw_timestamps:
+                raise WorkerError(
+                    "ASR_TIMESTAMPS_REQUIRED_FOR_SPEAKER_PARTITION",
+                    "speaker evidence partition requires forced-alignment timestamps",
+                    details={"sourceWindowId": source_id},
+                )
+            timestamps: list[dict[str, Any]] = []
+            for item_index, item in enumerate(raw_timestamps):
+                if (
+                    not isinstance(item, Mapping)
+                    or isinstance(item.get("startMs"), bool)
+                    or isinstance(item.get("endMs"), bool)
+                    or not isinstance(item.get("startMs"), int)
+                    or not isinstance(item.get("endMs"), int)
+                    or item["endMs"] < item["startMs"]
+                    or item["startMs"] < source_window.start_ms
+                    or item["endMs"] > source_window.end_ms
+                ):
+                    raise WorkerError(
+                        "ASR_PROJECTION_INVALID",
+                        "forced-alignment timestamp is outside its source window",
+                        details={
+                            "sourceWindowId": source_id,
+                            "itemIndex": item_index,
+                        },
+                    )
+                midpoint = (item["startMs"] + item["endMs"]) // 2
+                if (
+                    target.start_ms <= midpoint < target.end_ms
+                    or midpoint == target.end_ms == source_window.end_ms
+                ):
+                    timestamps.append(dict(item))
+            text = self._join_aligned_token_text(timestamps)
+            evidence = dict(source_hypothesis.evidence)
+            evidence.update(
+                {
+                    "timestamps": timestamps,
+                    "asrProjection": {
+                        "method": "forced-alignment-midpoint-v1",
+                        "sourceWindowId": source_id,
+                        "sourceStartMs": source_window.start_ms,
+                        "sourceEndMs": source_window.end_ms,
+                        "targetStartMs": target.start_ms,
+                        "targetEndMs": target.end_ms,
+                        "tokenCount": len(timestamps),
+                        "sourceTextSha256": hashlib.sha256(
+                            source_hypothesis.text.encode("utf-8")
+                        ).hexdigest(),
+                    },
+                }
+            )
+            if not text:
+                evidence.update(
+                    {
+                        "disposition": _ASR_NON_LEXICAL_DISPOSITION,
+                        "rejectionReason": (
+                            "NO_ALIGNED_LEXICAL_TOKENS_IN_EVIDENCE_WINDOW"
+                        ),
+                    }
+                )
+                projected.append(
+                    AsrHypothesis(
+                        window_id=target.window_id,
+                        text="",
+                        confidence=0.0,
+                        evidence=evidence,
+                    )
+                )
+                continue
+            evidence.pop("disposition", None)
+            evidence.pop("rejectionReason", None)
+            projected.append(
+                AsrHypothesis(
+                    window_id=target.window_id,
+                    text=text,
+                    normalized_text=text,
+                    display_text=text,
+                    confidence=source_hypothesis.confidence,
+                    evidence=evidence,
+                )
+            )
+        metrics.record_stage(
+            "asr-projection",
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return projected
+
     def _window_stage(
         self,
         *,
@@ -4834,10 +5050,28 @@ class SpeakerPipeline:
         self,
         prepared: PreparedAudio,
         embeddings: Sequence[EmbeddingRecord],
+        overlap: Sequence[OverlapDecision],
         request: StartJobRequest,
         metrics: PipelineMetricsCollector,
     ) -> _ClusterResult:
         started = time.perf_counter()
+        pyannote_count_prior, pyannote_prior_audit = (
+            self._derive_pyannote_count_prior(
+                prepared=prepared,
+                overlap=overlap,
+                request=request,
+            )
+        )
+        metrics.set_policy(
+            pyannoteSpeakerCountPriorStatus=pyannote_prior_audit["status"],
+            pyannoteSpeakerCountPriorObserved=(
+                pyannote_prior_audit.get("observedCount")
+            ),
+            pyannoteSpeakerCountPriorUsed=pyannote_count_prior,
+            pyannoteFullTimelineTurnsSha256=(
+                pyannote_prior_audit.get("speakerTurnsSha256")
+            ),
+        )
         key = _digest(
             {
                 "algorithm": _CLUSTER_SELECTION_METHOD,
@@ -4852,6 +5086,7 @@ class SpeakerPipeline:
                     }
                     for item in embeddings
                 ],
+                "pyannoteCountPrior": pyannote_prior_audit,
             }
         )
         value, hit, corrupted = self._cache_item(
@@ -4867,6 +5102,7 @@ class SpeakerPipeline:
                 prepared.windows,
                 request,
                 self.config,
+                pyannote_count_prior=pyannote_count_prior,
             )
             self.cache.write("clustering", key, value.as_dict())
         metrics.record_cache(
@@ -4880,7 +5116,132 @@ class SpeakerPipeline:
             "clustering", (time.perf_counter() - started) * 1000.0
         )
         assert value is not None
+        prior_applied = any(
+            item.startswith("PYANNOTE_FULL_TIMELINE_PRIOR:")
+            for item in value.correction_path
+        )
+        prior_conflict = (
+            pyannote_count_prior is not None
+            and value.count != pyannote_count_prior
+        )
+        metrics.set_policy(
+            pyannoteSpeakerCountPriorApplied=prior_applied,
+            pyannoteSpeakerCountPriorConflict=prior_conflict,
+            speakerCountCorrectionPath="|".join(value.correction_path),
+            speakerCountConfidenceReasons="|".join(
+                value.confidence_reasons
+            ),
+        )
         return value
+
+    def _derive_pyannote_count_prior(
+        self,
+        *,
+        prepared: PreparedAudio,
+        overlap: Sequence[OverlapDecision],
+        request: StartJobRequest,
+    ) -> tuple[int | None, dict[str, Any]]:
+        """Validate one full-timeline pyannote observation for auto count."""
+
+        audit: dict[str, Any] = {
+            "status": "not-applicable",
+            "provider": _adapter_identity(self.overlap_adapter),
+        }
+        if (
+            self.config.pyannote_mode != "fallback"
+            or audit["provider"]["id"] != "pyannote-community-1"
+        ):
+            return None, audit
+        if request.speaker_policy.mode is not SpeakerCountMode.AUTO:
+            audit["status"] = "ignored-non-auto-policy"
+            return None, audit
+        if len(overlap) != len(prepared.windows) or not overlap:
+            audit["status"] = "invalid-window-coverage"
+            return None, audit
+
+        snapshots: list[tuple[Any, ...]] = []
+        for window, decision in zip(prepared.windows, overlap):
+            evidence = decision.evidence
+            full = evidence.get("fullTimelineInference")
+            if not isinstance(full, Mapping):
+                audit["status"] = "missing-full-timeline-evidence"
+                return None, audit
+            start_ms = full.get("startMs")
+            end_ms = full.get("endMs")
+            turn_count = full.get("turnCount")
+            local_count = full.get("localSpeakerCount")
+            local_speakers = full.get("localSpeakers")
+            turns_sha256 = full.get("speakerTurnsSha256")
+            if (
+                full.get("scope") != "full-normalized-timeline"
+                or isinstance(start_ms, bool)
+                or start_ms != 0
+                or isinstance(end_ms, bool)
+                or end_ms != prepared.duration_ms
+                or isinstance(turn_count, bool)
+                or not isinstance(turn_count, int)
+                or isinstance(local_count, bool)
+                or not isinstance(local_count, int)
+                or not isinstance(local_speakers, list)
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in local_speakers
+                )
+                or local_speakers != sorted(set(local_speakers))
+                or local_count != len(local_speakers)
+                or local_count < 1
+                or turn_count < local_count
+                or not isinstance(turns_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", turns_sha256) is None
+            ):
+                audit["status"] = "invalid-full-timeline-evidence"
+                return None, audit
+            window_turns = evidence.get("speakerTurns")
+            if not isinstance(window_turns, list):
+                audit["status"] = "invalid-window-turn-evidence"
+                return None, audit
+            for turn in window_turns:
+                if (
+                    not isinstance(turn, Mapping)
+                    or turn.get("localSpeaker") not in local_speakers
+                    or isinstance(turn.get("startMs"), bool)
+                    or not isinstance(turn.get("startMs"), int)
+                    or isinstance(turn.get("endMs"), bool)
+                    or not isinstance(turn.get("endMs"), int)
+                    or turn["startMs"] < window.start_ms
+                    or turn["endMs"] > window.end_ms
+                    or turn["endMs"] <= turn["startMs"]
+                ):
+                    audit["status"] = "invalid-window-turn-evidence"
+                    return None, audit
+            snapshots.append(
+                (
+                    start_ms,
+                    end_ms,
+                    turn_count,
+                    local_count,
+                    tuple(local_speakers),
+                    turns_sha256,
+                )
+            )
+
+        if len(set(snapshots)) != 1:
+            audit["status"] = "inconsistent-full-timeline-evidence"
+            return None, audit
+        snapshot = snapshots[0]
+        observed_count = int(snapshot[3])
+        audit.update(
+            {
+                "observedCount": observed_count,
+                "turnCount": int(snapshot[2]),
+                "speakerTurnsSha256": str(snapshot[5]),
+            }
+        )
+        if observed_count > len(prepared.windows):
+            audit["status"] = "outside-acoustic-evidence-range"
+            return None, audit
+        audit["status"] = "eligible"
+        return observed_count, audit
 
     def _initial_segments(
         self,
@@ -6751,11 +7112,6 @@ class SpeakerPipeline:
 
         try:
             prepared = self._refinement_stage(prepared, context, metrics)
-            prepared = self._partition_for_speaker_count_policy(
-                prepared,
-                request,
-                metrics,
-            )
         except Exception:
             _release_adapter_resources(
                 self.embedding_adapter,
@@ -6827,8 +7183,8 @@ class SpeakerPipeline:
             != _ASR_NON_LEXICAL_DISPOSITION
         )
         metrics.set_policy(
-            asrLexicalWindowCount=len(lexical_pairs),
-            asrRejectedNonLexicalWindowCount=len(rejected_asr),
+            asrSourceLexicalWindowCount=len(lexical_pairs),
+            asrSourceRejectedNonLexicalWindowCount=len(rejected_asr),
         )
         if not lexical_pairs:
             no_lexical_voice_activity = (
@@ -6853,6 +7209,88 @@ class SpeakerPipeline:
                 windows=tuple(window for window, _ in lexical_pairs),
             )
             asr = [hypothesis for _, hypothesis in lexical_pairs]
+        source_windows = prepared.windows
+        source_asr = tuple(asr)
+        prepared = self._partition_for_speaker_count_policy(
+            prepared,
+            request,
+            metrics,
+        )
+        asr = self._project_asr_to_speaker_windows(
+            source_windows=source_windows,
+            source_hypotheses=source_asr,
+            target_windows=prepared.windows,
+            metrics=metrics,
+        )
+        projected_rejected_asr = tuple(
+            (window, hypothesis)
+            for window, hypothesis in zip(prepared.windows, asr)
+            if hypothesis.evidence.get("disposition")
+            == _ASR_NON_LEXICAL_DISPOSITION
+        )
+        if projected_rejected_asr:
+            rejected_ids = [
+                window.window_id for window, _ in projected_rejected_asr
+            ]
+            metrics.record_cascade_stage(
+                stage="asr-projection-non-lexical-rejection",
+                provider=_adapter_identity(self.asr_adapter)["id"],
+                trigger_reason="NO_ALIGNED_LEXICAL_TOKENS",
+                candidate_ids=rejected_ids,
+                candidate_scope="speaker-evidence-windows-without-aligned-text",
+                source_count=len(prepared.windows),
+                max_candidates=len(prepared.windows),
+                candidate_start_ms=min(
+                    window.start_ms for window, _ in projected_rejected_asr
+                ),
+                candidate_end_ms=max(
+                    window.end_ms for window, _ in projected_rejected_asr
+                ),
+                invoked=True,
+                cache_stage="asr",
+                latency_ms=0.0,
+                resource=None,
+                confidence=1.0,
+                exit_reason="REJECTED_WITHOUT_FABRICATED_TEXT",
+            )
+        projected_lexical_pairs = tuple(
+            (window, hypothesis)
+            for window, hypothesis in zip(prepared.windows, asr)
+            if hypothesis.evidence.get("disposition")
+            != _ASR_NON_LEXICAL_DISPOSITION
+        )
+        metrics.set_policy(
+            asrLexicalWindowCount=len(projected_lexical_pairs),
+            asrRejectedNonLexicalWindowCount=(
+                len(rejected_asr) + len(projected_rejected_asr)
+            ),
+        )
+        if not projected_lexical_pairs:
+            no_lexical_voice_activity = with_voice_activity_classification(
+                voice_activity,
+                classification="no-lexical-speech-detected",
+                has_transcribable_speech=False,
+            )
+            raise WorkerError(
+                "NO_TRANSCRIBABLE_SPEECH",
+                "No aligned lexical speech remained for speaker evidence",
+                details={
+                    "sourceWindowCount": len(source_windows),
+                    "speakerEvidenceWindowCount": len(prepared.windows),
+                    "rejectedWindowCount": len(projected_rejected_asr),
+                    "voiceActivity": no_lexical_voice_activity,
+                },
+            )
+        if projected_rejected_asr:
+            prepared = replace(
+                prepared,
+                windows=tuple(
+                    window for window, _ in projected_lexical_pairs
+                ),
+            )
+            asr = [
+                hypothesis for _, hypothesis in projected_lexical_pairs
+            ]
         campp_started = time.perf_counter()
         try:
             embeddings = self._window_stage(
@@ -6930,7 +7368,7 @@ class SpeakerPipeline:
             raise
         _release_adapter_resources(self.overlap_adapter)
         clusters = self._clustering_stage(
-            prepared, embeddings, request, metrics
+            prepared, embeddings, overlap, request, metrics
         )
         metrics.set_policy(resolvedSpeakerCount=clusters.count)
         segments = self._initial_segments(

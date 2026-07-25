@@ -2239,6 +2239,21 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         self.assertFalse(decisions[0].evidence["calibratedConfidence"])
         self.assertTrue(decisions[0].evidence["overlapDetectorRun"])
+        full_timeline = decisions[0].evidence["fullTimelineInference"]
+        self.assertEqual(
+            full_timeline,
+            decisions[1].evidence["fullTimelineInference"],
+        )
+        self.assertEqual(full_timeline["scope"], "full-normalized-timeline")
+        self.assertEqual(full_timeline["startMs"], 0)
+        self.assertEqual(full_timeline["endMs"], 4000)
+        self.assertEqual(full_timeline["turnCount"], 3)
+        self.assertEqual(full_timeline["localSpeakerCount"], 2)
+        self.assertEqual(
+            full_timeline["localSpeakers"],
+            ["LOCAL_A", "LOCAL_B"],
+        )
+        self.assertRegex(full_timeline["speakerTurnsSha256"], r"^[0-9a-f]{64}$")
 
     def test_pyannote_isolated_runtime_receives_one_full_timeline(
         self,
@@ -2270,6 +2285,10 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["start_ms"], 0)
         self.assertEqual(calls[0]["end_ms"], 4000)
+        self.assertEqual(
+            decisions[0].evidence["fullTimelineInference"],
+            decisions[1].evidence["fullTimelineInference"],
+        )
         self.assertEqual(
             [item.evidence["overlapIntervals"] for item in decisions],
             [

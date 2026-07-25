@@ -2686,7 +2686,7 @@ class LocalPyannoteAuditAdapter:
     """
 
     adapter_id = "pyannote-community-1"
-    version = "2.1.0"
+    version = "2.2.0"
     telemetry_enabled = False
 
     def __init__(
@@ -3210,6 +3210,24 @@ class LocalPyannoteAuditAdapter:
             )()
             turns = self._speaker_turns(result, timeline)
         overlap_intervals = self._overlap_intervals(turns)
+        global_local_speakers = sorted(
+            {str(turn["localSpeaker"]) for turn in turns}
+        )
+        serialized_turns = json.dumps(
+            turns,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        full_timeline_inference = {
+            "scope": "full-normalized-timeline",
+            "startMs": 0,
+            "endMs": prepared.duration_ms,
+            "turnCount": len(turns),
+            "localSpeakerCount": len(global_local_speakers),
+            "localSpeakers": global_local_speakers,
+            "speakerTurnsSha256": hashlib.sha256(serialized_turns).hexdigest(),
+        }
 
         output: list[OverlapDecision] = []
         for window in windows:
@@ -3251,6 +3269,7 @@ class LocalPyannoteAuditAdapter:
                 "pcmBufferId": pcm_buffer_id,
                 "confidenceKind": "binary-annotation-no-posterior",
                 "calibratedConfidence": False,
+                "fullTimelineInference": dict(full_timeline_inference),
                 "speakerTurns": window_turns,
                 "overlapIntervals": window_overlap,
                 "localSpeakerCount": len(

@@ -20,13 +20,15 @@
 
 1. `Qwen3-ASR-1.7B` 是其 30 种语言和 22 种中文方言支持集内的首选 ASR 基模。官方模型卡把它描述为开源 ASR 中的 SOTA，并提供语言识别、流式/离线推理、长音频和独立强制对齐器。
 2. `pyannote/speaker-diarization-community-1` 的 powerset segmentation、WeSpeaker embedding 和 VBx clustering 是离线 Dynamic-N 说话人主权威。其全局人数没有 Sortformer 的固定四输出限制，并原生接受 `num_speakers`、`min_speakers` 和 `max_speakers`。托管前沿档以 `pyannote Precision-2` 为当前 incumbent：pyannote 官方在无 collar、保留 overlap 的同表 12 个基准中报告其 `12/12` DER 低于 Community-1；但它不是离线 checkpoint。
-3. `facebook/omniASR-LLM-7B` 是服务端支持集外语言的旗舰兜底，覆盖 1600+ 语言；`CTC-300M/1B` 只能作为低成本召回或本机兼容候选，不能用小模型结果代表 7B 上限。
-4. `Whisper large-v3` 是成熟的独立第二意见。在 Apple Silicon 上优先验证 WhisperKit/Core ML 或 whisper.cpp/Metal，而不是把 CUDA 路径直接搬到 MPS。
-5. `Parakeet-TDT-0.6B-v3` 是 25 种欧洲语言的高吞吐专用挑战者；`Canary-Qwen-2.5B` 是英语专用挑战者。二者只有在本项目 held-out 分桶同时改善 WER、时间轴和效率时才能接管相应路由。
-6. `VibeVoice-ASR-7B` 是服务器级联合挑战者：公开 MIT 权重、Transformers/vLLM 部署、60 分钟单次上下文、50+ 语言/代码切换，并直接生成 who/when/what。它的公开报告同时明确 serialized 输出在 overlap 会漏掉次要说话人，SFT 主要集中英语/中文；因此用于全局一致性、长上下文和语义挑战，不能抹掉 Community-1 的多轨 overlap 真值。
-7. `FireRedASR2S` 是中文和中英代码切换专用挑战者：8B+ LLM / 1B+ AED、20+ 中文方言/口音、100+ 语言 VAD/LID、singing/music 多标签门控和中英 punctuation 均有公开权重与部署代码。它可接管已验证的中文方言、歌声或人声门控分桶，但不能代表 1600+ 语言或任意多人 diarization。
-8. Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。当前公开 checkpoint 输出维度固定为 4，且官方在 5 人以上数据上的 DER 明显退化，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
-9. 本地 LLM 与声学权威完全分离。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。LLM 只能在已有声学 N-best 内做约束重排、术语、翻译、保守润色和证据化报告，不能创建说话人、语言或原音频不存在的文本。
+3. `MOSS-Transcribe-Diarize 0.9B` 是当前优先级最高的可自托管联合挑战者：公开 Apache-2.0 权重、128k 上下文、单次最长 90 分钟、50+ 语言、逐段自动语言、时间戳、说话人和事件/重叠标签，并有官方 Transformers、SGLang 和 vLLM 路径。其 2026-07-09 权重和 14 语言比赛结果很新，模型需 `trust_remote_code=True`，公开论文的主要多人集集中中文/英语且指标以 CER/cpCER 为主；因此必须先审计远程代码、幻觉、漏轨、人数、DER/JER、overlap 和时间边界，不能因参数小或作者榜单领先直接替代声学 RTTM 权威。
+4. `facebook/omniASR-LLM-7B` 是服务端支持集外语言的旗舰兜底，覆盖 1600+ 语言；`CTC-300M/1B` 只能作为低成本召回或本机兼容候选，不能用小模型结果代表 7B 上限。
+5. `Whisper large-v3` 是成熟的独立第二意见。在 Apple Silicon 上优先验证 WhisperKit/Core ML 或 whisper.cpp/Metal，而不是把 CUDA 路径直接搬到 MPS。
+6. `Parakeet-TDT-0.6B-v3` 是 25 种欧洲语言的高吞吐专用挑战者；`Canary-Qwen-2.5B` 是英语专用挑战者。二者只有在本项目 held-out 分桶同时改善 WER、时间轴和效率时才能接管相应路由。
+7. `VibeVoice-ASR-7B` 是服务器级联合挑战者：公开 MIT 权重、Transformers/vLLM 部署、60 分钟单次上下文、50+ 语言/代码切换，并直接生成 who/when/what。它的公开报告同时明确 serialized 输出在 overlap 会漏掉次要说话人，SFT 主要集中英语/中文；因此用于全局一致性、长上下文和语义挑战，不能抹掉 Community-1 的多轨 overlap 真值。
+8. `FireRedASR2S` 是中文和中英代码切换专用挑战者：8B+ LLM / 1B+ AED、20+ 中文方言/口音、100+ 语言 VAD/LID、singing/music 多标签门控和中英 punctuation 均有公开权重与部署代码。它可接管已验证的中文方言、歌声或人声门控分桶，但不能代表 1600+ 语言或任意多人 diarization。
+9. `DiariZen` 是高价值的 Dynamic-N 研究挑战者。独立 196.6 小时五语言比较报告其总体 DER `13.3%`，仅次于托管 PyannoteAI/Precision-2 的 `11.2%`，且 5+ 人分桶 DER `7.1%`；但当前最佳公开权重为 CC BY-NC 4.0，默认商业产品只能研究评测或复用 MIT 代码以许可兼容数据重训，不能打包其权重。
+10. Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。当前公开 checkpoint 输出维度固定为 4，且官方在 5 人以上数据上的 DER 明显退化，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
+11. 本地 LLM 与声学权威完全分离。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。LLM 只能在已有声学 N-best 内做约束重排、术语、翻译、保守润色和证据化报告，不能创建说话人、语言或原音频不存在的文本。
 
 这些是模型晋级候选，不是发布声明。官方自报指标只用于缩小候选集，最终权威是本项目按数据源、录音、说话人隔离的 held-out 结果。
 
@@ -37,9 +39,11 @@
 | 人声活动与内容门控 | 轻量 VAD + Community-1 segmentation + ASR no-speech 共识 | Silero VAD、独立音频事件分类器 | 单独 VAD 不能区分歌词、音乐中人声、笑声和可转写词汇 |
 | 托管前沿 diarization | Precision-2（仅经逐次授权的可上传媒体） | 后续托管模型按相同盲测登记 | 远端推理不满足默认离线和数据不出域约束；官方榜单不能替代本项目 held-out |
 | 私有任意总人数 diarization | Community-1/VBx；服务端并行评测 NeMo cascaded diarizer | CAM++/ERes2NetV2、SpeakerKit Core ML | 单段 embedding 聚类不能独立解决边界、重叠和人数；现有 Dynamic-N 实测会过分裂 |
+| Dynamic-N 研究上限 | Community-1 与 DiariZen 同音频比较 | 以许可兼容数据重训 DiariZen 架构 | DiariZen 最佳公开权重为 CC BY-NC 4.0，只能研究比较，不能进入默认商业模型包 |
 | 低延迟 1-4 人 diarization | Community-1 仍保留最终审计 | Streaming Sortformer 4spk | 固定 4 个输出通道，5 人以上不是适用域 |
 | 30 语言/22 中文方言 ASR | Qwen3-ASR-1.7B | Whisper large-v3、Parakeet 欧洲语种、Canary-Qwen 英语 | 路由挑战者的覆盖或硬件路径更窄 |
 | 1600+ 长尾语言 ASR | Omnilingual ASR LLM-7B/7B-ZS 服务端 | Omnilingual CTC 300M/1B 本机召回 | 7B 约 30 GiB、参考实现基于 fairseq2，不适合当前 M4 常驻；覆盖不等于每种语言都达到发布质量 |
+| 长上下文联合转录/说话人/时间 | MOSS-Transcribe-Diarize 0.9B 优先挑战；VibeVoice-ASR-7B 独立挑战 | MOSS Pro 仅在供应商数据策略审核并逐次授权后参加 | 生成式单模型必须单列幻觉、漏轨、人数、overlap、时间边界和远程代码供应链风险，不能覆盖声学多轨证据 |
 | 音频语言识别 | Qwen/Whisper/SpeechBrain VoxLingua107 校准共识 | 未来基于许可兼容数据训练更广 LID head | MMS-LID-4017 是 CC BY-NC 4.0，不能进入默认商业模型包 |
 | 时间对齐 | Qwen3-ForcedAligner-0.6B 的 11 语言支持集 | 每语言 CTC aligner、WhisperX/MFA 候选 | 不支持的语言不得伪造词级时间戳，只能保留段级时间和复核状态 |
 | 重叠说话 | Community-1 多轨活动 + 局部重叠路由 | 经 SI-SDRi 与 tcpWER 验证的局部分离/多说话人 ASR | 当前没有一个成熟开源模型能对任意语言、任意并发人数无条件分离；全场分离会引入伪影 |
@@ -66,7 +70,7 @@ flowchart TD
   SPECIALIST --> ALIGN
   OMNI --> ALIGN
   ALIGN --> NBEST["不可变声学 N-best 与校准置信度"]
-  SEG --> JOINT["VibeVoice-ASR-7B 全局联合挑战"]
+  SEG --> JOINT["MOSS 0.9B / VibeVoice 7B 全局联合挑战"]
   JOINT --> NBEST
   NBEST --> LLM["本地 LLM 约束重排/术语/翻译/润色/摘要"]
   LLM --> VALIDATE["schema + 数字/专名/时间/说话人不变量"]
@@ -129,6 +133,9 @@ flowchart TD
 - WhisperKit/whisper.cpp 作为第二意见时与 Qwen 串行，不同时占用统一内存。
 - `qwen3.5:9b` 已安装为 Ollama model ID `6488c96fa5fa`，实际为 9.7B、Q4_K_M、6.6 GB；底层 blob SHA-256 为 `dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c`。只有声学阶段结束后才加载，完整质量晋级前保留 4B 回退；安装后数据卷约剩 15 GiB，仍需保留至少 8 GiB 工作空间。
 - M4 的两条真实短样本对照证明跨 job 全常驻可将墙钟从 `197.53 秒` 降到 `135.40 秒`，但最低只剩约 14 MiB free pages，且现有 MPS 资源指标未捕获该压力。M4 私有配置因此使用 `modelResidency=stage`，在启动 9B 业务阶段前释放声学模型；`worker` 常驻留给已做容量门禁的服务器。
+- MOSS 官方 Hugging Face 快照已固定到 revision `e5118b411bf5a77d7a90c4941066bec93c967312`：19 个文件共 `1,833,163,202` bytes，manifest SHA-256 为 `89533dc712a143a1b0219daed6202485ee1020fab9172f449de21a2a702243fc`，权重 LFS SHA-256 为 `9a0ceb4ab7330357db3ff583dba8d83625d5b733b00e1d55d6970e11b07026c4`，审计报告 SHA-256 为 `3989a7b61ee9f066f0f6e4200072877c8aaa5c5c71e54dc942a2d7ce977b374d`。三份实际加载的 remote code 逐 AST/调用面检查未发现动态执行、网络、子进程、文件写入、pickle/`torch.load` 或敏感反射；官方辅助仓库固定 revision `0e3d1403fd8f1f1c674e883ece96b9f630794ebe`，核心推理路径同样无这些调用，Web/字幕层的 FFmpeg、临时目录清理和可选 vLLM HTTP 路径不在本地 Transformers 烟测执行面内。官方代码中的 `model.eval()` 不是 Python 内置 `eval()`。
+- MOSS 使用独立 Python `3.12.13` 环境，安装 PyTorch `2.13.0`、Transformers `5.14.1` 和官方包依赖，没有修改现有 production ASR 环境。强制离线、MPS FP16、greedy 的公开 LibriSpeech 3.505 秒 N=1 开发样本得到 `1/1` 人、逐词完全命中，原始输出 `[0.55][S01] Concord returned to its place amidst the tents.[3.43]`；推理 `16.1485 秒`、冷启动端到端 `26.84 秒`，最大 RSS/peak footprint 约 `3.05/3.22 GiB`。raw transcript/segments SHA-256 分别为 `534e5972ea9be1539dbb81deed7c5a76d969eef590e392d5dcb438712f4c5d40` / `0f46423f052124f0ce465b33a6bbdf56012088bc97a87e271188c460bf12baba`。
+- 同配置对经过 RTTM 事件边界验证、确实包含两人的 90 秒 VoxConverse N=2 真实重叠窗口输出 `2/2` 人和 27 段，DER/JER 为 `0.198998179 / 0.201952120`、speaker confusion `0.010382514`；但串行生成没有恢复并发轨道，overlap F1 为 `0`，末时间戳 `90.03 秒` 超出媒体 `30 ms`，所以不能覆盖 Community-1 regular timeline。推理 `315.5265 秒`、冷启动端到端 `404.30 秒`，对应 RTF `3.5059 / 4.4922`，最大 RSS 约 `3.93 GiB`、macOS peak memory footprint 约 `17.09 GiB`、swap `0`；raw transcript/segments SHA-256 分别为 `a7311b19fdc73c689d134eeae53a7c529d2b573e162cc8a91d12130b564c39e6` / `06919bc36260d6a8b4b73f0750452db0a8650736a5791e80769831ab544138d3`。这支持继续在旗舰 GPU 服务器评测官方基模上限，同时否决其在当前 M4 上直接成为长音频默认路由。
 - 不在本机运行 Omnilingual LLM-7B FP32；本机只允许先测 CTC 300M/1B 或量化实现，且结果不能代表旗舰 7B。
 
 ### 旗舰服务器质量档
@@ -139,10 +146,12 @@ flowchart TD
 
 ### 当前生命周期状态
 
-2026-07-25 的 60 样本共享 worker 基线只有 5 条 `observed`。第 6 条在 300 秒超时，日志显示 Qwen checkpoint、CAM++ 和 ERes2NetV2 在跨 job 生命周期中反复加载；其余 54 条被 `BATCH_ABORTED`。当前已加入 `stage|worker` 驻留策略、异常清理、worker shutdown 统一释放，以及仅继续未启动作业的有限恢复会话。两条不同真实音频已证明 `worker` 模式的 Qwen/CAM++/ERes 各只初始化一次。持续进度协议也已落地，但完整 60 条重跑仍未完成：
+2026-07-26 的 60 样本长共享 worker 重跑首先得到 `42 observed / 17 job.failed / 1 hard deadline`。17 个失败都在 `media_probe`，而本机独立 FFprobe 可正常读取源 WAV；hard deadline 样本在 675 秒内仍持续 heartbeat，但反复加载 Qwen/CAM++/ERes2NetV2。将失败样本按最多 4 个 job 的小会话复跑后，18/18 全部得到 `review.required`，无强制清理；合并后的 60/60 均有独立技术终态。由此形成以下生产规则：
 
-- worker 已在长推理期间发 heartbeat/progress；harness 分离 idle timeout 与不可延长 hard deadline，预算使用 `冷启动 p95 + 音频时长 * 分桶 RTF p95 + 安全余量`。
-- 60 条重跑必须让每条得到独立终态；恢复实现通过伪 worker 和两条健康样本回归，不等于 60/60 已完成。
+- worker 在长推理期间持续发 heartbeat/progress；harness 分离 idle timeout 与不可延长 hard deadline，预算使用 `冷启动 p95 + 音频时长 * 分桶 RTF p95 + 安全余量`。
+- M4 `stage` 模式的样本 runner 默认每个共享会话最多处理 4 个 job 后主动回收，仍保留会话内模型复用；服务器只有在统一内存/VRAM 压力门禁通过后才显式调大。恢复会话只继续未开始作业，历史失败结果不被覆盖。
+- 媒体探测不再把 APFS 的纯 `mtime` 漂移误判为内容变化：探测前后同时核对设备、inode、大小和 SHA-256；字节变化仍以 `SOURCE_CHANGED` fail closed。5 条真实短音频已按 `4 + 1` 两个有界会话完成 `5/5 review.required`，无恢复会话、技术失败或强制清理。
+- 恢复报告为 `60/60 observed`、`60/60 review.required`、自动人数 exact-count `26/60`、文档语言 exact-match `53/60`、原始语言段准确率 `540/605 = 0.892561983`、平均 WER/CER `0.311813840`、平均 RTF `12.227236553`。这证明技术终态闭合，同时明确证明现生产人数、语言广度、转录和复核量尚未达到发布质量。
 - macOS 必须采集 MPS/统一内存与系统压力峰值，不能继续用 `peakVramMb=0` 或普通 RSS 作容量门禁。
 - 并发 preflight 已改用同目录唯一可回收探针文件，并以 32 次、8 线程共享根回归验证；后续仍需在多进程 worker 启动压力测试中保留该门禁。
 - 报告必须区分 `model-failed`、`job-timeout`、`batch-aborted` 和 `not-run`。
@@ -176,14 +185,15 @@ flowchart TD
 
 ## 落地顺序
 
-1. 修复当前生产 adapter 生命周期和 batch failure isolation，先让 60/60 都得到独立终态。
-2. 将 Community-1 整段 regular/exclusive 时间线提升为默认离线主 diarization 输出，现有 Dynamic-N 只做冲突融合和不变量审计；重跑 N=1/2/3/5 和 held-out。对公开可上传盲测另跑 Precision-2 同音频挑战，保持离线与托管结论分开。
-3. 固化 Qwen3-ASR-1.7B 支持集内基线，增加 Whisper large-v3 第二意见；按相同音频、相同切分比较 WER/CER、LID、时间和 RTF。
-4. 在服务器烟测 Omnilingual 7B/7B-ZS，并用支持集外语言 held-out 验证，不用 300M 结果替代 7B。
-5. 服务器增补 VibeVoice-ASR-7B 全局联合挑战；同时评测 FireRedASR2S 的中文方言/歌声/VAD-LID 分桶、Parakeet 欧洲语种、Canary-Qwen 英语和 Sortformer 1-4 人；只有分桶胜出才启用路由。
-6. 建立真实代码切换和重叠多说话人门禁，再决定 LID 序列模型、分离模型或多说话人 ASR 的微调方向。
-7. 在 M4 上完整评测 `qwen3.5:9b`，服务器评测 35B-A3B；先通过 suggestion-only，再分别评估翻译、润色、摘要和 N-best 重排。
-8. 同一批 held-out 输出真实 SRT/WebVTT/ASS、soft-mux、burn-in、Java PDF 和证据报告，任何上游 blocker 都必须传递到发布状态。
+1. 保持 60/60 独立终态，并用有界 worker 会话、hard deadline 和统一内存峰值持续验证失败隔离。
+2. 将 Community-1 整段 regular/exclusive 时间线提升为默认离线主 diarization 输出，现有 Dynamic-N 只做冲突融合和不变量审计；重跑 N=1/2/3/5/8 和 held-out。研究环境并行比较 DiariZen，商业默认不得使用其 NC 权重；对公开可上传盲测另跑 Precision-2 同音频挑战。
+3. 在已完成 MOSS-Transcribe-Diarize 0.9B 快照/remote-code 审计和本机 N=1/N=2 烟测的基础上，优先落地带 heartbeat、硬截止时间和边界裁剪检查的隔离 worker；先补齐真实 N=3/5、代码切换和 overlap 分桶，再在旗舰 GPU 服务器与 Community-1 + Qwen 级联及 VibeVoice-ASR-7B 做同音频联合转录挑战。必须同时比较 cpWER/tcpWER、DER/JER、漏轨、overlap、时间边界、幻觉、语言和资源，不因参数规模小而降低其优先级，也不因本机 FP16 MPS 边缘结果限制官方基模上限。
+4. 固化 Qwen3-ASR-1.7B 支持集内基线，增加 Whisper large-v3 第二意见；按相同音频、相同切分比较 WER/CER、LID、时间和 RTF。
+5. 在服务器烟测 Omnilingual 7B/7B-ZS，并用支持集外语言 held-out 验证，不用 300M 结果替代 7B。
+6. 评测 FireRedASR2S 的中文方言/歌声/VAD-LID 分桶、Parakeet 欧洲语种、Canary-Qwen 英语和 Sortformer 1-4 人；只有分桶胜出才启用路由。
+7. 建立真实代码切换和重叠多说话人门禁，再决定 LID 序列模型、分离模型或多说话人 ASR 的微调方向。
+8. 在 M4 上完整评测 `qwen3.5:9b`，服务器评测 35B-A3B；先通过 suggestion-only，再分别评估翻译、润色、摘要和 N-best 重排。
+9. 同一批 held-out 输出真实 SRT/WebVTT/ASS、soft-mux、burn-in、Java PDF 和证据报告，任何上游 blocker 都必须传递到发布状态。
 
 ## 官方来源
 
@@ -196,6 +206,8 @@ flowchart TD
 - [Argmax open-source Swift speech stack](https://github.com/argmaxinc/argmax-oss-swift), MIT；WhisperKit 与 SpeakerKit 提供 Apple Core ML 路径，模型许可证仍需逐项随包审计。
 - [Community-1 model card](https://huggingface.co/pyannote/speaker-diarization-community-1), revision `3533c8cf8e369892e6b79ff1bf80f7b0286a54ee`, CC BY 4.0；本机隔离镜像已固定并验证。
 - [pyannote Community-1 / Precision-2 official benchmark](https://huggingface.co/pyannote/speaker-diarization-community-1#benchmark)，采用无 collar、保留 overlap 的统一 DER 表；Precision-2 为托管远端模型，不得写成离线依赖。
+- [MOSS-Transcribe-Diarize 0.9B model card](https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize), revision `e5118b411bf5a77d7a90c4941066bec93c967312`, Apache-2.0；[official repository](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize) revision `0e3d1403fd8f1f1c674e883ece96b9f630794ebe`，提供 Transformers、SGLang/vLLM 和字幕工作流；[paper](https://arxiv.org/abs/2601.01554) 说明 128k/90 分钟、2–12 人模拟训练、逐段多语、事件/overlap 和当前评测边界。
+- [Benchmarking Diarization Models](https://arxiv.org/abs/2509.26177) 在 196.6 小时、五语言、保留 overlap 的统一比较中报告 PyannoteAI `11.2%` 与 DiariZen `13.3%` 总体 DER；[DiariZen code](https://github.com/BUTSpeechFIT/DiariZen) 为 MIT，但 [最佳公开权重](https://huggingface.co/BUT-FIT/diarizen-wavlm-large-s80-md-v2) 为 CC BY-NC 4.0，不能进入默认商业包。
 - [NeMo diarization overview](https://docs.nvidia.com/nemo-framework/user-guide/latest/nemotoolkit/asr/speaker_diarization/intro.html), 明确说明 cascaded 系统对人数和会话长度限制更少。
 - [Streaming Sortformer 4spk v2.1](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1), revision `fafaab5faa1617a0ca52d38dd3dc4bd636800d3d`；官方输出 `S=4`，5 人以上 DER 明显退化。
 - [SpeechBrain VoxLingua107 LID](https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa), revision `0253049ae131d6a4be1c4f0d8b0ff483a0f8c8e9`, Apache-2.0。
@@ -207,4 +219,4 @@ flowchart TD
 - [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text)，`gpt-4o-transcribe-diarize` 的 speaker/time/text 约束、30 秒以上 chunking、最多四个已知说话人参考和 prompt 限制；仅逐次授权托管挑战者。
 - [Ollama Qwen3.5 tags](https://ollama.com/library/qwen3.5), `9b` Q4 当前标称约 6.6 GB，`27b` 约 17 GB，`35b` 约 24 GB。
 
-所有网页和模型元数据于 2026-07-25 核验。revision、许可证、文件清单和本地哈希必须在实际下载时再次锁定。
+所有网页和模型元数据于 2026-07-25/26 核验。revision、许可证、文件清单和本地哈希必须在实际下载时再次锁定。

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -304,6 +305,58 @@ def test_probe_failure_does_not_fall_back_to_extension(tmp_path: Path) -> None:
         ).probe(source)
 
     assert raised.value.code is MediaProbeErrorCode.PROBE_FAILED
+
+
+def test_metadata_timestamp_change_with_stable_bytes_is_accepted(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "stable.wav"
+    source.write_bytes(b"fixture")
+
+    class TimestampTouchRunner(FixtureRunner):
+        def run(
+            self,
+            command: tuple[str, ...] | list[str],
+            *,
+            limits: ProcessLimits,
+        ) -> ProcessResult:
+            result = super().run(command, limits=limits)
+            if "-show_streams" in command:
+                stat = source.stat()
+                os.utime(
+                    source,
+                    ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000),
+                )
+            return result
+
+    result = MediaProbe(runner=TimestampTouchRunner(media_payload())).probe(
+        source
+    )
+
+    assert result.source_sha256
+    assert result.source_size_bytes == len(b"fixture")
+
+
+def test_content_change_during_probe_fails_closed(tmp_path: Path) -> None:
+    source = tmp_path / "mutated.wav"
+    source.write_bytes(b"fixture")
+
+    class ContentMutationRunner(FixtureRunner):
+        def run(
+            self,
+            command: tuple[str, ...] | list[str],
+            *,
+            limits: ProcessLimits,
+        ) -> ProcessResult:
+            result = super().run(command, limits=limits)
+            if "-show_streams" in command:
+                source.write_bytes(b"changed")
+            return result
+
+    with pytest.raises(MediaProbeError) as raised:
+        MediaProbe(runner=ContentMutationRunner(media_payload())).probe(source)
+
+    assert raised.value.code is MediaProbeErrorCode.SOURCE_CHANGED
 
 
 def test_local_path_boundary_rejects_url_relative_and_directory(

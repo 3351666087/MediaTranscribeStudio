@@ -521,6 +521,15 @@ class MediaProbe:
     def probe(self, source: str | Path) -> MediaProbeResult:
         canonical = canonical_local_media_file(source)
         source_before = canonical.stat()
+        source_sha256_before = _sha256_file(canonical)
+        source_after_initial_hash = canonical.stat()
+        if _stat_file_identity(source_before) != _stat_file_identity(
+            source_after_initial_hash
+        ):
+            raise MediaProbeError(
+                MediaProbeErrorCode.SOURCE_CHANGED,
+                "The media source changed while admission evidence was collected.",
+            )
         ffprobe_evidence = self._inspect_tool(
             self.ffprobe_command,
             limits=self.policy.ffprobe_limits,
@@ -666,7 +675,11 @@ class MediaProbe:
         )
         source_sha256 = _sha256_file(canonical)
         source_after = canonical.stat()
-        if _stat_identity(source_before) != _stat_identity(source_after):
+        if (
+            _stat_file_identity(source_before)
+            != _stat_file_identity(source_after)
+            or source_sha256_before != source_sha256
+        ):
             raise MediaProbeError(
                 MediaProbeErrorCode.SOURCE_CHANGED,
                 "The media source changed while admission evidence was collected.",
@@ -876,10 +889,9 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+def _stat_file_identity(value: os.stat_result) -> tuple[int, int, int]:
     return (
         int(value.st_size),
-        int(value.st_mtime_ns),
         int(getattr(value, "st_dev", 0)),
         int(getattr(value, "st_ino", 0)),
     )

@@ -250,3 +250,97 @@ def test_shared_worker_recovers_unstarted_jobs_in_original_order(
     assert summary["workerLifecycle"] == "recovering-shared-sessions"
     assert summary["workerSessionIds"] == ["session-1", "session-2"]
     assert summary["failedCases"] == 1
+
+
+def test_shared_worker_is_proactively_recycled_after_bounded_job_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cases = []
+    for index in range(5):
+        source = tmp_path / f"case-{index}.wav"
+        source.write_bytes(b"fixture")
+        cases.append(
+            {
+                "id": f"case-{index}",
+                "path": source.name,
+                "language": "auto",
+                "expectedSpeakerCount": 1,
+                "durationSeconds": 1.0,
+            }
+        )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"libraryId": "bounded-session-fixture", "cases": cases}),
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, ...]] = []
+
+    class FakeHarness:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, jobs: object) -> tuple[run_sample_library.SmokeResult, ...]:
+            current = tuple(jobs)
+            calls.append(
+                tuple(str(job.start_payload["jobId"]) for job in current)
+            )
+            session_id = f"session-{len(calls)}"
+            return tuple(
+                run_sample_library.SmokeResult(
+                    status="observed",
+                    terminal_type="job.completed",
+                    job_id=str(job.start_payload["jobId"]),
+                    worker_pid=100 + len(calls),
+                    exit_code=0,
+                    elapsed_seconds=0.1,
+                    event_count=1,
+                    shutdown_acknowledged=True,
+                    forced_cleanup_pids=(),
+                    event_log=str(job.paths.event_log),
+                    stderr_log=str(job.paths.stderr_log),
+                    result_json=str(job.paths.result_json),
+                    worker_session_id=session_id,
+                    worker_reused=True,
+                )
+                for job in current
+            )
+
+    monkeypatch.setattr(
+        run_sample_library,
+        "ProductionBatchSmokeHarness",
+        FakeHarness,
+    )
+
+    exit_code = run_sample_library.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--config",
+            str(tmp_path / "production.json"),
+            "--results-root",
+            str(tmp_path / "results"),
+            "--worker-output-root",
+            str(tmp_path / "outputs"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        (
+            "sample-case-0",
+            "sample-case-1",
+            "sample-case-2",
+            "sample-case-3",
+        ),
+        ("sample-case-4",),
+    ]
+    summary_text = capsys.readouterr().out
+    summary = json.loads(summary_text[summary_text.rfind("\n{") + 1 :])
+    assert summary["workerLifecycle"] == "bounded-shared-sessions"
+    assert summary["workerSessionIds"] == ["session-1", "session-2"]
+    assert summary["maxJobsPerWorkerSession"] == 4
+    assert summary["plannedWorkerSessionCount"] == 2
+    assert summary["recoverySessionCount"] == 0

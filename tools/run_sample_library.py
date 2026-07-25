@@ -364,6 +364,15 @@ def build_parser() -> argparse.ArgumentParser:
             "cases"
         ),
     )
+    parser.add_argument(
+        "--max-jobs-per-worker-session",
+        type=int,
+        default=4,
+        help=(
+            "proactively recycle a shared worker after this many jobs; increase "
+            "only after the target device passes memory-pressure validation"
+        ),
+    )
     return parser
 
 
@@ -380,6 +389,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"unknown sample case(s): {', '.join(unknown)}")
     if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be positive")
+    if args.max_jobs_per_worker_session <= 0:
+        raise SystemExit("--max-jobs-per-worker-session must be positive")
     try:
         HarnessSettings(
             timeout_seconds=args.maximum_hard_timeout_seconds,
@@ -505,40 +516,75 @@ def main(argv: Sequence[str] | None = None) -> int:
             if return_code != 0:
                 failures += 1
     session_ids: tuple[str, ...] = ()
+    planned_session_count = 0
     if batch_jobs:
         session_token = uuid.uuid4().hex
-
-        def harness_factory(session_index: int) -> ProductionBatchSmokeHarness:
-            session_label = f"{session_token}-s{session_index}"
-            return ProductionBatchSmokeHarness(
-                worker_command=(
-                    sys.executable,
-                    "-m",
-                    "backend.worker",
-                    "--config",
-                    str(args.config.resolve()),
-                ),
-                cwd=ROOT,
-                session_event_log=(
-                    args.results_root
-                    / f"worker-session-{session_label}-events.jsonl"
-                ),
-                session_stderr_log=(
-                    args.results_root
-                    / f"worker-session-{session_label}-stderr.log"
-                ),
-                settings=HarnessSettings(
-                    timeout_seconds=args.maximum_hard_timeout_seconds,
-                    idle_timeout_seconds=args.idle_timeout_seconds,
-                    hard_timeout_seconds=args.maximum_hard_timeout_seconds,
-                ),
-            )
-
-        results, session_ids = _run_recovering_batch(
-            batch_jobs,
-            harness_factory=harness_factory,
+        maximum_jobs = args.max_jobs_per_worker_session
+        batches = tuple(
+            tuple(batch_jobs[offset : offset + maximum_jobs])
+            for offset in range(0, len(batch_jobs), maximum_jobs)
         )
-        failures += sum(result.status != "observed" for result in results)
+        planned_session_count = len(batches)
+        observed_session_ids: list[str] = []
+        for batch_index, batch in enumerate(batches, start=1):
+
+            def harness_factory(
+                recovery_index: int,
+                *,
+                batch_index: int = batch_index,
+            ) -> ProductionBatchSmokeHarness:
+                session_label = (
+                    f"{session_token}-b{batch_index}-r{recovery_index}"
+                )
+                return ProductionBatchSmokeHarness(
+                    worker_command=(
+                        sys.executable,
+                        "-m",
+                        "backend.worker",
+                        "--config",
+                        str(args.config.resolve()),
+                    ),
+                    cwd=ROOT,
+                    session_event_log=(
+                        args.results_root
+                        / f"worker-session-{session_label}-events.jsonl"
+                    ),
+                    session_stderr_log=(
+                        args.results_root
+                        / f"worker-session-{session_label}-stderr.log"
+                    ),
+                    settings=HarnessSettings(
+                        timeout_seconds=args.maximum_hard_timeout_seconds,
+                        idle_timeout_seconds=args.idle_timeout_seconds,
+                        hard_timeout_seconds=args.maximum_hard_timeout_seconds,
+                    ),
+                )
+
+            results, batch_session_ids = _run_recovering_batch(
+                batch,
+                harness_factory=harness_factory,
+            )
+            observed_session_ids.extend(batch_session_ids)
+            failures += sum(
+                result.status != "observed" for result in results
+            )
+        session_ids = tuple(observed_session_ids)
+    recovery_session_count = max(
+        0,
+        len(session_ids) - planned_session_count,
+    )
+    if not args.reuse_worker:
+        worker_lifecycle = "per-case"
+    elif recovery_session_count:
+        worker_lifecycle = (
+            "recovering-bounded-shared-sessions"
+            if planned_session_count > 1
+            else "recovering-shared-sessions"
+        )
+    elif planned_session_count > 1:
+        worker_lifecycle = "bounded-shared-sessions"
+    else:
+        worker_lifecycle = "shared-session"
     print(
         json.dumps(
             {
@@ -546,17 +592,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "selected": selected,
                 "failedCases": failures,
                 "resultsRoot": str(args.results_root.resolve()),
-                "workerLifecycle": (
-                    (
-                        "recovering-shared-sessions"
-                        if len(session_ids) > 1
-                        else "shared-session"
-                    )
-                    if args.reuse_worker
-                    else "per-case"
-                ),
+                "workerLifecycle": worker_lifecycle,
                 "workerSessionId": session_ids[0] if session_ids else None,
                 "workerSessionIds": list(session_ids),
+                "maxJobsPerWorkerSession": (
+                    args.max_jobs_per_worker_session
+                    if args.reuse_worker
+                    else 1
+                ),
+                "plannedWorkerSessionCount": planned_session_count,
+                "recoverySessionCount": recovery_session_count,
                 "timeoutPolicy": {
                     "mode": (
                         "fixed"

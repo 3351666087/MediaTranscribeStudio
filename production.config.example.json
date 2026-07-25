@@ -52,7 +52,7 @@
     "eres2netDecisionMargin": 0.05,
     "pyannoteMode": "fallback",
     "localLlmMode": "disabled",
-    "localLlmModel": "qwen3.5:4b"
+    "localLlmModel": "qwen3.5:9b"
   },
   "pdf": {
     "minimumScore": 85,

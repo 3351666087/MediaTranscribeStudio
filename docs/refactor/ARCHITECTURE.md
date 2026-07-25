@@ -96,7 +96,7 @@ flowchart LR
 生产链按成本由低到高升级，所有中间产物以输入 hash、模型版本、参数和契约版本为缓存键：
 
 1. **一次性预处理**：音频解码、重采样、VAD、Community-1 segmentation/overlap/turn proposals 和基础特征只生成一次；失败恢复不得无理由重算已验证产物。
-2. **全量旗舰通道**：Community-1/VBx 生成整段 regular/exclusive Dynamic-N 时间线；Qwen3-ASR-1.7B 对支持集内候选段完成基础转写。两者按 stage 单次加载并批内复用，不调用本地 LLM，也不默认全场运行所有挑战模型。
+2. **全量旗舰通道**：Community-1/VBx 生成整段 regular/exclusive Dynamic-N 时间线；Qwen3-ASR-1.7B 对支持集内候选段完成基础转写。两者按 stage 单次加载并批内复用，不调用本地 LLM，也不默认全场运行所有挑战模型。`modelResidency=stage` 面向统一内存边缘机，`worker` 只面向已验证容量充足的服务器 worker。
 3. **不确定性路由**：仅将语言、边界、overlap、人数后验、短片段、离群 embedding 或模型冲突片段送入更高成本复核。
 4. **定向重算与挑战者验证**：只对入队片段执行局部重分段、Whisper/Parakeet/Canary/Omnilingual ASR 候选、CAM++/ERes2NetV2 声纹审计或上下文扩大；挑战者只有在目标分桶 held-out 晋级后才能接管主结果。
 5. **语义建议**：确定性规则仍无法解决时，本地小 LLM只能生成结构化建议，不能直接修改说话人、turn 结构或中文原文。
@@ -123,7 +123,7 @@ flowchart LR
 
 ## 本地小 LLM 生产门控
 
-`qwen2.5:1.5b` 与 `qwen3.5:4b` 的正式本地基准结论均为 `reject_for_production`。其中 `qwen3.5:4b` 在 88 个脱敏样本上的最终契约有效率为 `0.784`、越界文本修改率为 `0.205`、auto-apply 候选回归率为 `0.135`；安全挑战契约有效率仅为 `0.625`，未达到预登记门槛。当前架构不得在生产逐字稿上调用这两个模型；若未来重新评测模型，只能先作为隔离的 suggestion generator，即**仅建议、永不自动应用**：
+`qwen2.5:1.5b` 与 `qwen3.5:4b` 的正式本地基准结论均为 `reject_for_production`。其中 `qwen3.5:4b` 在 88 个脱敏样本上的最终契约有效率为 `0.784`、越界文本修改率为 `0.205`、auto-apply 候选回归率为 `0.135`；安全挑战契约有效率仅为 `0.625`，未达到预登记门槛。`qwen3.5:9b` 已安装并成为默认高能力候选，但目前只通过确定性结构烟测，尚未通过翻译、润色、摘要或 N-best 重排的完整质量门。所有未晋级模型只能先作为隔离的 suggestion generator，即**仅建议、永不自动应用**：
 
 - 输出必须经过 JSON/schema 和 deterministic validator。
 - 模型自报置信度不作为自动应用依据。

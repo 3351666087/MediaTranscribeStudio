@@ -156,7 +156,7 @@ def build_start_payload(
     title: str = "中文说话人分离生产烟雾测试",
     language: str = "auto",
     local_llm_mode: str = "disabled",
-    local_llm_model: str = "qwen3.5:4b",
+    local_llm_model: str = "qwen3.5:9b",
     local_llm_endpoint: str = "http://127.0.0.1:11434",
     local_llm_endpoint_policy: str = "loopback-only",
     translation_targets: Sequence[str] = (),
@@ -1322,7 +1322,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("disabled", "suggestion-only", "business", "enabled"),
         default="disabled",
     )
-    parser.add_argument("--local-llm-model", default="qwen3.5:4b")
+    parser.add_argument("--local-llm-model", default="qwen3.5:9b")
     parser.add_argument(
         "--local-llm-endpoint",
         default="http://127.0.0.1:11434",

@@ -716,7 +716,8 @@ class ReportDocumentAssembler:
                 revision_source = "deterministic"
             if revision_source == "llm":
                 raise ReportAssemblyError(
-                    f"{segment_id}: qwen3.5:4b is suggestion-only/disabled and "
+                    f"{segment_id}: the local semantic model is "
+                    "suggestion-only/disabled and "
                     "cannot author text revisions"
                 )
             normalization_reason = _clean_text(
@@ -1624,7 +1625,8 @@ class ReportDocumentAssembler:
         )
         if auto_applied:
             raise ReportAssemblyError(
-                "qwen3.5:4b is not production-eligible; semantic auto-apply is forbidden"
+                "the local semantic model is not production-eligible; "
+                "semantic auto-apply is forbidden"
             )
         mode = _clean_text(source.get("mode", source.get("applyMode")))
         if mode and mode not in {"disabled", "suggestion-only"}:

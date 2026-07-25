@@ -374,6 +374,25 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
         service.shutdown()
 
 
+def test_shutdown_releases_transcription_resources_once() -> None:
+    class ReleasableTranscription(FakeTranscriptionAdapter):
+        def __init__(self) -> None:
+            super().__init__(result_mapping(1))
+            self.release_calls = 0
+
+        def release_resources(self) -> None:
+            self.release_calls += 1
+
+    with tempfile.TemporaryDirectory() as temporary:
+        adapter = ReleasableTranscription()
+        service = _service(Path(temporary), adapter=adapter)
+
+        service.shutdown()
+        service.shutdown()
+
+        assert adapter.release_calls == 1
+
+
 def test_unexpected_job_failure_logs_traceback_but_sanitizes_public_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

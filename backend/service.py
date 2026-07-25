@@ -218,6 +218,7 @@ class WorkerService:
         self._active_outputs: dict[Path, str] = {}
         self._lock = threading.RLock()
         self._closed = False
+        self._adapter_resources_released = False
 
     def parse_start_payload(self, payload: Any) -> StartJobRequest:
         if not isinstance(payload, Mapping):
@@ -306,10 +307,10 @@ class WorkerService:
             raise invalid_request(
                 "localLlmMode must be disabled, suggestion-only, business, or enabled"
             )
-        local_llm_model_raw = payload.get("localLlmModel", "qwen3.5:4b")
+        local_llm_model_raw = payload.get("localLlmModel", "qwen3.5:9b")
         if not isinstance(local_llm_model_raw, str):
             raise invalid_request("localLlmModel must be a string")
-        local_llm_model = local_llm_model_raw.strip() or "qwen3.5:4b"
+        local_llm_model = local_llm_model_raw.strip() or "qwen3.5:9b"
         if not local_llm_model or len(local_llm_model) > 160:
             raise invalid_request(
                 "localLlmModel must be a non-empty string of at most 160 characters"
@@ -825,6 +826,19 @@ class WorkerService:
         for record in records:
             if record.status is JobStatus.QUEUED and record.cancellation.is_set():
                 self._finish_cancelled(record)
+        with self._lock:
+            should_release = wait and not self._adapter_resources_released
+            if should_release:
+                self._adapter_resources_released = True
+        if should_release:
+            release = getattr(self.transcription_adapter, "release_resources", None)
+            if release is not None:
+                if not callable(release):
+                    raise WorkerError(
+                        "TRANSCRIPTION_ADAPTER_RESOURCE_RELEASE_INVALID",
+                        "transcription adapter resource release must be callable",
+                    )
+                release()
 
     def _get_job(self, job_id: str) -> JobRecord:
         normalized = validate_job_id(job_id)

@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -221,6 +222,7 @@ class ProductionRuntime:
     max_workers: int = 1
     max_pending_jobs: int = 1
     max_line_bytes: int = 1024 * 1024
+    model_residency: str = "stage"
     vad_device: str = "cpu"
     asr_device: str = "cuda:0"
     asr_dtype: str = "bfloat16"
@@ -254,7 +256,7 @@ class ProductionSpeakerPolicy:
     pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
     local_llm_mode: str = "disabled"
-    local_llm_model: str = "qwen3.5:4b"
+    local_llm_model: str = "qwen3.5:9b"
 
 
 @dataclass(frozen=True)
@@ -511,6 +513,7 @@ class ProductionConfig:
                 "maxWorkers",
                 "maxPendingJobs",
                 "maxLineBytes",
+                "modelResidency",
                 "vadDevice",
                 "asrDevice",
                 "asrDtype",
@@ -538,6 +541,11 @@ class ProductionConfig:
                 field="runtime.maxLineBytes",
                 minimum=4096,
                 maximum=16 * 1024 * 1024,
+            ),
+            model_residency=_choice(
+                raw_runtime.get("modelResidency", "stage"),
+                field="runtime.modelResidency",
+                choices={"stage", "worker"},
             ),
             vad_device=_nonempty_text(
                 raw_runtime.get("vadDevice", "cpu"),
@@ -756,9 +764,9 @@ class ProductionConfig:
                 choices={"disabled", "suggestion-only"},
             ),
             local_llm_model=_choice(
-                raw_speaker.get("localLlmModel", "qwen3.5:4b"),
+                raw_speaker.get("localLlmModel", "qwen3.5:9b"),
                 field="speaker.localLlmModel",
-                choices={"qwen3.5:4b"},
+                choices={"qwen3.5:4b", "qwen3.5:9b"},
             ),
         )
         if speaker.high_margin_threshold <= speaker.low_margin_threshold:
@@ -925,6 +933,7 @@ class ProductionConfig:
                 max_workers=workers,
                 max_pending_jobs=self.runtime.max_pending_jobs,
                 max_line_bytes=self.runtime.max_line_bytes,
+                model_residency=self.runtime.model_residency,
                 vad_device=self.runtime.vad_device,
                 asr_device=self.runtime.asr_device,
                 asr_dtype=self.runtime.asr_dtype,
@@ -948,6 +957,7 @@ class ProductionConfig:
             "inputRootCount": len(self.paths.allowed_input_roots),
             "pyannoteMode": self.speaker.pyannote_mode,
             "maxWorkers": self.runtime.max_workers,
+            "modelResidency": self.runtime.model_residency,
             "maxAutoSpeakers": self.speaker.max_auto_speakers,
             "maxClusteringWindows": self.speaker.max_clustering_windows,
             "maxClusteringWorkItems": (
@@ -1135,16 +1145,36 @@ def _jar_has_required_engines(path: Path) -> bool:
 
 
 def _directory_writable(path: Path) -> bool:
+    probe: Path | None = None
+    descriptor: int | None = None
     try:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / ".mts-write-probe"
-        with probe.open("xb") as handle:
+        descriptor, name = tempfile.mkstemp(
+            prefix=".mts-write-probe-",
+            dir=path,
+        )
+        probe = Path(name)
+        handle = os.fdopen(descriptor, "wb")
+        descriptor = None
+        with handle:
             handle.write(b"ok")
             handle.flush()
             os.fsync(handle.fileno())
         probe.unlink()
+        probe = None
     except OSError:
         return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if probe is not None:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
     return True
 
 
@@ -1422,6 +1452,9 @@ def production_diagnostics(
             "mode": config.speaker.local_llm_mode,
             "model": config.speaker.local_llm_model,
             "autoApply": False,
+        },
+        "runtime": {
+            "modelResidency": config.runtime.model_residency,
         },
         "pdf": {
             "engine": "OpenHTMLtoPDF 1.0.10 + PDFBox 2.0.30",

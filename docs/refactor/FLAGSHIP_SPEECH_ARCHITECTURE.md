@@ -123,6 +123,7 @@ flowchart TD
 - Qwen3-ASR-1.7B 按 ASR 阶段加载一次，处理整批 speech windows 后统一释放；ForcedAligner 在需要的 11 种语言阶段单独加载。
 - WhisperKit/whisper.cpp 作为第二意见时与 Qwen 串行，不同时占用统一内存。
 - `qwen3.5:9b` 已安装为 Ollama model ID `6488c96fa5fa`，实际为 9.7B、Q4_K_M、6.6 GB；底层 blob SHA-256 为 `dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c`。只有声学阶段结束后才加载，完整质量晋级前保留 4B 回退；安装后数据卷约剩 15 GiB，仍需保留至少 8 GiB 工作空间。
+- M4 的两条真实短样本对照证明跨 job 全常驻可将墙钟从 `197.53 秒` 降到 `135.40 秒`，但最低只剩约 14 MiB free pages，且现有 MPS 资源指标未捕获该压力。M4 私有配置因此使用 `modelResidency=stage`，在启动 9B 业务阶段前释放声学模型；`worker` 常驻留给已做容量门禁的服务器。
 - 不在本机运行 Omnilingual LLM-7B FP32；本机只允许先测 CTC 300M/1B 或量化实现，且结果不能代表旗舰 7B。
 
 ### 旗舰服务器质量档
@@ -131,14 +132,14 @@ flowchart TD
 - 每类模型一个有界 stage queue 和常驻 worker，跨 job 复用权重；相同音频窗口按 `audio hash + model revision + parameters + normalization version` 缓存。
 - 多 GPU 通过流水线并行不同作业，不对同一片段默认全模型齐跑。第二意见只由不确定性或已登记分桶触发。
 
-### 必须修复的当前问题
+### 当前生命周期状态
 
-2026-07-25 的 60 样本共享 worker 基线只有 5 条 `observed`。第 6 条在 300 秒超时，日志显示 Qwen checkpoint、CAM++ 和 ERes2NetV2 在同一作业内反复加载；其余 54 条被 `BATCH_ABORTED`。因此：
+2026-07-25 的 60 样本共享 worker 基线只有 5 条 `observed`。第 6 条在 300 秒超时，日志显示 Qwen checkpoint、CAM++ 和 ERes2NetV2 在跨 job 生命周期中反复加载；其余 54 条被 `BATCH_ABORTED`。当前已加入 `stage|worker` 驻留策略、异常清理、worker shutdown 统一释放，以及仅继续未启动作业的有限恢复会话。两条不同真实音频已证明 `worker` 模式的 Qwen/CAM++/ERes 各只初始化一次。仍必须完成：
 
-- adapter 的 `transcribe_batch/embed_batch/review_batch` 必须单次加载后处理完整批次，禁止逐窗口重建模型。
-- stage release 是阶段末行为，不是每个窗口行为；同一 stage 内保持权重和编译缓存。
 - worker 必须在长推理期间发 heartbeat/progress，超时预算使用 `冷启动 p95 + 音频时长 * 分桶 RTF p95 + 安全余量`。
-- 单 job 超时只结束该 job、清理其进程树并重启 worker，不能把尚未开始的 54 条记成模型失败。
+- 60 条重跑必须让每条得到独立终态；恢复实现通过伪 worker 和两条健康样本回归，不等于 60/60 已完成。
+- macOS 必须采集 MPS/统一内存与系统压力峰值，不能继续用 `peakVramMb=0` 或普通 RSS 作容量门禁。
+- 并发 preflight 已改用同目录唯一可回收探针文件，并以 32 次、8 线程共享根回归验证；后续仍需在多进程 worker 启动压力测试中保留该门禁。
 - 报告必须区分 `model-failed`、`job-timeout`、`batch-aborted` 和 `not-run`。
 
 ## 评测与晋级门禁

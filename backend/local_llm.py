@@ -58,7 +58,7 @@ class LocalLLMProvider(Protocol):
 class LocalLLMConfig:
     """Configuration for an explicitly local provider."""
 
-    model: str = "qwen3.5:4b"
+    model: str = "qwen3.5:9b"
     endpoint: str = "http://127.0.0.1:11434"
     timeout_seconds: float = 180.0
     temperature: float = 0.0

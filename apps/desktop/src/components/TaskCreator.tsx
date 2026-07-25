@@ -107,7 +107,7 @@ interface TaskCreatorProps {
 }
 
 export const MAX_INLINE_SPEAKER_EDITORS = 32;
-const DEFAULT_LOCAL_MODEL = "qwen3.5:4b";
+const DEFAULT_LOCAL_MODEL = "qwen3.5:9b";
 const DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434";
 const DEFAULT_SOURCE_LANGUAGE = "auto";
 const DEFAULT_OUTPUT_LOCALE = "en-US";

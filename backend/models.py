@@ -721,7 +721,7 @@ class StartJobRequest:
     title: str | None = None
     language: str = "auto"
     local_llm_mode: str = "disabled"
-    local_llm_model: str = "qwen3.5:4b"
+    local_llm_model: str = "qwen3.5:9b"
     local_llm_endpoint: str = "http://127.0.0.1:11434"
     business_config: BusinessProcessingConfig = field(
         default_factory=BusinessProcessingConfig

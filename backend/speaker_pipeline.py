@@ -1025,7 +1025,8 @@ class SpeakerPipelineConfig:
     pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
     local_llm_mode: str = "disabled"
-    local_llm_model: str = "qwen3.5:4b"
+    local_llm_model: str = "qwen3.5:9b"
+    model_residency: str = "stage"
 
     def __post_init__(self) -> None:
         if not self.normalization_profile.strip():
@@ -1070,8 +1071,12 @@ class SpeakerPipelineConfig:
             raise ValueError(
                 "local_llm_mode must be disabled or suggestion-only; auto_apply is forbidden"
             )
-        if self.local_llm_model != "qwen3.5:4b":
-            raise ValueError("local_llm_model must identify qwen3.5:4b")
+        if self.local_llm_model not in {"qwen3.5:4b", "qwen3.5:9b"}:
+            raise ValueError(
+                "local_llm_model must identify qwen3.5:9b or qwen3.5:4b"
+            )
+        if self.model_residency not in {"stage", "worker"}:
+            raise ValueError("model_residency must be stage or worker")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1104,6 +1109,7 @@ class SpeakerPipelineConfig:
             "localLlmMode": self.local_llm_mode,
             "localLlmModel": self.local_llm_model,
             "localLlmAutoApply": False,
+            "modelResidency": self.model_residency,
         }
 
 
@@ -4236,7 +4242,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.11.0"
+    version = "2.12.0"
 
     def __init__(
         self,
@@ -4278,6 +4284,35 @@ class SpeakerPipeline:
             self.pyannote_adapter, "telemetry_enabled", False
         ) is not False:
             raise ValueError("pyannote telemetry must remain disabled")
+
+    def _release_after_success(self, adapter: Any) -> None:
+        if self.config.model_residency == "stage":
+            _release_adapter_resources(adapter)
+
+    def release_resources(self) -> None:
+        """Release every unique adapter owned by this worker."""
+
+        adapters = (
+            self.preparation_adapter,
+            self.asr_adapter,
+            self.embedding_adapter,
+            self.overlap_adapter,
+            self.secondary_adapter,
+            self.pyannote_adapter,
+        )
+        seen: set[int] = set()
+        first_error: Exception | None = None
+        for adapter in adapters:
+            if adapter is None or id(adapter) in seen:
+                continue
+            seen.add(id(adapter))
+            try:
+                _release_adapter_resources(adapter)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _candidate_time_bounds(
@@ -6916,7 +6951,7 @@ class SpeakerPipeline:
                     suppress_errors=True,
                 )
                 raise
-            _release_adapter_resources(self.secondary_adapter)
+            self._release_after_success(self.secondary_adapter)
         elif eligible:
             output = self._attach_unresolved_review_evidence(
                 output,
@@ -7078,7 +7113,7 @@ class SpeakerPipeline:
                     suppress_errors=True,
                 )
                 raise
-            _release_adapter_resources(self.pyannote_adapter)
+            self._release_after_success(self.pyannote_adapter)
         elif pyannote_candidates and self.pyannote_adapter is None:
             pyannote_exit = "ADAPTER_DISABLED"
         pyannote_elapsed = (
@@ -7212,7 +7247,7 @@ class SpeakerPipeline:
                 suppress_errors=True,
             )
             raise
-        _release_adapter_resources(self.embedding_adapter)
+        self._release_after_success(self.embedding_adapter)
 
         try:
             asr = self._window_stage(
@@ -7240,7 +7275,7 @@ class SpeakerPipeline:
                 suppress_errors=True,
             )
             raise
-        _release_adapter_resources(self.asr_adapter)
+        self._release_after_success(self.asr_adapter)
         rejected_asr = tuple(
             (window, hypothesis)
             for window, hypothesis in zip(prepared.windows, asr)
@@ -7406,7 +7441,7 @@ class SpeakerPipeline:
                 suppress_errors=True,
             )
             raise
-        _release_adapter_resources(self.embedding_adapter)
+        self._release_after_success(self.embedding_adapter)
         campp_elapsed = (time.perf_counter() - campp_started) * 1000.0
         campp_candidate_ids = [
             window.window_id for window in prepared.windows
@@ -7460,7 +7495,7 @@ class SpeakerPipeline:
                 suppress_errors=True,
             )
             raise
-        _release_adapter_resources(self.overlap_adapter)
+        self._release_after_success(self.overlap_adapter)
         clusters = self._clustering_stage(
             prepared, embeddings, overlap, request, metrics
         )

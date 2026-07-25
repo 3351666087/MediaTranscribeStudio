@@ -8,7 +8,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -24,7 +24,22 @@ from tools.run_production_smoke import (
     HarnessSettings,
     ProductionBatchSmokeHarness,
     SmokePaths,
+    SmokeResult,
     build_start_payload,
+)
+
+
+_RECOVERABLE_SESSION_FAILURES = frozenset(
+    {
+        "JOB_TIMEOUT",
+        "WORKER_CAPACITY_RELEASE_TIMEOUT",
+        "WORKER_EXITED_EARLY",
+        "WORKER_STDOUT_CLOSED",
+        "INVALID_WORKER_JSONL",
+        "WORKER_PIPE_FAILED",
+        "WORKER_EXIT_TIMEOUT",
+        "PIPE_INITIALIZATION_FAILED",
+    }
 )
 
 
@@ -161,6 +176,108 @@ def _batch_job(
             stderr_log=logs_root / f"{artifact_id}-stderr.log",
             result_json=logs_root / f"{artifact_id}-result.json",
         ),
+    )
+
+
+def _aborted_session_error(result: SmokeResult) -> Mapping[str, object] | None:
+    error = result.error
+    if not isinstance(error, Mapping) or error.get("code") != "BATCH_ABORTED":
+        return None
+    details = error.get("details")
+    if not isinstance(details, Mapping):
+        return None
+    session_error = details.get("sessionError")
+    return session_error if isinstance(session_error, Mapping) else None
+
+
+def _run_recovering_batch(
+    jobs: Sequence[BatchSmokeJob],
+    *,
+    harness_factory: Callable[[int], ProductionBatchSmokeHarness],
+) -> tuple[tuple[SmokeResult, ...], tuple[str, ...]]:
+    """Continue only jobs that a failed shared session never started."""
+
+    original = tuple(jobs)
+    if not original:
+        return (), ()
+    pending = original
+    resolved: dict[str, SmokeResult] = {}
+    session_ids: list[str] = []
+    maximum_sessions = len(original)
+
+    for session_index in range(1, maximum_sessions + 1):
+        session_results = harness_factory(session_index).run(pending)
+        if not session_results:
+            raise RuntimeError("batch harness returned no results")
+        session_id = next(
+            (
+                result.worker_session_id
+                for result in session_results
+                if result.worker_session_id
+            ),
+            None,
+        )
+        if session_id is not None and session_id not in session_ids:
+            session_ids.append(session_id)
+
+        by_job_id = {result.job_id: result for result in session_results}
+        aborted_jobs: list[BatchSmokeJob] = []
+        aborted_results: list[SmokeResult] = []
+        active_results: list[SmokeResult] = []
+        for job in pending:
+            job_id = str(job.start_payload["jobId"])
+            result = by_job_id.get(job_id)
+            if result is None:
+                raise RuntimeError(f"batch harness omitted result for {job_id}")
+            if _aborted_session_error(result) is not None:
+                aborted_jobs.append(job)
+                aborted_results.append(result)
+            else:
+                resolved[job_id] = result
+                active_results.append(result)
+
+        if not aborted_jobs:
+            break
+
+        session_error = _aborted_session_error(aborted_results[0])
+        error_code = (
+            str(session_error.get("code"))
+            if isinstance(session_error, Mapping)
+            and session_error.get("code") is not None
+            else ""
+        )
+        failed_before_protocol_progress = (
+            not any(result.status == "observed" for result in active_results)
+            and all(
+                result.event_count == 0 and result.terminal_event is None
+                for result in active_results
+            )
+        )
+        if (
+            error_code not in _RECOVERABLE_SESSION_FAILURES
+            or failed_before_protocol_progress
+        ):
+            for result in aborted_results:
+                resolved[result.job_id] = result
+            break
+        pending = tuple(aborted_jobs)
+    else:
+        for result in aborted_results:
+            resolved[result.job_id] = result
+
+    missing = [
+        str(job.start_payload["jobId"])
+        for job in original
+        if str(job.start_payload["jobId"]) not in resolved
+    ]
+    if missing:
+        raise RuntimeError(
+            "recovering batch exhausted sessions without results for "
+            + ", ".join(missing)
+        )
+    return (
+        tuple(resolved[str(job.start_payload["jobId"])] for job in original),
+        tuple(session_ids),
     )
 
 
@@ -306,31 +423,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if return_code != 0:
                 failures += 1
-    session_id = None
+    session_ids: tuple[str, ...] = ()
     if batch_jobs:
         session_token = uuid.uuid4().hex
-        harness = ProductionBatchSmokeHarness(
-            worker_command=(
-                sys.executable,
-                "-m",
-                "backend.worker",
-                "--config",
-                str(args.config.resolve()),
-            ),
-            cwd=ROOT,
-            session_event_log=(
-                args.results_root
-                / f"worker-session-{session_token}-events.jsonl"
-            ),
-            session_stderr_log=(
-                args.results_root
-                / f"worker-session-{session_token}-stderr.log"
-            ),
-            settings=HarnessSettings(timeout_seconds=args.timeout_seconds),
+
+        def harness_factory(session_index: int) -> ProductionBatchSmokeHarness:
+            session_label = f"{session_token}-s{session_index}"
+            return ProductionBatchSmokeHarness(
+                worker_command=(
+                    sys.executable,
+                    "-m",
+                    "backend.worker",
+                    "--config",
+                    str(args.config.resolve()),
+                ),
+                cwd=ROOT,
+                session_event_log=(
+                    args.results_root
+                    / f"worker-session-{session_label}-events.jsonl"
+                ),
+                session_stderr_log=(
+                    args.results_root
+                    / f"worker-session-{session_label}-stderr.log"
+                ),
+                settings=HarnessSettings(timeout_seconds=args.timeout_seconds),
+            )
+
+        results, session_ids = _run_recovering_batch(
+            batch_jobs,
+            harness_factory=harness_factory,
         )
-        results = harness.run(batch_jobs)
         failures += sum(result.status != "observed" for result in results)
-        session_id = results[0].worker_session_id if results else None
     print(
         json.dumps(
             {
@@ -339,9 +462,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "failedCases": failures,
                 "resultsRoot": str(args.results_root.resolve()),
                 "workerLifecycle": (
-                    "shared-session" if args.reuse_worker else "per-case"
+                    (
+                        "recovering-shared-sessions"
+                        if len(session_ids) > 1
+                        else "shared-session"
+                    )
+                    if args.reuse_worker
+                    else "per-case"
                 ),
-                "workerSessionId": session_id,
+                "workerSessionId": session_ids[0] if session_ids else None,
+                "workerSessionIds": list(session_ids),
             },
             ensure_ascii=False,
             indent=2,

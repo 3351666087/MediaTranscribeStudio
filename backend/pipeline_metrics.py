@@ -103,7 +103,7 @@ class PipelineMetricsCollector:
             "fullCorpusSecondaryRunAllowed": False,
             "pyannoteMode": "disabled",
             "pyannoteTelemetryEnabled": False,
-            "localLlmModel": "qwen3.5:4b",
+            "localLlmModel": "qwen3.5:9b",
             "localLlmMode": "disabled",
             "localLlmAutoApply": False,
         }

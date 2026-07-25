@@ -145,7 +145,7 @@ def test_provider_generation_envelope_must_prove_non_truncation(
         provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
         )
     assert opener.calls == 1
 
@@ -167,7 +167,7 @@ def test_response_schema_mismatch_fails_closed_and_valid_output_is_accepted(
         invalid_provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=invalid_provider.config.model,
             response_schema=schema,
         )
     assert invalid_opener.calls == 1
@@ -179,7 +179,7 @@ def test_response_schema_mismatch_fails_closed_and_valid_output_is_accepted(
     assert valid_provider.generate_json(
         system_prompt="system",
         user_prompt="user",
-        model="qwen3.5:4b",
+        model=valid_provider.config.model,
         response_schema=schema,
     ) == {"answer": "ok"}
     assert valid_opener.calls == 1
@@ -197,7 +197,7 @@ def test_invalid_response_schema_is_rejected_before_transport(
         provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
             response_schema={"type": "not-a-json-schema-type"},
         )
     assert opener.calls == 0
@@ -216,6 +216,6 @@ def test_duplicate_provider_envelope_key_is_rejected(
         provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
         )
     assert opener.calls == 1

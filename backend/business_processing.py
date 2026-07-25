@@ -473,7 +473,7 @@ class BusinessProcessingConfig:
     translation_targets: tuple[str, ...] = ()
     polish: bool = False
     summary: bool = False
-    model: str = "qwen3.5:4b"
+    model: str = "qwen3.5:9b"
     output_locale: str = "en"
     prompt_version: str = BUSINESS_PROMPT_VERSION
 

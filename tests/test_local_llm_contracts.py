@@ -250,10 +250,11 @@ def test_ollama_provider_sends_a_strict_response_schema(
         "properties": {"answer": {"type": "string"}},
     }
 
-    result = OllamaLocalProvider().generate_json(
+    provider = OllamaLocalProvider()
+    result = provider.generate_json(
         system_prompt="system",
         user_prompt="user",
-        model="qwen3.5:4b",
+        model=provider.config.model,
         response_schema=schema,
     )
 
@@ -292,7 +293,7 @@ def test_ollama_provider_supports_legacy_response_envelope(
         provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
         )
         == {"value": 42}
     )
@@ -335,11 +336,12 @@ def test_ollama_provider_rejects_empty_message_content(
         lambda *handlers: FakeOpener(),
     )
 
+    provider = OllamaLocalProvider()
     with pytest.raises(LocalLLMError, match="empty structured content"):
-        OllamaLocalProvider().generate_json(
+        provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
         )
 
 
@@ -374,7 +376,7 @@ def test_ollama_provider_rejects_malformed_provider_json(
         provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
         )
 
 
@@ -404,11 +406,12 @@ def test_ollama_provider_rejects_response_url_outside_loopback(
         lambda *handlers: FakeOpener(),
     )
 
+    provider = OllamaLocalProvider()
     with pytest.raises(LocalLLMError, match="escaped the loopback"):
-        OllamaLocalProvider().generate_json(
+        provider.generate_json(
             system_prompt="system",
             user_prompt="user",
-            model="qwen3.5:4b",
+            model=provider.config.model,
         )
 
 

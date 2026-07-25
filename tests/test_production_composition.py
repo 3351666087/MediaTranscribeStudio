@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -106,6 +107,7 @@ class ProductionCompositionTests(unittest.TestCase):
             "runtime": {
                 "maxWorkers": 2,
                 "maxPendingJobs": 3,
+                "modelResidency": "worker",
                 "strictStartupPreflight": True,
             },
             "speaker": {
@@ -152,6 +154,7 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
         self.assertEqual(config.runtime.vad_device, "cpu")
+        self.assertEqual(config.runtime.model_residency, "worker")
         self.assertTrue(config.offline)
 
     def test_rejects_pdf_font_not_bundled_by_renderer(self) -> None:
@@ -261,6 +264,29 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertTrue(_probe_runtime_import("funasr"))
 
         self.assertEqual(run.call_args.kwargs["timeout"], 120.0)
+
+    def test_preflight_write_probes_are_concurrency_safe(self) -> None:
+        config = self.load()
+
+        def run_once() -> bool:
+            return run_production_preflight(
+                config,
+                runtime_probe=lambda _module: True,
+                probe_executables=False,
+            ).passed
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(lambda _index: run_once(), range(32)))
+
+        self.assertEqual(results, [True] * 32)
+        self.assertEqual(
+            list(config.paths.allowed_output_root.glob(".mts-write-probe-*")),
+            [],
+        )
+        self.assertEqual(
+            list(config.paths.cache_root.glob(".mts-write-probe-*")),
+            [],
+        )
 
     def test_composition_never_uses_unavailable_adapters(self) -> None:
         config = self.load()

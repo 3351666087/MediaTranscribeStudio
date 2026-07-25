@@ -141,6 +141,7 @@ def build_production_composition(
         pyannote_mode=config.speaker.pyannote_mode,
         local_llm_mode=config.speaker.local_llm_mode,
         local_llm_model=config.speaker.local_llm_model,
+        model_residency=config.runtime.model_residency,
     )
     transcription = factories.pipeline(
         preparation_adapter=preparation,

@@ -1996,6 +1996,57 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertEqual(events.count("asr-inference"), 1)
         self.assertEqual(events.count("cam-inference"), 1)
 
+    def test_worker_residency_retains_models_until_explicit_release(self) -> None:
+        class LifecycleAsr(FakeAsrAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release_calls = 0
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        class LifecycleCam(FakeCamPlusAdapter):
+            def __init__(self) -> None:
+                super().__init__(2)
+                self.release_calls = 0
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        class LifecycleOverlap(FakeOverlapAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release_calls = 0
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        asr = LifecycleAsr()
+        cam = LifecycleCam()
+        overlap = LifecycleOverlap()
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            asr=asr,
+            cam=cam,
+            overlap=overlap,
+            config=SpeakerPipelineConfig(model_residency="worker"),
+        )
+
+        pipeline.transcribe(
+            self.request(2, "manual", job_id="worker-residency"),
+            self.context("worker-residency"),
+        )
+
+        self.assertEqual(asr.release_calls, 0)
+        self.assertEqual(cam.release_calls, 0)
+        self.assertEqual(overlap.release_calls, 0)
+
+        pipeline.release_resources()
+
+        self.assertEqual(asr.release_calls, 1)
+        self.assertEqual(cam.release_calls, 1)
+        self.assertEqual(overlap.release_calls, 1)
+
     def test_cam_eres_and_pyannote_release_in_strict_cascade_order(
         self,
     ) -> None:
@@ -2222,7 +2273,11 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 self.release_calls += 1
 
         asr = FailingAsr()
-        pipeline, _, _, cam, _ = self.pipeline(2, asr=asr)
+        pipeline, _, _, cam, _ = self.pipeline(
+            2,
+            asr=asr,
+            config=SpeakerPipelineConfig(model_residency="worker"),
+        )
 
         with self.assertRaises(WorkerError) as captured:
             pipeline.transcribe(

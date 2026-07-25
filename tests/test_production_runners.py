@@ -1272,6 +1272,153 @@ class ProductionRunnerTests(unittest.TestCase):
         self.assertNotIn(FakePcmTimeline.marker, json.dumps(refined.as_dict()))
         load_audio.assert_called_once_with(prepared.audio_path)
 
+    def test_cam_plus_recommends_supported_prominent_near_threshold_peak(
+        self,
+    ) -> None:
+        adapter = LocalFunAsrCamPlusAdapter(
+            model_path=self.cam_model,
+            model_factory=lambda **_kwargs: FakeCamModel(),
+            device="cpu",
+        )
+        source = SpeechWindow("vad-consensus", 0, 10_000)
+
+        def proposal(
+            proposal_id: str,
+            *,
+            split_ms: int,
+            acoustic_boundary_ms: int,
+            change_score: float,
+            acoustic_confidence: float,
+            boundary_source: str,
+            review_reasons: tuple[str, ...],
+        ) -> SimpleNamespace:
+            return SimpleNamespace(
+                proposal_id=proposal_id,
+                split_ms=split_ms,
+                acoustic_boundary_ms=acoustic_boundary_ms,
+                change_score=change_score,
+                acoustic_confidence=acoustic_confidence,
+                boundary_source=boundary_source,
+                review_reasons=review_reasons,
+                apply_automatically=False,
+            )
+
+        prominent = proposal(
+            "fine-prominent",
+            split_ms=7_537,
+            acoustic_boundary_ms=7_537,
+            change_score=0.477,
+            acoustic_confidence=0.608,
+            boundary_source="ACOUSTIC_MIDPOINT",
+            review_reasons=("LOW_ACOUSTIC_CONFIDENCE",),
+        )
+        plans = {
+            "fine": SimpleNamespace(
+                proposals=(
+                    proposal(
+                        "fine-left-noise",
+                        split_ms=7_340,
+                        acoustic_boundary_ms=7_162,
+                        change_score=0.141,
+                        acoustic_confidence=0.356,
+                        boundary_source="ENERGY_VALLEY",
+                        review_reasons=(
+                            "LOW_CHANGE_SCORE",
+                            "LOW_ACOUSTIC_CONFIDENCE",
+                        ),
+                    ),
+                    prominent,
+                    proposal(
+                        "fine-right-noise",
+                        split_ms=7_880,
+                        acoustic_boundary_ms=7_912,
+                        change_score=0.305,
+                        acoustic_confidence=0.479,
+                        boundary_source="ENERGY_VALLEY",
+                        review_reasons=(
+                            "LOW_CHANGE_SCORE",
+                            "LOW_ACOUSTIC_CONFIDENCE",
+                        ),
+                    ),
+                )
+            ),
+            "context": SimpleNamespace(
+                proposals=(
+                    proposal(
+                        "context-support",
+                        split_ms=8_020,
+                        acoustic_boundary_ms=7_990,
+                        change_score=0.212,
+                        acoustic_confidence=0.409,
+                        boundary_source="ENERGY_VALLEY",
+                        review_reasons=(
+                            "LOW_CHANGE_SCORE",
+                            "LOW_ACOUSTIC_CONFIDENCE",
+                        ),
+                    ),
+                )
+            ),
+        }
+
+        splits, recommendations = adapter._automatic_split_analysis(
+            source,
+            plans,
+        )
+
+        self.assertEqual(splits, ())
+        self.assertEqual(len(recommendations), 1)
+        self.assertEqual(
+            recommendations[0]["proposalId"],
+            "fine-prominent",
+        )
+        self.assertEqual(
+            recommendations[0]["reasonCode"],
+            "CROSS_RESOLUTION_LOCAL_PROMINENCE_REVIEW_RECOMMENDATION",
+        )
+        self.assertEqual(
+            recommendations[0]["applicationPolicy"],
+            "review-only",
+        )
+        self.assertFalse(recommendations[0]["applyAutomatically"])
+        self.assertEqual(
+            recommendations[0]["support"]["proposalId"],
+            "context-support",
+        )
+        self.assertAlmostEqual(
+            recommendations[0]["localPeakProminence"],
+            0.172,
+        )
+
+        isolated = {
+            "fine": SimpleNamespace(proposals=(prominent,)),
+            "context": SimpleNamespace(proposals=()),
+        }
+        self.assertEqual(
+            adapter._automatic_split_analysis(source, isolated),
+            ((), ()),
+        )
+
+        noisy_peer = proposal(
+            "fine-noisy-peer",
+            split_ms=7_900,
+            acoustic_boundary_ms=7_900,
+            change_score=0.45,
+            acoustic_confidence=0.59,
+            boundary_source="ENERGY_VALLEY",
+            review_reasons=(
+                "LOW_CHANGE_SCORE",
+                "LOW_ACOUSTIC_CONFIDENCE",
+            ),
+        )
+        noisy_plans = {
+            **plans,
+            "fine": SimpleNamespace(proposals=(prominent, noisy_peer)),
+        }
+        self.assertEqual(
+            adapter._automatic_split_analysis(source, noisy_plans),
+            ((), ()),
+        )
+
     def test_language_windows_use_energy_valleys_and_detect_code_switches(
         self,
     ) -> None:

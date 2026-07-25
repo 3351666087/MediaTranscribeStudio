@@ -4137,7 +4137,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.7.0"
+    version = "2.9.0"
 
     def __init__(
         self,

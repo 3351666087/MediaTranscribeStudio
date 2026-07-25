@@ -1432,8 +1432,8 @@ class LocalFunAsrCamPlusAdapter:
     """
 
     adapter_id = "CAM++"
-    version = "2.2.0"
-    refinement_method = "cam-plus-multiresolution-language-window-v3"
+    version = "2.4.0"
+    refinement_method = "cam-plus-multiresolution-language-window-v5"
 
     def __init__(
         self,
@@ -1446,6 +1446,11 @@ class LocalFunAsrCamPlusAdapter:
         context_window_ms: int = 3_000,
         context_step_ms: int = 1_200,
         merge_radius_ms: int = 250,
+        cross_resolution_support_radius_ms: int = 600,
+        min_consensus_change_score: float = 0.46,
+        min_consensus_acoustic_confidence: float = 0.60,
+        min_cross_resolution_support_score: float = 0.20,
+        min_local_peak_prominence: float = 0.05,
         min_resulting_interval_ms: int = 700,
         max_language_window_ms: int = 12_000,
         language_split_search_ms: int = 1_000,
@@ -1461,6 +1466,17 @@ class LocalFunAsrCamPlusAdapter:
         self.context_window_ms = int(context_window_ms)
         self.context_step_ms = int(context_step_ms)
         self.merge_radius_ms = int(merge_radius_ms)
+        self.cross_resolution_support_radius_ms = int(
+            cross_resolution_support_radius_ms
+        )
+        self.min_consensus_change_score = float(min_consensus_change_score)
+        self.min_consensus_acoustic_confidence = float(
+            min_consensus_acoustic_confidence
+        )
+        self.min_cross_resolution_support_score = float(
+            min_cross_resolution_support_score
+        )
+        self.min_local_peak_prominence = float(min_local_peak_prominence)
         self.min_resulting_interval_ms = int(min_resulting_interval_ms)
         self.max_language_window_ms = int(max_language_window_ms)
         self.language_split_search_ms = int(language_split_search_ms)
@@ -1470,12 +1486,22 @@ class LocalFunAsrCamPlusAdapter:
             "context_window_ms",
             "context_step_ms",
             "merge_radius_ms",
+            "cross_resolution_support_radius_ms",
             "min_resulting_interval_ms",
             "max_language_window_ms",
             "language_split_search_ms",
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name} must be positive")
+        for field_name in (
+            "min_consensus_change_score",
+            "min_consensus_acoustic_confidence",
+            "min_cross_resolution_support_score",
+            "min_local_peak_prominence",
+        ):
+            value = getattr(self, field_name)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
         if (
             self.max_language_window_ms
             <= self.language_split_search_ms
@@ -1502,6 +1528,17 @@ class LocalFunAsrCamPlusAdapter:
             "contextWindowMs": self.context_window_ms,
             "contextStepMs": self.context_step_ms,
             "mergeRadiusMs": self.merge_radius_ms,
+            "crossResolutionSupportRadiusMs": (
+                self.cross_resolution_support_radius_ms
+            ),
+            "minConsensusChangeScore": self.min_consensus_change_score,
+            "minConsensusAcousticConfidence": (
+                self.min_consensus_acoustic_confidence
+            ),
+            "minCrossResolutionSupportScore": (
+                self.min_cross_resolution_support_score
+            ),
+            "minLocalPeakProminence": self.min_local_peak_prominence,
             "minResultingIntervalMs": self.min_resulting_interval_ms,
             "maxLanguageWindowMs": self.max_language_window_ms,
             "languageSplitSearchMs": self.language_split_search_ms,
@@ -1763,11 +1800,115 @@ class LocalFunAsrCamPlusAdapter:
             str(proposal.proposal_id),
         )
 
-    def _automatic_splits(
+    def _cross_resolution_consensus(
+        self,
+        resolution: str,
+        proposal: Any,
+        candidates: Sequence[tuple[str, Any]],
+    ) -> Mapping[str, Any] | None:
+        """Recommend review for a strong, locally prominent multi-scale peak."""
+
+        if tuple(proposal.review_reasons) != ("LOW_ACOUSTIC_CONFIDENCE",):
+            return None
+        change_score = float(proposal.change_score)
+        acoustic_confidence = float(proposal.acoustic_confidence)
+        if (
+            change_score < self.min_consensus_change_score
+            or acoustic_confidence
+            < self.min_consensus_acoustic_confidence
+        ):
+            return None
+
+        acoustic_boundary_ms = int(proposal.acoustic_boundary_ms)
+        same_resolution_neighbors = [
+            item
+            for candidate_resolution, item in candidates
+            if candidate_resolution == resolution
+            and item.proposal_id != proposal.proposal_id
+            and abs(int(item.acoustic_boundary_ms) - acoustic_boundary_ms)
+            <= self.cross_resolution_support_radius_ms
+        ]
+        strongest_neighbor_score = max(
+            (
+                float(item.change_score)
+                for item in same_resolution_neighbors
+            ),
+            default=0.0,
+        )
+        local_prominence = round(
+            change_score - strongest_neighbor_score,
+            12,
+        )
+        if local_prominence < self.min_local_peak_prominence:
+            return None
+
+        cross_resolution_support = [
+            (candidate_resolution, item)
+            for candidate_resolution, item in candidates
+            if candidate_resolution != resolution
+            and abs(int(item.acoustic_boundary_ms) - acoustic_boundary_ms)
+            <= self.cross_resolution_support_radius_ms
+            and float(item.change_score)
+            >= self.min_cross_resolution_support_score
+        ]
+        if not cross_resolution_support:
+            return None
+        cross_resolution_support.sort(
+            key=lambda item: (
+                abs(
+                    int(item[1].acoustic_boundary_ms)
+                    - acoustic_boundary_ms
+                ),
+                self._proposal_priority(item[0], item[1]),
+            )
+        )
+        support_resolution, support = cross_resolution_support[0]
+        if (
+            proposal.boundary_source == "ACOUSTIC_MIDPOINT"
+            and support.boundary_source == "ACOUSTIC_MIDPOINT"
+        ):
+            return None
+        return {
+            "reasonCode": (
+                "CROSS_RESOLUTION_LOCAL_PROMINENCE_REVIEW_RECOMMENDATION"
+            ),
+            "applicationPolicy": "review-only",
+            "applyAutomatically": False,
+            "proposalId": str(proposal.proposal_id),
+            "resolution": resolution,
+            "splitMs": int(proposal.split_ms),
+            "acousticBoundaryMs": acoustic_boundary_ms,
+            "changeScore": change_score,
+            "acousticConfidence": acoustic_confidence,
+            "localPeakProminence": local_prominence,
+            "support": {
+                "proposalId": str(support.proposal_id),
+                "resolution": support_resolution,
+                "splitMs": int(support.split_ms),
+                "acousticBoundaryMs": int(support.acoustic_boundary_ms),
+                "changeScore": float(support.change_score),
+                "boundarySource": str(support.boundary_source),
+            },
+            "thresholds": {
+                "supportRadiusMs": self.cross_resolution_support_radius_ms,
+                "minChangeScore": self.min_consensus_change_score,
+                "minAcousticConfidence": (
+                    self.min_consensus_acoustic_confidence
+                ),
+                "minSupportChangeScore": (
+                    self.min_cross_resolution_support_score
+                ),
+                "minLocalPeakProminence": (
+                    self.min_local_peak_prominence
+                ),
+            },
+        }
+
+    def _automatic_split_analysis(
         self,
         source: SpeechWindow,
         plans: Mapping[str, Any],
-    ) -> tuple[int, ...]:
+    ) -> tuple[tuple[int, ...], tuple[Mapping[str, Any], ...]]:
         """Merge cross-resolution proposals and enforce safe turn lengths."""
 
         candidates: list[tuple[str, Any]] = []
@@ -1795,6 +1936,7 @@ class LocalFunAsrCamPlusAdapter:
                 clusters[-1].append(item)
 
         selected: list[tuple[str, Any]] = []
+        consensus_recommendations: list[Mapping[str, Any]] = []
         for cluster in clusters:
             winner = min(
                 cluster,
@@ -1804,6 +1946,14 @@ class LocalFunAsrCamPlusAdapter:
             )
             if winner[1].apply_automatically:
                 selected.append(winner)
+                continue
+            consensus = self._cross_resolution_consensus(
+                winner[0],
+                winner[1],
+                candidates,
+            )
+            if consensus is not None:
+                consensus_recommendations.append(consensus)
 
         selected.sort(key=lambda item: int(item[1].split_ms))
         selected = [
@@ -1835,7 +1985,17 @@ class LocalFunAsrCamPlusAdapter:
                 del selected[conflict_index + 1]
             else:
                 del selected[conflict_index]
-        return tuple(int(item[1].split_ms) for item in selected)
+        return (
+            tuple(int(item[1].split_ms) for item in selected),
+            tuple(dict(item) for item in consensus_recommendations),
+        )
+
+    def _automatic_splits(
+        self,
+        source: SpeechWindow,
+        plans: Mapping[str, Any],
+    ) -> tuple[int, ...]:
+        return self._automatic_split_analysis(source, plans)[0]
 
     def _language_duration_splits(
         self,
@@ -2043,6 +2203,9 @@ class LocalFunAsrCamPlusAdapter:
                     config=detection_config,
                 )
             speaker_change_splits = self._automatic_splits(source, plans)
+            _analyzed_splits, consensus_recommendations = (
+                self._automatic_split_analysis(source, plans)
+            )
             (
                 language_duration_splits,
                 language_split_evidence,
@@ -2065,6 +2228,9 @@ class LocalFunAsrCamPlusAdapter:
                 "pcmBufferId": pcm_buffer_id,
                 "automaticSplitsMs": list(speaker_change_splits),
                 "speakerChangeSplitsMs": list(speaker_change_splits),
+                "crossResolutionConsensusRecommendations": [
+                    dict(item) for item in consensus_recommendations
+                ],
                 "languageDurationSplitsMs": list(language_duration_splits),
                 "appliedSplitsMs": list(applied_splits),
                 "maxLanguageWindowMs": self.max_language_window_ms,

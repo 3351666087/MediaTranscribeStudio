@@ -8,7 +8,7 @@
 
 “世界最高端”不是挑一个模型名称，而是保留三个不能互相冒充的部署档：
 
-1. **托管前沿质量档**：在用户逐次明确授权媒体上传、数据保留策略和成本后，允许 `pyannote Precision-2` 以及后续登记的托管 ASR 基模参加同音频挑战。Precision-2 是当前官方同口径榜单中的 diarization 能力上限候选；它只在远端运行，因此不能替代离线产品承诺。
+1. **托管前沿质量档**：在用户逐次明确授权媒体上传、数据保留策略和成本后，允许 `pyannote Precision-2`、`gpt-4o-transcribe-diarize` 以及后续登记的托管 ASR 基模参加同音频挑战。Precision-2 是当前官方同口径榜单中的 diarization 能力上限候选；`gpt-4o-transcribe-diarize` 可输出 speaker/time/text，但长于 30 秒需要 chunking、已知说话人参考最多 4 个，二者都只在远端运行，因此不能替代离线产品承诺。
 2. **私有自托管旗舰档**：在受控 GPU 服务器运行 Qwen3-ASR-1.7B、Omnilingual ASR LLM-7B/7B-ZS、Community-1/VBx、NeMo 挑战者和服务器 LLM。这是默认的高质量生产上限，原始媒体不离开用户控制的基础设施。
 3. **M4 边缘质量档**：使用相同契约、缓存和证据链串行运行可容纳模型；资源不足时升级到私有服务器或明确降级，不能把 16 GB 能运行的小模型结果宣称为全系统上限。
 
@@ -23,8 +23,10 @@
 3. `facebook/omniASR-LLM-7B` 是服务端支持集外语言的旗舰兜底，覆盖 1600+ 语言；`CTC-300M/1B` 只能作为低成本召回或本机兼容候选，不能用小模型结果代表 7B 上限。
 4. `Whisper large-v3` 是成熟的独立第二意见。在 Apple Silicon 上优先验证 WhisperKit/Core ML 或 whisper.cpp/Metal，而不是把 CUDA 路径直接搬到 MPS。
 5. `Parakeet-TDT-0.6B-v3` 是 25 种欧洲语言的高吞吐专用挑战者；`Canary-Qwen-2.5B` 是英语专用挑战者。二者只有在本项目 held-out 分桶同时改善 WER、时间轴和效率时才能接管相应路由。
-6. Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。当前公开 checkpoint 输出维度固定为 4，且官方在 5 人以上数据上的 DER 明显退化，不能成为“任意人数”权威。
-7. 本地 LLM 与声学权威完全分离。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。LLM 只能在已有声学 N-best 内做约束重排、术语、翻译、保守润色和证据化报告，不能创建说话人、语言或原音频不存在的文本。
+6. `VibeVoice-ASR-7B` 是服务器级联合挑战者：公开 MIT 权重、Transformers/vLLM 部署、60 分钟单次上下文、50+ 语言/代码切换，并直接生成 who/when/what。它的公开报告同时明确 serialized 输出在 overlap 会漏掉次要说话人，SFT 主要集中英语/中文；因此用于全局一致性、长上下文和语义挑战，不能抹掉 Community-1 的多轨 overlap 真值。
+7. `FireRedASR2S` 是中文和中英代码切换专用挑战者：8B+ LLM / 1B+ AED、20+ 中文方言/口音、100+ 语言 VAD/LID、singing/music 多标签门控和中英 punctuation 均有公开权重与部署代码。它可接管已验证的中文方言、歌声或人声门控分桶，但不能代表 1600+ 语言或任意多人 diarization。
+8. Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。当前公开 checkpoint 输出维度固定为 4，且官方在 5 人以上数据上的 DER 明显退化，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
+9. 本地 LLM 与声学权威完全分离。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。LLM 只能在已有声学 N-best 内做约束重排、术语、翻译、保守润色和证据化报告，不能创建说话人、语言或原音频不存在的文本。
 
 这些是模型晋级候选，不是发布声明。官方自报指标只用于缩小候选集，最终权威是本项目按数据源、录音、说话人隔离的 held-out 结果。
 
@@ -58,12 +60,14 @@ flowchart TD
   FUSION --> LID["逐轨滑窗 LID + 代码切换边界解码"]
   LID --> ROUTER["按语言、场景、置信度和硬件路由 ASR"]
   ROUTER --> QWEN["Qwen3-ASR-1.7B 主路径"]
-  ROUTER --> SPECIALIST["Whisper / Parakeet / Canary 专用挑战者"]
+  ROUTER --> SPECIALIST["Whisper / Parakeet / Canary / FireRed 专用挑战者"]
   ROUTER --> OMNI["Omnilingual 7B 长尾兜底"]
   QWEN --> ALIGN["强制对齐或段级时间回退"]
   SPECIALIST --> ALIGN
   OMNI --> ALIGN
   ALIGN --> NBEST["不可变声学 N-best 与校准置信度"]
+  SEG --> JOINT["VibeVoice-ASR-7B 全局联合挑战"]
+  JOINT --> NBEST
   NBEST --> LLM["本地 LLM 约束重排/术语/翻译/润色/摘要"]
   LLM --> VALIDATE["schema + 数字/专名/时间/说话人不变量"]
   VALIDATE --> REVIEW["最小人工复核队列"]
@@ -91,7 +95,7 @@ flowchart TD
 ### 3. ASR 路由与融合
 
 - 支持集内默认完整运行 Qwen3-ASR-1.7B，而不是先用 0.6B 决定最终文本；0.6B 只适合作为明确标记的低延迟预览。
-- 专用模型按校准后的分桶规则接管：例如欧洲语种可比较 Parakeet，英语可比较 Canary-Qwen，Apple 本机可比较 WhisperKit。
+- 专用模型按校准后的分桶规则接管：例如欧洲语种可比较 Parakeet，英语可比较 Canary-Qwen，Apple 本机可比较 WhisperKit，中文方言/歌声可比较 FireRedASR2S。VibeVoice-ASR-7B 作为整段联合挑战保留完整上下文，但其 serialized overlap 输出不得覆盖多轨重叠真值。
 - 模型间不直接比较未经校准的自报 confidence。每个模型、语言、场景使用开发集拟合可靠性，held-out 只做一次晋级判断。
 - 保存每个候选的模型 revision、原始文本、token/segment score、语言、时间范围和失败码。融合只能选择或组合可追溯候选。
 - 数字、日期、专名和领域词单独计分。LLM 纠正必须引用候选或术语表，并保留 diff。
@@ -99,6 +103,7 @@ flowchart TD
 ### 4. 重叠语音
 
 - 先检测再局部升级，只对 overlap 区间加上下文 padding 运行分离或多说话人 ASR。
+- 对整段联合模型输出与 Community-1 regular/exclusive 时间线做一致性比对；VibeVoice 只可提供长上下文和 speaker-turn 第二意见，不能把单流输出当作 overlap 完整转录。
 - 晋级门禁同时要求 SI-SDRi 不下降、下游 tcpWER/cpWER 改善、说话人归属改善且非重叠区不被污染。
 - 在该门禁通过前，系统可以准确保存“谁在何时重叠”，但不能宣称所有并发语音都已完整转录。
 
@@ -175,7 +180,7 @@ flowchart TD
 2. 将 Community-1 整段 regular/exclusive 时间线提升为默认离线主 diarization 输出，现有 Dynamic-N 只做冲突融合和不变量审计；重跑 N=1/2/3/5 和 held-out。对公开可上传盲测另跑 Precision-2 同音频挑战，保持离线与托管结论分开。
 3. 固化 Qwen3-ASR-1.7B 支持集内基线，增加 Whisper large-v3 第二意见；按相同音频、相同切分比较 WER/CER、LID、时间和 RTF。
 4. 在服务器烟测 Omnilingual 7B/7B-ZS，并用支持集外语言 held-out 验证，不用 300M 结果替代 7B。
-5. 评测 Parakeet 欧洲语种、Canary-Qwen 英语、Sortformer 1-4 人；只有分桶胜出才启用路由。
+5. 服务器增补 VibeVoice-ASR-7B 全局联合挑战；同时评测 FireRedASR2S 的中文方言/歌声/VAD-LID 分桶、Parakeet 欧洲语种、Canary-Qwen 英语和 Sortformer 1-4 人；只有分桶胜出才启用路由。
 6. 建立真实代码切换和重叠多说话人门禁，再决定 LID 序列模型、分离模型或多说话人 ASR 的微调方向。
 7. 在 M4 上完整评测 `qwen3.5:9b`，服务器评测 35B-A3B；先通过 suggestion-only，再分别评估翻译、润色、摘要和 N-best 重排。
 8. 同一批 held-out 输出真实 SRT/WebVTT/ASS、soft-mux、burn-in、Java PDF 和证据报告，任何上游 blocker 都必须传递到发布状态。
@@ -195,6 +200,11 @@ flowchart TD
 - [Streaming Sortformer 4spk v2.1](https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1), revision `fafaab5faa1617a0ca52d38dd3dc4bd636800d3d`；官方输出 `S=4`，5 人以上 DER 明显退化。
 - [SpeechBrain VoxLingua107 LID](https://huggingface.co/speechbrain/lang-id-voxlingua107-ecapa), revision `0253049ae131d6a4be1c4f0d8b0ff483a0f8c8e9`, Apache-2.0。
 - [MMS-LID-4017](https://huggingface.co/facebook/mms-lid-4017), CC BY-NC 4.0；仅作研究比较，不进入默认商业包。
+- [VibeVoice-ASR-7B model card](https://huggingface.co/microsoft/VibeVoice-ASR) 与 [technical report](https://arxiv.org/abs/2601.18184), MIT；公开报告明确 60 分钟/50+ 语言/代码切换和 overlap serialized-output 限制。
+- [VibeVoice-ASR-BitNet](https://huggingface.co/microsoft/VibeVoice-ASR-BitNet) 与 [technical report](https://arxiv.org/abs/2607.21075), MIT；1.58 GB CPU 边缘派生模型，适合低延迟候选，不代表 7B 质量上限。
+- [FireRedASR2S repository](https://github.com/FireRedTeam/FireRedASR2S) 与 [model collection](https://huggingface.co/collections/FireRedTeam/fireredasr2s), Apache-2.0；公开权重覆盖中文/方言 ASR、100+ 语言 VAD/LID 和 singing/music 门控。
+- [TagSpeech](https://arxiv.org/abs/2601.06896)、[SpeakerLM](https://arxiv.org/abs/2508.06372) 与 [Speaker-Reasoner](https://arxiv.org/abs/2604.03074)；joint SDR 研究挑战，需先通过开放权重、许可证和跨域 held-out 门禁。
+- [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text)，`gpt-4o-transcribe-diarize` 的 speaker/time/text 约束、30 秒以上 chunking、最多四个已知说话人参考和 prompt 限制；仅逐次授权托管挑战者。
 - [Ollama Qwen3.5 tags](https://ollama.com/library/qwen3.5), `9b` Q4 当前标称约 6.6 GB，`27b` 约 17 GB，`35b` 约 24 GB。
 
 所有网页和模型元数据于 2026-07-25 核验。revision、许可证、文件清单和本地哈希必须在实际下载时再次锁定。

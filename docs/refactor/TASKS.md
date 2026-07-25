@@ -310,6 +310,7 @@
 ### 7.11 世界级基模与旗舰部署架构
 
 - [x] 完成 2026-07-25 官方来源调研并固化 [`FLAGSHIP_SPEECH_ARCHITECTURE.md`](./FLAGSHIP_SPEECH_ARCHITECTURE.md)：基模能力优先于当前 M4 容量，明确托管前沿、私有旗舰服务器与 M4 本机三级部署、模型适用域、许可证、revision、路由、证据边界和不可互相抵消的晋级门禁。
+- [x] 完成第二轮 2026-07-25/26 公开方案核验并写入旗舰文档：登记 `VibeVoice-ASR-7B`（60 分钟、50+ 语言、who/when/what、公开 MIT/vLLM 路径）为服务器级全局联合挑战者，登记 `FireRedASR2S`（中文/20+ 方言、100+ 语言 VAD/LID、singing/music）为专用挑战者；同时记录 VibeVoice overlap 漏说话人、低资源 SFT 偏置和 FireRed 语言域边界。`TagSpeech`/`SpeakerLM`/`Speaker-Reasoner` 仅保留研究挑战，不能因论文指标或小范围 checkpoint 直接进入默认路由；`gpt-4o-transcribe-diarize` 仅作为逐次授权的远端挑战者（>30 秒需 chunking，已知说话人参考最多 4 个），不改变离线承诺。
 - [x] 选择 Qwen3-ASR-1.7B 为其 30 种语言/22 种中文方言支持集内主 ASR 候选；选择 Omnilingual ASR LLM-7B/7B-ZS 为 1600+ 语言服务端旗舰兜底；Whisper large-v3、Parakeet v3 和 Canary-Qwen 分别作为独立、欧洲语种和英语挑战者。官方自报 SOTA 只用于候选筛选，不等于本项目质量通过。
 - [x] 将 Community-1/VBx 定为当前离线任意总人数 diarization 主权威方向；NeMo cascaded diarizer 进入服务器挑战；Sortformer 因公开 checkpoint 固定 `S=4` 且 5 人以上明显退化，只允许 `N<=4` 低延迟候选，不能成为 Dynamic-N 权威。
 - [x] 按能力上限而非本机容量拆成三档：Precision-2 等逐次授权上传的托管前沿质量档、Qwen/Omnilingual/Community-1/NeMo 的私有自托管旗舰档，以及 M4 边缘质量档。pyannote 官方无 collar、保留 overlap 的同表 12 个基准中 Precision-2 的 `12/12` DER 均低于 Community-1，因此它进入托管 incumbent；远端模型不能冒充离线能力，私有媒体也不得为了挑战而静默上传。
@@ -331,3 +332,6 @@
 - [ ] 在同一音频切分上完成 Qwen3-ASR-1.7B 对 Whisper large-v3、Parakeet v3、Canary-Qwen 和 Omnilingual 7B 的分桶挑战；只有目标分桶 held-out 改善且其他硬域不回退时才启用路由。
 - [ ] 建立真实重叠多说话人门禁。局部分离或多说话人 ASR 必须同时改善 SI-SDRi 与 overlap tcpWER，且不得污染非重叠区；通过前不得宣称所有并发语音均能完整转录。
 - [ ] 在当前 M4 16 GB 上完整评测 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`。更大基模仍从 suggestion-only 起步，并分别通过 N-best 重排、术语、翻译、润色和摘要的多语 held-out 门禁后才获得对应权限。
+- [ ] 在服务器质量档对 `VibeVoice-ASR-7B` 与 Community-1/NeMo 同音频比较 DER/JER、cpWER/tcpWER、overlap 漏说话人率、长上下文一致性、50+ 语言分桶和 GPU/显存预算；只允许作为联合挑战或已胜出分桶路由，不得覆盖 Community-1 overlap 真值。
+- [ ] 对 `FireRedASR2S` 建立隔离的中文/方言/中英 code-switch、singing/music 和 100+ 语言 VAD/LID held-out 分桶；模型仅在各自分桶同时改善 CER/WER、LID、VAD 误报/漏报、时间轴和 RTF 后接管，不能将其结果外推为全球语言质量。
+- [ ] 对逐次授权的 `gpt-4o-transcribe-diarize` 与离线级联运行同一公开/合成盲测，记录上传授权、区域、保留/删除、成本、chunking、speaker-reference 数和输出哈希；远端胜出只获得 opt-in 路由，不能改变默认离线或任意人数声明。

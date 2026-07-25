@@ -3,6 +3,8 @@
 > 审计日期：2026-07-21
 > 状态：目标架构已经建立部分替代组件，但旧入口、旧流水线、旧 PDF 链路与固定五人约束仍未完成退役。
 
+> 2026-07-25 模型架构更新：旗舰模型、专用挑战者、1600+ 语言长尾路径、托管前沿/私有服务器/M4 三档部署和晋级门禁见 [`FLAGSHIP_SPEECH_ARCHITECTURE.md`](./FLAGSHIP_SPEECH_ARCHITECTURE.md)。最新决策以该文件为准：Precision-2 是逐次授权上传时的托管 diarization 前沿候选，Community-1/VBx 是默认离线 Dynamic-N 主权威，Qwen3-ASR-1.7B 是支持集内主 ASR；CAM++、ERes2NetV2、Sortformer 和其他 ASR 均先作为挑战者或审计证据，只有 held-out 胜出后才能接管分桶。
+
 ## 设计目标
 
 - 完全离线处理中文会议，不上传音频、逐字稿、说话人声纹或人工真值。
@@ -21,12 +23,18 @@ flowchart LR
   UI["React + TypeScript UI"] <-->|"typed events"| TAURI["Tauri 2 / Rust"]
   TAURI <-->|"JSONL IPC v1"| API["Python backend API"]
   API --> PIPE["Meeting pipeline"]
-  PIPE --> ASR["Qwen3-ASR-1.7B"]
-  PIPE --> BOUNDARY["FunASR boundary / VAD"]
-  PIPE --> VOICE["CAM++ primary speaker embeddings"]
-  PIPE --> ROUTER["Uncertainty router"]
-  ROUTER --> VERIFY["ERes2NetV2 secondary verifier"]
-  PIPE --> FUSION["Diarization evidence fusion"]
+  PIPE --> CONTENT["VAD + lexical speech gate"]
+  PIPE --> DIAR["Community-1 segmentation + VBx Dynamic-N"]
+  DIAR --> FUSION["Speaker count / overlap evidence fusion"]
+  PIPE --> LID["Windowed multilingual LID"]
+  LID --> ROUTER["Language + uncertainty router"]
+  ROUTER --> ASR["Qwen3-ASR-1.7B primary"]
+  ROUTER --> SPECIALIST["Whisper / Parakeet / Canary challengers"]
+  ROUTER --> OMNI["Omnilingual 7B long-tail fallback"]
+  ASR --> ALIGN["Forced alignment / segment fallback"]
+  SPECIALIST --> ALIGN
+  OMNI --> ALIGN
+  PIPE --> VERIFY["CAM++ / ERes2NetV2 audit evidence"]
   PIPE --> REVIEW["Local audio review"]
   PIPE --> LLM["Local small LLM suggestion generator"]
   FUSION --> DECODER["Dynamic-N constrained decoder"]
@@ -87,10 +95,10 @@ flowchart LR
 
 生产链按成本由低到高升级，所有中间产物以输入 hash、模型版本、参数和契约版本为缓存键：
 
-1. **一次性预处理**：音频解码、重采样、VAD、FunASR 时间边界和基础特征只生成一次；失败恢复不得无理由重算已验证产物。
-2. **全量基础通道**：对全部候选段运行 Qwen3-ASR 基础转写、CAM++ 首轮 embedding/centroid 打分和确定性约束，不调用本地小 LLM，也不全场双跑声纹模型。
-3. **不确定性路由**：仅将低 CAM++ margin、边界冲突、overlap、人数不确定、短片段、离群 embedding 或规则冲突片段送入更高成本复核。
-4. **定向重算与二次声纹验证**：只对入队片段执行局部音频切片、重分段、ERes2NetV2 二次 embedding/候选核验、候选 ASR 或上下文窗口扩大；不得默认重跑整场会议。CAM++ 是速度优先的全量主通道，ERes2NetV2 是质量优先的难例 verifier。
+1. **一次性预处理**：音频解码、重采样、VAD、Community-1 segmentation/overlap/turn proposals 和基础特征只生成一次；失败恢复不得无理由重算已验证产物。
+2. **全量旗舰通道**：Community-1/VBx 生成整段 regular/exclusive Dynamic-N 时间线；Qwen3-ASR-1.7B 对支持集内候选段完成基础转写。两者按 stage 单次加载并批内复用，不调用本地 LLM，也不默认全场运行所有挑战模型。
+3. **不确定性路由**：仅将语言、边界、overlap、人数后验、短片段、离群 embedding 或模型冲突片段送入更高成本复核。
+4. **定向重算与挑战者验证**：只对入队片段执行局部重分段、Whisper/Parakeet/Canary/Omnilingual ASR 候选、CAM++/ERes2NetV2 声纹审计或上下文扩大；挑战者只有在目标分桶 held-out 晋级后才能接管主结果。
 5. **语义建议**：确定性规则仍无法解决时，本地小 LLM只能生成结构化建议，不能直接修改说话人、turn 结构或中文原文。
 6. **人工复核**：只展示仍有冲突或高影响的最小证据包；人工锁定结果进入后续增量解码，避免全局无差别返工。
 7. **增量报告**：只有版本化 transcript document 通过硬门槛后才调用 Java sidecar；内容未变时复用已验证 artifact，内容变更时只重建受影响报告版本。

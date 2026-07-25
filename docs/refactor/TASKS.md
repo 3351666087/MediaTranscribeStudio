@@ -39,7 +39,7 @@
 - [x] 在 `backend/models.py` 建立动态人数校验基础，并用 Python cardinality tests 覆盖多个人数。
 - [x] 在 `reporting/report_document_assembler.py` 接受动态 speaker set。
 - [ ] 让新 `backend/**` 成为真实生产入口并完全替代旧 `pipeline.py`。
-- [ ] 固化 Qwen3-ASR-1.7B、FunASR 时间边界、CAM++ 主声纹通道与 ERes2NetV2 难例复核通道的适配器边界。
+- [ ] 固化旗舰模型 provider 边界：Community-1/VBx Dynamic-N 主说话人时间线、Qwen3-ASR-1.7B 支持集内主 ASR、Omnilingual 7B 长尾后端，以及 Whisper/Parakeet/Canary/CAM++/ERes2NetV2 的挑战者或审计角色；任何分桶接管必须由 held-out 晋级。
 - [ ] 增加 overlap/串话候选和局部音频复核任务。
 - [ ] 实现 Dynamic-N 全局约束解码，保证 speaker set、score vector、profile 与 segment 映射基数一致。
 - [ ] 完成自动检测、手动指定、混合上下界和人数不确定时 fail-closed 的端到端流程。
@@ -306,3 +306,22 @@
 - [ ] 对同一批真实视频生成 SRT、WebVTT、ASS，验证 cue 覆盖、时间单调性、换行、安全区、说话人标签和多语字体；随后真实执行 sidecar、soft-mux 与 burn-in，并用 ffprobe、解封装哈希、代表帧像素检查和视觉 QA 验证，不得只检查输出计划。
 - [ ] 对同一批闭环结果生成 Java-only PDF 和可复核报告，验证逐段语言、翻译/润色来源、说话人映射、字幕交付、质量分桶、失败域和样本许可证均真实呈现；最后运行 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
 - [ ] 建立闭环发布汇总：每个样本从探测、人声判断、VAD、语言、ASR、说话人、重叠、翻译、润色、字幕、视频交付到 PDF/报告均有哈希相连的产物链；任何一步失败都保留原始媒体和已完成证据、标记具体失败域，禁止用“部分产物存在”宣称整套闭环通过。
+
+### 7.11 世界级基模与旗舰部署架构
+
+- [x] 完成 2026-07-25 官方来源调研并固化 [`FLAGSHIP_SPEECH_ARCHITECTURE.md`](./FLAGSHIP_SPEECH_ARCHITECTURE.md)：基模能力优先于当前 M4 容量，明确托管前沿、私有旗舰服务器与 M4 本机三级部署、模型适用域、许可证、revision、路由、证据边界和不可互相抵消的晋级门禁。
+- [x] 选择 Qwen3-ASR-1.7B 为其 30 种语言/22 种中文方言支持集内主 ASR 候选；选择 Omnilingual ASR LLM-7B/7B-ZS 为 1600+ 语言服务端旗舰兜底；Whisper large-v3、Parakeet v3 和 Canary-Qwen 分别作为独立、欧洲语种和英语挑战者。官方自报 SOTA 只用于候选筛选，不等于本项目质量通过。
+- [x] 将 Community-1/VBx 定为当前离线任意总人数 diarization 主权威方向；NeMo cascaded diarizer 进入服务器挑战；Sortformer 因公开 checkpoint 固定 `S=4` 且 5 人以上明显退化，只允许 `N<=4` 低延迟候选，不能成为 Dynamic-N 权威。
+- [x] 按能力上限而非本机容量拆成三档：Precision-2 等逐次授权上传的托管前沿质量档、Qwen/Omnilingual/Community-1/NeMo 的私有自托管旗舰档，以及 M4 边缘质量档。pyannote 官方无 collar、保留 overlap 的同表 12 个基准中 Precision-2 的 `12/12` DER 均低于 Community-1，因此它进入托管 incumbent；远端模型不能冒充离线能力，私有媒体也不得为了挑战而静默上传。
+- [x] 明确长尾 LID 许可证边界：SpeechBrain VoxLingua107 为 Apache-2.0 的独立候选；MMS-LID-4017 为 CC BY-NC 4.0，只能研究比较，不能进入默认商业模型包。
+- [x] 保存首次 60 条全局 auto-speaker/auto-language 共享 worker 基线的真实失败终态：`5 observed / 1 JOB_TIMEOUT / 54 BATCH_ABORTED`。超时样本在 300 秒内反复加载 Qwen checkpoint、CAM++ 和 ERes2NetV2；后 54 条未开始，不能记成 54 次模型质量失败，也不能用 5 条结果计算全库通过率。5 条 observed 恰好全部属于 held-out 单人样本，自动人数为 `2/1/6/2/5`、exact-count `1/5`，RTF 均值 `14.3949789152`、范围 `8.232620015-23.743494643`；5 条语言段虽然均命中，但不能外推 34 种语言。分桶报告 schema `1.1.0` 新增 `sourceId`、`evaluationSplit`、status/terminal/error 计数，SHA-256 为 `32ab4100514376e0ae09d20275b7947edf1a603a9253156c3174a99083753b68`，位于 `.runtime_cache/sample-library/global/results/single-auto-language-60-v1/quality-report.v1.json`。
+- [x] 对上述 5 条已暴露单人样本直接以解码后的内存 waveform 运行 Community-1 shadow：人数为 `2/2/1/1/1`、exact-count `3/5`，RTF 为 `0.80267/0.92568/0.30490/0.38826/0.25933`、均值约 `0.53617`，相较现生产结果更接近且快一个数量级。两条失败均为仅 `2.38/2.55 秒` 的 AMI 远场片段；样本数量、时长和已暴露属性都不足以晋级，只支持把 Community-1 提升到完整盲测候选。TorchCodec 的 FFmpeg ABI 警告不影响内存 waveform 路径，不另装 FFmpeg 掩盖环境告警。
+- [x] 安装并校验本机 Ollama `qwen3.5:9b`：model ID `6488c96fa5fa`，9.7B、Q4_K_M、6.6 GB，底层 blob SHA-256 `dec52a44569a2a25341c4e4d3fee25846eed4f6f0b936278e3a3c900bb99d37c`，Apache-2.0。以 `think=false`、temperature `0`、固定 seed 和严格 JSON Schema 对公开法语单段执行两次烟测，输出逐字一致，`segmentId/speaker/startMs/endMs/sourceText` 全部保持，译文为 `你好，世界。`，两次总耗时约 `26.31/18.48 秒`（首轮 load 约 `11.73 秒`）；这只通过安装、运行和结构契约烟测，不代表翻译、润色、摘要或自动应用质量通过，4B 在完整门禁前继续保留。
+- [ ] 首次基线已经观察 5 条 held-out 结果；修复生命周期时只能将其用于同版本复现，禁止据此调人数或路由阈值。正式模型晋级前必须冻结未观察且身份隔离的新盲测集，development/regression 才能用于迭代。
+- [ ] 修复生产模型生命周期：每个 stage/批次只加载一次权重并批内复用，阶段末统一释放；长推理持续 heartbeat，超时按冷启动 p95 与音频时长/RTF 动态预算；单 job 失败重启 worker 后继续余下样本，不再整批中止。
+- [ ] 修复后重跑 60/60 独立终态并按 `sourceId`、`evaluationSplit`、语言、地区、人数和场景分桶；held-out 在路由和阈值冻结前不得用于调参。
+- [ ] 将 Community-1 regular/exclusive 整段时间线提升为主输出后，重跑真实 `N=1/2/3/5/8` 与派生 `N=13`；同时报告 DER/JER、人数后验校准、overlap、cpWER/tcpWER/SA-WER、边界、冷/热 RTF 和复核量。
+- [ ] 对公开、合成或逐次明确授权上传的新盲测集运行 Precision-2 与 Community-1/NeMo 同音频挑战，锁定供应商版本、区域、保留/删除策略、成本和请求证据；按人数、远场、噪声、overlap 与语言分桶比较，托管胜出也只能获得 opt-in 路由，不能改变默认离线策略。
+- [ ] 在同一音频切分上完成 Qwen3-ASR-1.7B 对 Whisper large-v3、Parakeet v3、Canary-Qwen 和 Omnilingual 7B 的分桶挑战；只有目标分桶 held-out 改善且其他硬域不回退时才启用路由。
+- [ ] 建立真实重叠多说话人门禁。局部分离或多说话人 ASR 必须同时改善 SI-SDRi 与 overlap tcpWER，且不得污染非重叠区；通过前不得宣称所有并发语音均能完整转录。
+- [ ] 在当前 M4 16 GB 上完整评测 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`。更大基模仍从 suggestion-only 起步，并分别通过 N-best 重排、术语、翻译、润色和摘要的多语 held-out 门禁后才获得对应权限。

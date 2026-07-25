@@ -12,7 +12,12 @@ from tools.sample_library import (
     tokenize_for_score,
     word_error_rate,
 )
-from tools.evaluate_sample_library import _subtitle_quality, evaluate_case
+from tools.evaluate_sample_library import (
+    _bucket_summary,
+    _subtitle_quality,
+    _value_counts,
+    evaluate_case,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +75,59 @@ def test_subtitle_quality_accepts_standard_webvtt_timestamps(
     )
     quality = _subtitle_quality(tmp_path)
     assert quality["vtt"] == {"files": 1, "valid": 1}
+
+
+def test_evaluator_preserves_source_and_split_buckets() -> None:
+    reports = [
+        {
+            "sourceId": "fleurs",
+            "evaluationSplit": "development",
+            "status": "observed",
+        },
+        {
+            "sourceId": "fleurs",
+            "evaluationSplit": "held-out",
+            "status": "harness-failed",
+            "errorCode": "JOB_TIMEOUT",
+        },
+        {
+            "sourceId": "ami",
+            "evaluationSplit": "held-out",
+            "status": "harness-failed",
+            "errorCode": "BATCH_ABORTED",
+        },
+    ]
+
+    assert _bucket_summary(reports, "sourceId") == {
+        "ami": {
+            "total": 1,
+            "observed": 0,
+            "speakerCountMatchRate": None,
+            "meanWerOrCer": None,
+            "meanDer": None,
+            "meanJer": None,
+            "meanRtf": None,
+            "meanLanguageSegmentAccuracy": None,
+        },
+        "fleurs": {
+            "total": 2,
+            "observed": 1,
+            "speakerCountMatchRate": None,
+            "meanWerOrCer": None,
+            "meanDer": None,
+            "meanJer": None,
+            "meanRtf": None,
+            "meanLanguageSegmentAccuracy": None,
+        },
+    }
+    assert _bucket_summary(reports, "evaluationSplit")["held-out"][
+        "observed"
+    ] == 0
+    assert _value_counts(reports, "errorCode") == {
+        "BATCH_ABORTED": 1,
+        "JOB_TIMEOUT": 1,
+        "unknown": 1,
+    }
 
 
 def test_unknown_speaker_truth_does_not_report_false_count_result(

@@ -494,6 +494,7 @@ def evaluate_case(
     result = _read_json(result_path)
     base: dict[str, Any] = {
         "id": case["id"],
+        "sourceId": case.get("sourceId"),
         "language": case.get("language"),
         "region": case.get("region"),
         "evaluationSplit": case.get("evaluationSplit"),
@@ -701,6 +702,18 @@ def _bucket_summary(
     return output
 
 
+def _value_counts(
+    reports: Sequence[dict[str, Any]],
+    field: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for report in reports:
+        value = report.get(field)
+        key = str(value) if value is not None else "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
@@ -774,12 +787,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     report = {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "libraryId": resolved.get("libraryId"),
         "cases": reports,
         "summary": {
             "total": len(reports),
             "observed": sum(item.get("status") == "observed" for item in reports),
+            "statuses": _value_counts(reports, "status"),
+            "terminalTypes": _value_counts(reports, "terminalType"),
+            "errorCodes": _value_counts(reports, "errorCode"),
             "languageScored": sum(
                 isinstance(item.get("languageQuality"), dict)
                 and item["languageQuality"].get("automaticDetectionEligible") is True
@@ -808,7 +824,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "buckets": {
             field: _bucket_summary(reports, field)
-            for field in ("language", "region", "speakerCount", "scenario")
+            for field in (
+                "sourceId",
+                "evaluationSplit",
+                "language",
+                "region",
+                "speakerCount",
+                "scenario",
+            )
         },
     }
     output = args.output or args.results_root / "quality-report.v1.json"

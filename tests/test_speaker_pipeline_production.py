@@ -2447,7 +2447,7 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertTrue(repaired.hit)
         self.assertEqual(
             repaired.value["selectionMethod"],
-            "dynamic-n-adaptive-resample-stability-v10",
+            "dynamic-n-adaptive-resample-stability-v11",
         )
 
     def test_asr_language_isolated_cache_reuses_acoustic_stages(self) -> None:

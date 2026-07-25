@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -174,16 +174,48 @@ def _permuted(case: SyntheticClusteringCase) -> SyntheticClusteringCase:
     )
 
 
+def _as_review_only_count_partitions(
+    case: SyntheticClusteringCase,
+) -> SyntheticClusteringCase:
+    partition_count = len(case.windows)
+    return replace(
+        case,
+        windows=tuple(
+            replace(
+                window,
+                metadata={
+                    "turnId": "continuous-source-turn",
+                    "speakerCountPartition": {
+                        "method": "auto-acoustic-contiguous-partition-v1",
+                        "sourceWindowId": "continuous-vad-window",
+                        "requestedMinimum": None,
+                        "targetEvidenceWindowCount": partition_count,
+                        "partitionCount": partition_count,
+                        "reviewRequired": True,
+                        "reasonCode": (
+                            "AUTO_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                        ),
+                    },
+                },
+            )
+            for window in case.windows
+        ),
+    )
+
+
 def _cluster(
     case: SyntheticClusteringCase,
     request: StartJobRequest,
     config: SpeakerPipelineConfig | None = None,
+    *,
+    pyannote_count_prior: int | None = None,
 ):
     result = speaker_pipeline._cluster(
         case.embeddings,
         case.windows,
         request,
         config or _config(),
+        pyannote_count_prior=pyannote_count_prior,
     )
     assert 1 <= result.candidate_min <= result.count <= result.candidate_max
     assert 0.0 <= result.confidence <= 1.0
@@ -448,7 +480,7 @@ def test_embedded_close_voice_pair_uses_residual_collapse_correction(
     result = _cluster(case, request)
 
     assert result.count == speaker_count
-    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v10"
+    assert result.selection_method == "dynamic-n-adaptive-resample-stability-v11"
     assert result.under_split_detected
     assert "CLOSE_VOICE_RESIDUAL_COLLAPSE" in result.correction_path
     assert result.candidate_min <= speaker_count - 1
@@ -621,6 +653,68 @@ def test_absolute_singleton_is_a_reviewable_count_not_a_persistent_speaker(
     assert singleton_candidate.singleton_count == 1
     assert singleton_candidate.tiny_cluster_count == 1
     assert singleton_candidate.minimum_cluster_size == 1
+
+
+@pytest.mark.parametrize("evidence_window_count", (5, 8, 12))
+def test_review_only_partitions_reject_all_singleton_degeneracy(
+    evidence_window_count: int,
+) -> None:
+    case = _as_review_only_count_partitions(
+        _basis_case((1,) * evidence_window_count)
+    )
+
+    result = _cluster(case, _request("auto"))
+
+    assert result.count < evidence_window_count
+    assert result.over_split_detected
+    assert "ALL_SINGLETON_PARTITION_DEGENERACY" in result.correction_path
+    assert (
+        "PARTITION_DERIVED_ALL_SINGLETON_REVIEW_REQUIRED"
+        in result.confidence_reasons
+    )
+    assert result.candidate_max >= evidence_window_count
+    assert result.low_confidence_fail_closed
+    selected = next(
+        candidate
+        for candidate in result.count_candidates
+        if candidate.count == result.count
+    )
+    assert selected.singleton_count < selected.count
+    assert selected.stability >= 0.70
+    assert selected.bootstrap_support >= 0.80
+    assert selected.stability_effective_unique_runs >= 2
+
+
+def test_partition_degeneracy_guard_precedes_weak_pyannote_prior() -> None:
+    case = _as_review_only_count_partitions(_basis_case((1,) * 8))
+    acoustic_only = _cluster(case, _request("auto"))
+
+    reconciled = _cluster(
+        case,
+        _request("auto"),
+        pyannote_count_prior=2,
+    )
+
+    assert reconciled.count == acoustic_only.count
+    assert "ALL_SINGLETON_PARTITION_DEGENERACY" in reconciled.correction_path
+    assert not any(
+        item.startswith("PYANNOTE_FULL_TIMELINE_PRIOR:")
+        for item in reconciled.correction_path
+    )
+    assert "PYANNOTE_COUNT_PRIOR_CONFLICT" in reconciled.confidence_reasons
+
+
+@pytest.mark.parametrize("speaker_count", (3, 5, 8))
+def test_independent_single_observation_speakers_remain_legal(
+    speaker_count: int,
+) -> None:
+    case = _basis_case((1,) * speaker_count)
+
+    result = _cluster(case, _request("auto"))
+
+    assert result.count == speaker_count
+    assert "ALL_SINGLETON_PARTITION_DEGENERACY" not in result.correction_path
+    _assert_exact_truth_partition(case, result.assignments)
 
 
 @pytest.mark.parametrize("mode", ("manual", "auto", "hybrid"))

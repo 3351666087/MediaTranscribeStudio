@@ -81,8 +81,11 @@ _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
     }
 )
-_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v10"
+_CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v11"
 _STABILITY_MASK_ALGORITHM = "sha256-ranked-retained-mask-v1"
+_PARTITION_DEGENERACY_MIN_STABILITY = 0.70
+_PARTITION_DEGENERACY_MIN_BOOTSTRAP_SUPPORT = 0.80
+_PARTITION_DEGENERACY_MIN_UNIQUE_RESAMPLE_RUNS = 2
 _REQUIRED_STABILITY_COMPONENTS = frozenset(
     {
         "adjustedRand",
@@ -3321,6 +3324,80 @@ def _is_resolvable_close_voice_step(
     )
 
 
+def _uses_only_unconfirmed_count_partitions(
+    windows: Sequence[SpeechWindow],
+) -> bool:
+    """Return whether every window is review-only cardinality evidence."""
+
+    if not windows or any(window.locked_speaker_id for window in windows):
+        return False
+    for window in windows:
+        partition = window.metadata.get("speakerCountPartition")
+        if (
+            not isinstance(partition, Mapping)
+            or partition.get("method")
+            not in {
+                "auto-acoustic-contiguous-partition-v1",
+                "policy-minimum-contiguous-partition-v1",
+            }
+            or partition.get("reviewRequired") is not True
+            or not isinstance(partition.get("sourceWindowId"), str)
+            or not str(partition["sourceWindowId"]).strip()
+        ):
+            return False
+        refinement = window.metadata.get("speakerChangeRefinement")
+        if isinstance(refinement, Mapping):
+            for field_name in (
+                "speakerChangeSplitsMs",
+                "automaticSplitsMs",
+            ):
+                confirmed_splits = refinement.get(field_name)
+                if (
+                    isinstance(confirmed_splits, Sequence)
+                    and not isinstance(
+                        confirmed_splits,
+                        (str, bytes, bytearray),
+                    )
+                    and confirmed_splits
+                ):
+                    return False
+    return True
+
+
+def _strongest_partition_degeneracy_alternative(
+    candidates: Sequence[_ClusterCandidateScore],
+    *,
+    selected: _ClusterCandidateScore,
+    sample_count: int,
+) -> _ClusterCandidateScore | None:
+    """Find a repeatable fit that does not make every evidence window unique."""
+
+    if (
+        selected.count != sample_count
+        or selected.singleton_count != selected.count
+        or selected.minimum_cluster_size != 1
+    ):
+        return None
+    alternatives = [
+        candidate
+        for candidate in candidates
+        if (
+            candidate.singleton_count < candidate.count
+            and candidate.stability >= _PARTITION_DEGENERACY_MIN_STABILITY
+            and candidate.bootstrap_support
+            >= _PARTITION_DEGENERACY_MIN_BOOTSTRAP_SUPPORT
+            and candidate.stability_effective_unique_runs
+            >= _PARTITION_DEGENERACY_MIN_UNIQUE_RESAMPLE_RUNS
+        )
+    ]
+    if not alternatives:
+        return None
+    return max(
+        alternatives,
+        key=lambda candidate: (candidate.objective, -candidate.count),
+    )
+
+
 def _cluster(
     embeddings: Sequence[EmbeddingRecord],
     windows: Sequence[SpeechWindow],
@@ -3617,10 +3694,35 @@ def _cluster(
     correction_path: list[str] = []
     under_split_detected = False
     over_split_detected = False
+    partition_degeneracy_detected = False
+
+    if (
+        policy.mode is not SpeakerCountMode.MANUAL
+        and _uses_only_unconfirmed_count_partitions(ordered_windows)
+    ):
+        partition_alternative = _strongest_partition_degeneracy_alternative(
+            candidate_scores,
+            selected=selected_score,
+            sample_count=len(vectors),
+        )
+        if partition_alternative is not None:
+            correction_path.extend(
+                (
+                    (
+                        f"OVER_SPLIT_CORRECTION:"
+                        f"{selected_score.count}->{partition_alternative.count}"
+                    ),
+                    "ALL_SINGLETON_PARTITION_DEGENERACY",
+                )
+            )
+            over_split_detected = True
+            partition_degeneracy_detected = True
+            selected_score = partition_alternative
 
     lower_score = scores_by_count.get(selected_score.count - 1)
     if (
-        lower_score is not None
+        not partition_degeneracy_detected
+        and lower_score is not None
         and _is_persistent_singleton_outlier_step(
             lower_score,
             selected_score,
@@ -3638,7 +3740,8 @@ def _cluster(
         over_split_detected = True
         selected_score = lower_score
     elif (
-        lower_score is not None
+        not partition_degeneracy_detected
+        and lower_score is not None
         and (
             selected_score.over_split_risk >= 0.22
             or selected_score.outlier_risk >= 0.15
@@ -3752,7 +3855,8 @@ def _cluster(
             >= _PYANNOTE_COUNT_PRIOR_MIN_BOOTSTRAP_SUPPORT
         )
         if (
-            prior_has_repeatable_support
+            not partition_degeneracy_detected
+            and prior_has_repeatable_support
             and objective_gap <= _PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE
         ):
             correction_path.append(
@@ -3921,6 +4025,11 @@ def _cluster(
     if "CLOSE_VOICE_RESIDUAL_COLLAPSE" in correction_path:
         confidence = min(confidence, 0.74)
         confidence_reasons.append("CLOSE_VOICE_RESIDUAL_CORRECTION")
+    if partition_degeneracy_detected:
+        confidence = min(confidence, 0.60)
+        confidence_reasons.append(
+            "PARTITION_DERIVED_ALL_SINGLETON_REVIEW_REQUIRED"
+        )
     if selected_score.bootstrap_support < 0.85:
         confidence = min(confidence, 0.70)
         confidence_reasons.append("LOW_BOOTSTRAP_SUPPORT")
@@ -4137,7 +4246,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.9.0"
+    version = "2.10.0"
 
     def __init__(
         self,

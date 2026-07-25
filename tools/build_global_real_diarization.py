@@ -245,16 +245,20 @@ def select_diarization_window(
                     for turn in clipped
                 ]
             )
+            # Keep real multi-speaker cases short enough for bounded local runs.
+            # Once a window is short enough and covers every target speaker,
+            # prefer meaningful per-speaker coverage and overlap within that
+            # duration rather than stretching the sample to maximize overlap.
             score = (
+                -duration,
+                min(per_speaker.values()),
                 bool(overlaps),
                 overlap_duration,
-                min(per_speaker.values()),
                 speech_duration,
-                -duration,
                 -start,
             )
             candidate = {
-                "algorithm": "event-boundary-max-overlap-v1",
+                "algorithm": "event-boundary-shortest-coverage-v2",
                 "sourceStartSeconds": round(start, 6),
                 "sourceEndSeconds": round(end, 6),
                 "durationSeconds": round(end - start, 6),

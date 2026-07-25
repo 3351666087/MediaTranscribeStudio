@@ -68,6 +68,8 @@ _ERES_RESOLVED_EXIT_REASONS = {
 }
 _OVERLAP_DETECTOR_UNAVAILABLE_REASON = "OVERLAP_DETECTOR_UNAVAILABLE"
 _SPEAKER_CHANGE_REFINEMENT_STAGE = "speaker-change-refinement"
+_SPEAKER_COUNT_PARTITION_STAGE = "speaker-count-partition"
+_MIN_SPEAKER_COUNT_PARTITION_MS = 700
 _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON = (
     "SPEAKER_CHANGE_REFINEMENT_REVIEW_REQUIRED"
 )
@@ -4071,7 +4073,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.0.0"
+    version = "2.1.0"
 
     def __init__(
         self,
@@ -4602,6 +4604,141 @@ class SpeakerPipeline:
         assert refined is not None
         return refined
 
+    def _partition_for_speaker_count_policy(
+        self,
+        prepared: PreparedAudio,
+        request: StartJobRequest,
+        metrics: PipelineMetricsCollector,
+    ) -> PreparedAudio:
+        """Create enough contiguous evidence windows for a constrained count.
+
+        A VAD window is a continuous speech region, not a speaker turn. Manual
+        and hybrid policies therefore cannot use the number of VAD windows as
+        an upper bound on the number of speakers. This deterministic partition
+        only creates acoustic evidence windows; it preserves the source turn
+        identifier and does not assert speaker-change boundaries.
+        """
+
+        started = time.perf_counter()
+        policy = request.speaker_policy
+        required = (
+            policy.manual_count
+            if policy.mode is SpeakerCountMode.MANUAL
+            else (
+                policy.minimum
+                if policy.mode is SpeakerCountMode.HYBRID
+                else None
+            )
+        )
+        if required is None or len(prepared.windows) >= required:
+            metrics.record_stage(
+                _SPEAKER_COUNT_PARTITION_STAGE,
+                (time.perf_counter() - started) * 1000.0,
+            )
+            return prepared
+
+        allocations = [1] * len(prepared.windows)
+        durations = [
+            window.end_ms - window.start_ms for window in prepared.windows
+        ]
+        while sum(allocations) < required:
+            candidates = [
+                index
+                for index, duration in enumerate(durations)
+                if duration
+                >= (allocations[index] + 1)
+                * _MIN_SPEAKER_COUNT_PARTITION_MS
+            ]
+            if not candidates:
+                raise WorkerError(
+                    "SPEAKER_COUNT_AUDIO_TOO_SHORT",
+                    "speech duration is too short to create independent "
+                    "speaker evidence windows",
+                    details={
+                        "speakerCountMinimum": required,
+                        "speechWindows": len(prepared.windows),
+                        "speechDurationMs": sum(durations),
+                        "minimumPartitionMs": (
+                            _MIN_SPEAKER_COUNT_PARTITION_MS
+                        ),
+                    },
+                )
+            selected = max(
+                candidates,
+                key=lambda index: (
+                    durations[index] / (allocations[index] + 1),
+                    -prepared.windows[index].start_ms,
+                    prepared.windows[index].window_id,
+                ),
+            )
+            allocations[selected] += 1
+
+        partitioned: list[SpeechWindow] = []
+        for source, partition_count in zip(prepared.windows, allocations):
+            if partition_count == 1:
+                partitioned.append(source)
+                continue
+            duration = source.end_ms - source.start_ms
+            boundaries = tuple(
+                source.start_ms + duration * index // partition_count
+                for index in range(partition_count)
+            ) + (source.end_ms,)
+            source_turn_id = (
+                str(source.metadata["turnId"]).strip()
+                if isinstance(source.metadata.get("turnId"), str)
+                and str(source.metadata["turnId"]).strip()
+                else f"turn:{source.window_id}:{source.start_ms}-{source.end_ms}"
+            )
+            for index, (start_ms, end_ms) in enumerate(
+                zip(boundaries, boundaries[1:]),
+                start=1,
+            ):
+                metadata = dict(source.metadata)
+                metadata.update(
+                    {
+                        "sourceVadWindowId": metadata.get(
+                            "sourceVadWindowId",
+                            source.window_id,
+                        ),
+                        "turnId": source_turn_id,
+                        "speakerCountPartition": {
+                            "method": (
+                                "policy-minimum-contiguous-partition-v1"
+                            ),
+                            "sourceWindowId": source.window_id,
+                            "requestedMinimum": required,
+                            "partitionCount": partition_count,
+                            "reviewRequired": True,
+                            "reasonCode": (
+                                "SPEAKER_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                            ),
+                        },
+                    }
+                )
+                partitioned.append(
+                    SpeechWindow(
+                        window_id=(
+                            f"{source.window_id}.cardinality-{index:02d}"
+                        ),
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        boundary_conflict=source.boundary_conflict,
+                        locked_speaker_id=source.locked_speaker_id,
+                        metadata=metadata,
+                    )
+                )
+
+        metrics.record_stage(
+            _SPEAKER_COUNT_PARTITION_STAGE,
+            (time.perf_counter() - started) * 1000.0,
+        )
+        metrics.set_policy(
+            speakerCountPartitionApplied=True,
+            speakerCountPartitionSourceWindows=len(prepared.windows),
+            speakerCountPartitionEvidenceWindows=len(partitioned),
+        )
+        return replace(prepared, windows=tuple(partitioned))
+
     def _window_stage(
         self,
         *,
@@ -4789,6 +4926,9 @@ class SpeakerPipeline:
             refinement_evidence = window.metadata.get(
                 "speakerChangeRefinement"
             )
+            count_partition_evidence = window.metadata.get(
+                "speakerCountPartition"
+            )
             revisions: list[Revision] = []
             if normalized_text != raw_text:
                 revisions.append(
@@ -4859,6 +4999,18 @@ class SpeakerPipeline:
                                 }
                             }
                             if isinstance(refinement_evidence, Mapping)
+                            else {}
+                        ),
+                        **(
+                            {
+                                "speakerCountPartition": dict(
+                                    count_partition_evidence
+                                )
+                            }
+                            if isinstance(
+                                count_partition_evidence,
+                                Mapping,
+                            )
                             else {}
                         ),
                         "asr": {
@@ -5532,6 +5684,14 @@ class SpeakerPipeline:
                 reasons.append(
                     _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON
                 )
+            count_partition_evidence = segment.evidence.get(
+                "speakerCountPartition"
+            )
+            if (
+                isinstance(count_partition_evidence, Mapping)
+                and count_partition_evidence.get("reviewRequired") is True
+            ):
+                reasons.append("COUNT_UNCERTAINTY")
             overlap_evidence = segment.evidence.get("overlap")
             if (
                 isinstance(overlap_evidence, Mapping)
@@ -6570,6 +6730,11 @@ class SpeakerPipeline:
 
         try:
             prepared = self._refinement_stage(prepared, context, metrics)
+            prepared = self._partition_for_speaker_count_policy(
+                prepared,
+                request,
+                metrics,
+            )
         except Exception:
             _release_adapter_resources(
                 self.embedding_adapter,

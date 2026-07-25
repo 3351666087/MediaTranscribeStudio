@@ -114,7 +114,8 @@ def test_real_diarization_window_is_exact_bounded_and_deterministic() -> None:
     second = select_diarization_window(turns, 2)
 
     assert first == second
+    assert first["algorithm"] == "event-boundary-shortest-coverage-v2"
     assert first["speakerSet"] == ["a", "b"]
-    assert 0 < first["durationSeconds"] <= 90
+    assert first["durationSeconds"] == 10.0
     assert first["annotatedOverlapSeconds"] == 6.0
     assert {turn["transcript"] for turn in first["turns"]} == {None}

@@ -1576,6 +1576,77 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             "REJECTED_WITHOUT_FABRICATED_TEXT",
         )
 
+    def test_manual_count_partitions_one_continuous_vad_window(self) -> None:
+        preparation = FakePreparationAdapter(
+            1,
+            window_ranges={"window-1": (0, 5_000)},
+        )
+        pipeline, _, asr, cam, overlap = self.pipeline(
+            5,
+            windows=1,
+            preparation=preparation,
+        )
+
+        result = pipeline.transcribe(
+            self.request(5, "manual", job_id="manual-continuous-vad"),
+            self.context("manual-continuous-vad"),
+        )
+
+        self.assertEqual(len(result.segments), 5)
+        self.assertEqual(
+            {segment.speaker_id for segment in result.segments},
+            {f"speaker-{index}" for index in range(1, 6)},
+        )
+        self.assertEqual(
+            [(segment.start_ms, segment.end_ms) for segment in result.segments],
+            [
+                (0, 1_000),
+                (1_000, 2_000),
+                (2_000, 3_000),
+                (3_000, 4_000),
+                (4_000, 5_000),
+            ],
+        )
+        self.assertEqual(
+            {segment.turn_id for segment in result.segments},
+            {"turn-1"},
+        )
+        self.assertTrue(
+            all(
+                segment.evidence["speakerCountPartition"]["reviewRequired"]
+                for segment in result.segments
+            )
+        )
+        expected_windows = tuple(
+            f"window-1.cardinality-{index:02d}" for index in range(1, 6)
+        )
+        self.assertEqual(asr.calls, [expected_windows])
+        self.assertEqual(cam.calls, [expected_windows])
+        self.assertEqual(overlap.calls, [expected_windows])
+        self.assertTrue(
+            result.pipeline_metrics["policy"]["speakerCountPartitionApplied"]
+        )
+
+    def test_manual_count_fails_when_audio_cannot_support_evidence_windows(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(5, windows=1)
+
+        with self.assertRaises(WorkerError) as captured:
+            pipeline.transcribe(
+                self.request(5, "manual", job_id="manual-too-short"),
+                self.context("manual-too-short"),
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "SPEAKER_COUNT_AUDIO_TOO_SHORT",
+        )
+        self.assertEqual(
+            captured.exception.details["minimumPartitionMs"],
+            700,
+        )
+
     def test_gpu_stage_resources_release_once_in_strict_execution_order(
         self,
     ) -> None:

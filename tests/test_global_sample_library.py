@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import json
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from tools.global_sample_library import (
+    GlobalSampleCase,
     GlobalSampleLibraryError,
+    GlobalSampleSource,
     coverage_summary,
     load_global_manifest,
+)
+from tools.build_global_sample_library import (
+    _cached_case_matches_acquisition,
+    _case_row_metadata,
+    _refresh_existing_case,
+    _streaming_row,
 )
 from tools.build_global_derived_matrix import overlap_intervals
 from tools.build_global_real_diarization import (
@@ -29,8 +39,8 @@ def test_global_manifest_covers_regions_languages_and_splits() -> None:
     manifest = load_global_manifest(MANIFEST)
     coverage = coverage_summary(manifest)
 
-    assert coverage["caseCount"] >= 20
-    assert len(coverage["languages"]) >= 12
+    assert coverage["caseCount"] == 60
+    assert len(coverage["languages"]) == 34
     assert len(coverage["regions"]) >= 8
     assert coverage["evaluationSplits"] == [
         "development",
@@ -38,10 +48,189 @@ def test_global_manifest_covers_regions_languages_and_splits() -> None:
         "regression",
     ]
     assert {"real-recording", "single-speaker"} <= set(coverage["scenarios"])
+    assert {
+        "audiobook",
+        "challenging-read-speech",
+        "far-field",
+        "meeting-speech",
+        "telephone-band",
+    } <= set(coverage["scenarios"])
     assert {source.license for source in manifest.sources} == {
         "cc-by-4.0",
         "cc-by-sa-4.0",
     }
+    split_counts = {
+        split: sum(case.evaluation_split == split for case in manifest.cases)
+        for split in coverage["evaluationSplits"]
+    }
+    assert split_counts == {
+        "development": 20,
+        "held-out": 20,
+        "regression": 20,
+    }
+
+
+def test_dataset_specific_row_fields_and_groups_are_verified() -> None:
+    source = GlobalSampleSource(
+        source_id="fixture",
+        provider="huggingface",
+        dataset="example/dataset",
+        revision="a" * 40,
+        license="cc-by-4.0",
+        homepage="https://huggingface.co/datasets/example/dataset",
+        attribution="Fixture.",
+    )
+    case = GlobalSampleCase(
+        case_id="fixture-case",
+        source_id="fixture",
+        acquisition={
+            "kind": "hf-viewer-row",
+            "config": "default",
+            "split": "test",
+            "rowIndex": 3,
+            "transcriptField": "text",
+            "pathField": "file",
+            "speakerField": "speaker_id",
+            "speakerId": "42",
+            "recordingField": "chapter_id",
+            "recordingId": "9",
+        },
+        language="en-US",
+        region="North America",
+        evaluation_split="held-out",
+        scenarios=("real-recording", "single-speaker"),
+        expected_speaker_count=1,
+    )
+    row = {
+        "text": "expected words",
+        "file": "sample.flac",
+        "speaker_id": 42,
+        "chapter_id": 9,
+    }
+
+    metadata = _case_row_metadata(row, source=source, case=case)
+
+    assert metadata["transcript"] == "expected words"
+    assert metadata["path"] == "sample.flac"
+    assert metadata["verifiedSourceGroups"] == {
+        "speaker": {"field": "speaker_id", "id": "42"},
+        "recording": {"field": "chapter_id", "id": "9"},
+    }
+    row["chapter_id"] = 10
+    with pytest.raises(GlobalSampleLibraryError, match="recording identity mismatch"):
+        _case_row_metadata(row, source=source, case=case)
+
+    cached = {
+        "sourceLocator": {
+            "url": f"https://huggingface.co/datasets/{source.dataset}/tree/{source.revision}",
+            "dataset": source.dataset,
+            "revision": source.revision,
+            "config": "default",
+            "split": "test",
+            "rowIndex": 3,
+        },
+        "sourceRow": {
+            "fieldMapping": metadata["fieldMapping"],
+            "verifiedSourceGroups": metadata["verifiedSourceGroups"],
+        },
+    }
+    assert _cached_case_matches_acquisition(cached, source=source, case=case)
+    cached["sourceRow"]["verifiedSourceGroups"]["recording"]["id"] = "10"
+    assert not _cached_case_matches_acquisition(cached, source=source, case=case)
+
+
+def test_cached_default_field_mapping_is_migrated(
+    tmp_path: Path,
+) -> None:
+    source = GlobalSampleSource(
+        source_id="fixture",
+        provider="huggingface",
+        dataset="example/dataset",
+        revision="a" * 40,
+        license="cc-by-4.0",
+        homepage="https://huggingface.co/datasets/example/dataset",
+        attribution="Fixture.",
+    )
+    case = GlobalSampleCase(
+        case_id="fixture-case",
+        source_id="fixture",
+        acquisition={
+            "kind": "hf-viewer-row",
+            "config": "default",
+            "split": "test",
+            "rowIndex": 3,
+        },
+        language="en-US",
+        region="North America",
+        evaluation_split="held-out",
+        scenarios=("real-recording", "single-speaker"),
+        expected_speaker_count=1,
+    )
+    output = tmp_path / "fixture.wav"
+    output.write_bytes(b"audio")
+    cached = {
+        "expectedTranscript": "expected words",
+        "rawTranscript": "expected words",
+        "sourceRow": {"path": "fixture.wav"},
+    }
+
+    _refresh_existing_case(
+        cached,
+        source=source,
+        case=case,
+        output_path=output,
+    )
+
+    assert cached["sourceRow"]["fieldMapping"] == {
+        "transcript": "transcription",
+        "rawTranscript": "raw_transcription",
+        "path": "path",
+    }
+    assert cached["sourceRow"]["verifiedSourceGroups"] == {}
+
+
+def test_streaming_runtime_failure_is_isolated_as_sample_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = GlobalSampleSource(
+        source_id="fixture",
+        provider="huggingface",
+        dataset="example/dataset",
+        revision="a" * 40,
+        license="cc-by-4.0",
+        homepage="https://huggingface.co/datasets/example/dataset",
+        attribution="Fixture.",
+    )
+    case = GlobalSampleCase(
+        case_id="fixture-streaming",
+        source_id="fixture",
+        acquisition={
+            "kind": "hf-streaming-row",
+            "config": "default",
+            "split": "test",
+            "rowIndex": 0,
+        },
+        language="en-US",
+        region="North America",
+        evaluation_split="held-out",
+        scenarios=("real-recording", "single-speaker"),
+        expected_speaker_count=1,
+    )
+
+    def fail_load(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("local runtime path must not escape")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        SimpleNamespace(Audio=object, load_dataset=fail_load),
+    )
+    with pytest.raises(
+        GlobalSampleLibraryError,
+        match="Hugging Face streaming failed: RuntimeError",
+    ) as captured:
+        _streaming_row(source, case)
+    assert "local runtime path" not in str(captured.value)
 
 
 def test_global_manifest_requires_pinned_dataset_revision(
@@ -75,6 +264,25 @@ def test_global_manifest_rejects_duplicate_case_ids(tmp_path: Path) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
     with pytest.raises(GlobalSampleLibraryError, match="case IDs must be unique"):
+        load_global_manifest(path)
+
+
+def test_global_manifest_rejects_source_group_leakage(tmp_path: Path) -> None:
+    value = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    first = value["cases"][0]
+    second = value["cases"][1]
+    first["acquisition"].update(
+        {"speakerField": "speaker_id", "speakerId": "shared-speaker"}
+    )
+    second["acquisition"].update(
+        {"speakerField": "speaker_id", "speakerId": "shared-speaker"}
+    )
+    first["evaluationSplit"] = "development"
+    second["evaluationSplit"] = "held-out"
+    path = tmp_path / "leaked.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(GlobalSampleLibraryError, match="cross evaluation splits"):
         load_global_manifest(path)
 
 

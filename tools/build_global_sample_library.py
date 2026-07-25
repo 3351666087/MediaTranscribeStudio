@@ -129,6 +129,73 @@ def _audio_source(value: Any, field: str) -> str:
     return source_url
 
 
+def _case_row_metadata(
+    row: dict[str, Any],
+    *,
+    source: GlobalSampleSource,
+    case: GlobalSampleCase,
+) -> dict[str, Any]:
+    acquisition = case.acquisition
+    transcript_field = acquisition.get("transcriptField", "transcription")
+    raw_transcript_field = acquisition.get(
+        "rawTranscriptField",
+        "raw_transcription",
+    )
+    path_field = acquisition.get("pathField", "path")
+    transcript = row.get(transcript_field)
+    if not isinstance(transcript, str) or not transcript.strip():
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} transcript is missing from {transcript_field}"
+        )
+    raw_transcript = row.get(raw_transcript_field)
+    if not isinstance(raw_transcript, str) or not raw_transcript.strip():
+        raw_transcript = transcript
+
+    verified_groups: dict[str, dict[str, str]] = {}
+    for group_kind, field_key, id_key in (
+        ("speaker", "speakerField", "speakerId"),
+        ("recording", "recordingField", "recordingId"),
+    ):
+        field_name = acquisition.get(field_key)
+        expected_id = acquisition.get(id_key)
+        if not isinstance(field_name, str) or not isinstance(expected_id, str):
+            continue
+        actual_id = row.get(field_name)
+        if str(actual_id) != expected_id:
+            raise GlobalSampleLibraryError(
+                f"{case.case_id} {group_kind} identity mismatch: "
+                f"expected {expected_id!r}, got {actual_id!r}"
+            )
+        verified_groups[group_kind] = {
+            "field": field_name,
+            "id": expected_id,
+        }
+
+    return {
+        "dataset": source.dataset,
+        "revision": source.revision,
+        "config": acquisition["config"],
+        "split": acquisition["split"],
+        "rowIndex": acquisition["rowIndex"],
+        "path": row.get(path_field),
+        "transcript": transcript.strip(),
+        "rawTranscript": raw_transcript.strip(),
+        "englishTranscript": (
+            row.get("english_transcription").strip()
+            if isinstance(row.get("english_transcription"), str)
+            else None
+        ),
+        "gender": row.get("gender"),
+        "fieldMapping": {
+            "transcript": transcript_field,
+            "rawTranscript": raw_transcript_field,
+            "path": path_field,
+        },
+        "verifiedSourceGroups": verified_groups,
+        "sourceAssetType": "audio/wav",
+    }
+
+
 def _viewer_row(
     source: GlobalSampleSource,
     case: GlobalSampleCase,
@@ -163,26 +230,11 @@ def _viewer_row(
         raise GlobalSampleLibraryError(
             f"{case.case_id} audio asset is not bound to the pinned dataset revision"
         )
-    transcript = row.get("transcription")
-    if not isinstance(transcript, str) or not transcript.strip():
-        raise GlobalSampleLibraryError(f"{case.case_id} transcript is missing")
-    return _request_bytes(audio_url, timeout=180.0), {
-        "dataset": source.dataset,
-        "revision": source.revision,
-        "config": acquisition["config"],
-        "split": acquisition["split"],
-        "rowIndex": acquisition["rowIndex"],
-        "path": row.get("path"),
-        "transcript": transcript.strip(),
-        "rawTranscript": transcript.strip(),
-        "englishTranscript": (
-            row.get("english_transcription").strip()
-            if isinstance(row.get("english_transcription"), str)
-            else None
-        ),
-        "gender": None,
-        "sourceAssetType": "audio/wav",
-    }
+    return _request_bytes(audio_url, timeout=180.0), _case_row_metadata(
+        row,
+        source=source,
+        case=case,
+    )
 
 
 def _streaming_row(
@@ -196,18 +248,23 @@ def _streaming_row(
             "datasets is required for hf-streaming-row cases"
         ) from exc
     acquisition = case.acquisition
-    stream = load_dataset(
-        source.dataset,
-        acquisition["config"],
-        split=acquisition["split"],
-        revision=source.revision,
-        streaming=True,
-    ).cast_column("audio", Audio(decode=False))
-    row: dict[str, Any] | None = None
-    for index, candidate in enumerate(stream):
-        if index == acquisition["rowIndex"]:
-            row = candidate
-            break
+    try:
+        stream = load_dataset(
+            source.dataset,
+            acquisition["config"],
+            split=acquisition["split"],
+            revision=source.revision,
+            streaming=True,
+        ).cast_column("audio", Audio(decode=False))
+        row: dict[str, Any] | None = None
+        for index, candidate in enumerate(stream):
+            if index == acquisition["rowIndex"]:
+                row = candidate
+                break
+    except Exception as exc:
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} Hugging Face streaming failed: {type(exc).__name__}"
+        ) from exc
     if row is None:
         raise GlobalSampleLibraryError(f"{case.case_id} row is unavailable")
     audio = row.get("audio")
@@ -216,25 +273,7 @@ def _streaming_row(
     audio_bytes = audio.get("bytes")
     if not isinstance(audio_bytes, bytes) or not audio_bytes:
         raise GlobalSampleLibraryError(f"{case.case_id}.audio bytes are missing")
-    transcript = row.get("transcription")
-    raw_transcript = row.get("raw_transcription")
-    if not isinstance(transcript, str) or not transcript.strip():
-        raise GlobalSampleLibraryError(f"{case.case_id} transcript is missing")
-    if not isinstance(raw_transcript, str) or not raw_transcript.strip():
-        raw_transcript = transcript
-    metadata = {
-        "dataset": source.dataset,
-        "revision": source.revision,
-        "config": acquisition["config"],
-        "split": acquisition["split"],
-        "rowIndex": acquisition["rowIndex"],
-        "path": row.get("path"),
-        "transcript": transcript.strip(),
-        "rawTranscript": raw_transcript.strip(),
-        "englishTranscript": None,
-        "gender": row.get("gender"),
-        "sourceAssetType": "audio/wav",
-    }
+    metadata = _case_row_metadata(row, source=source, case=case)
     del stream
     gc.collect()
     return audio_bytes, metadata
@@ -385,6 +424,20 @@ def _refresh_existing_case(
         )
     if not isinstance(raw_transcript, str) or not raw_transcript:
         raw_transcript = transcript
+    source_row = row.get("sourceRow")
+    if not isinstance(source_row, dict):
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} cached sourceRow is missing"
+        )
+    source_row["fieldMapping"] = {
+        "transcript": case.acquisition.get("transcriptField", "transcription"),
+        "rawTranscript": case.acquisition.get(
+            "rawTranscriptField",
+            "raw_transcription",
+        ),
+        "path": case.acquisition.get("pathField", "path"),
+    }
+    source_row.setdefault("verifiedSourceGroups", {})
     row.update(
         {
             "sourceId": case.source_id,
@@ -417,6 +470,59 @@ def _refresh_existing_case(
             },
         }
     )
+
+
+def _cached_case_matches_acquisition(
+    row: dict[str, Any],
+    *,
+    source: GlobalSampleSource,
+    case: GlobalSampleCase,
+) -> bool:
+    locator = row.get("sourceLocator")
+    if not isinstance(locator, dict) or locator != {
+        "url": (
+            f"https://huggingface.co/datasets/{source.dataset}/tree/"
+            f"{source.revision}"
+        ),
+        "dataset": source.dataset,
+        "revision": source.revision,
+        "config": case.acquisition["config"],
+        "split": case.acquisition["split"],
+        "rowIndex": case.acquisition["rowIndex"],
+    }:
+        return False
+    source_row = row.get("sourceRow")
+    if not isinstance(source_row, dict):
+        return False
+    expected_groups: dict[str, dict[str, str]] = {}
+    for group_kind, field_key, id_key in (
+        ("speaker", "speakerField", "speakerId"),
+        ("recording", "recordingField", "recordingId"),
+    ):
+        field_name = case.acquisition.get(field_key)
+        group_id = case.acquisition.get(id_key)
+        if isinstance(field_name, str) and isinstance(group_id, str):
+            expected_groups[group_kind] = {
+                "field": field_name,
+                "id": group_id,
+            }
+    if source_row.get("verifiedSourceGroups", {}) != expected_groups:
+        return False
+    expected_mapping = {
+        "transcript": case.acquisition.get("transcriptField", "transcription"),
+        "rawTranscript": case.acquisition.get(
+            "rawTranscriptField",
+            "raw_transcription",
+        ),
+        "path": case.acquisition.get("pathField", "path"),
+    }
+    cached_mapping = source_row.get("fieldMapping")
+    if cached_mapping is None:
+        return not any(
+            key in case.acquisition
+            for key in ("transcriptField", "rawTranscriptField", "pathField")
+        )
+    return cached_mapping == expected_mapping
 
 
 def _existing_cases(output_root: Path) -> dict[str, dict[str, Any]]:
@@ -516,6 +622,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             and existing_path is not None
             and existing_path.is_file()
             and existing.get("sha256") == _sha256(existing_path)
+            and _cached_case_matches_acquisition(
+                existing,
+                source=source_by_id[case.source_id],
+                case=case,
+            )
         ):
             _refresh_existing_case(
                 existing,

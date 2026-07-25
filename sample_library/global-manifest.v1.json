@@ -24,6 +24,33 @@
       "attribution": "FLEURS, Google; CC BY 4.0."
     },
     {
+      "id": "librispeech",
+      "provider": "huggingface",
+      "dataset": "openslr/librispeech_asr",
+      "revision": "71cacbfb7e2354c4226d01e70d77d5fca3d04ba1",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/openslr/librispeech_asr",
+      "attribution": "LibriSpeech ASR corpus, OpenSLR SLR12; CC BY 4.0."
+    },
+    {
+      "id": "mls",
+      "provider": "huggingface",
+      "dataset": "facebook/multilingual_librispeech",
+      "revision": "2e83e61823b4c47dcbcb1980bb88601274127609",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/facebook/multilingual_librispeech",
+      "attribution": "Multilingual LibriSpeech, Pratap et al.; CC BY 4.0."
+    },
+    {
+      "id": "ami-utterances",
+      "provider": "huggingface",
+      "dataset": "edinburghcstr/ami",
+      "revision": "46f28f2503e2ec48f8867a84eef356c70476beab",
+      "license": "cc-by-4.0",
+      "homepage": "https://huggingface.co/datasets/edinburghcstr/ami",
+      "attribution": "AMI Meeting Corpus, University of Edinburgh; CC BY 4.0."
+    },
+    {
       "id": "ami",
       "provider": "huggingface",
       "dataset": "diarizers-community/ami",
@@ -269,6 +296,386 @@
       "language": "om-ET",
       "region": "Sub-Saharan Africa",
       "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_es_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "spanish", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "10367", "recordingField": "chapter_id", "recordingId": "10282"},
+      "language": "es-ES",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_es_dev_1000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "spanish", "split": "dev", "rowIndex": 1000, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "3678", "recordingField": "chapter_id", "recordingId": "1378"},
+      "language": "es-ES",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_fr_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "french", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "1591", "recordingField": "chapter_id", "recordingId": "1028"},
+      "language": "fr-FR",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_fr_dev_1000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "french", "split": "dev", "rowIndex": 1000, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "4937", "recordingField": "chapter_id", "recordingId": "2928"},
+      "language": "fr-FR",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_de_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "german", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "10870", "recordingField": "chapter_id", "recordingId": "10823"},
+      "language": "de-DE",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_de_dev_1000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "german", "split": "dev", "rowIndex": 1000, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "3862", "recordingField": "chapter_id", "recordingId": "2999"},
+      "language": "de-DE",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_it_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "italian", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "10362", "recordingField": "chapter_id", "recordingId": "11341"},
+      "language": "it-IT",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_it_dev_1000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "italian", "split": "dev", "rowIndex": 1000, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "8613", "recordingField": "chapter_id", "recordingId": "7877"},
+      "language": "it-IT",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_nl_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "dutch", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "3619", "recordingField": "chapter_id", "recordingId": "10256"},
+      "language": "nl-NL",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_nl_dev_2000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "dutch", "split": "dev", "rowIndex": 2000, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "7432", "recordingField": "chapter_id", "recordingId": "7057"},
+      "language": "nl-NL",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_pl_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "polish", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "11295", "recordingField": "chapter_id", "recordingId": "11059"},
+      "language": "pl-PL",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_pl_dev_300",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "polish", "split": "dev", "rowIndex": 300, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "7775", "recordingField": "chapter_id", "recordingId": "5541"},
+      "language": "pl-PL",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_pt_dev_000",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "portuguese", "split": "dev", "rowIndex": 0, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "12710", "recordingField": "chapter_id", "recordingId": "10229"},
+      "language": "pt-PT",
+      "region": "Europe",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "mls_pt_dev_250",
+      "sourceId": "mls",
+      "acquisition": {"kind": "hf-viewer-row", "config": "portuguese", "split": "dev", "rowIndex": 250, "transcriptField": "transcript", "pathField": "file", "speakerField": "speaker_id", "speakerId": "13069", "recordingField": "chapter_id", "recordingId": "13511"},
+      "language": "pt-PT",
+      "region": "Europe",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_clean_000",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "clean", "split": "test", "rowIndex": 0, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "6930", "recordingField": "chapter_id", "recordingId": "75918"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_clean_500",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "clean", "split": "test", "rowIndex": 500, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "2961", "recordingField": "chapter_id", "recordingId": "960"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_clean_1000",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "clean", "split": "test", "rowIndex": 1000, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "8455", "recordingField": "chapter_id", "recordingId": "210777"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_clean_1500",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "clean", "split": "test", "rowIndex": 1500, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "4507", "recordingField": "chapter_id", "recordingId": "16021"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_other_000",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "other", "split": "test", "rowIndex": 0, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "7902", "recordingField": "chapter_id", "recordingId": "96591"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "challenging-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_other_500",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "other", "split": "test", "rowIndex": 500, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "5764", "recordingField": "chapter_id", "recordingId": "299665"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "challenging-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_other_1000",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "other", "split": "test", "rowIndex": 1000, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "3528", "recordingField": "chapter_id", "recordingId": "168669"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "challenging-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "librispeech_other_1500",
+      "sourceId": "librispeech",
+      "acquisition": {"kind": "hf-viewer-row", "config": "other", "split": "test", "rowIndex": 1500, "transcriptField": "text", "pathField": "file", "speakerField": "speaker_id", "speakerId": "3538", "recordingField": "chapter_id", "recordingId": "163619"},
+      "language": "en-US",
+      "region": "North America",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "challenging-read-speech", "audiobook"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "ami_sdm_test_000",
+      "sourceId": "ami-utterances",
+      "acquisition": {"kind": "hf-viewer-row", "config": "sdm", "split": "test", "rowIndex": 0, "transcriptField": "text", "pathField": "audio_id", "speakerField": "speaker_id", "speakerId": "FEO072", "recordingField": "meeting_id", "recordingId": "EN2002a"},
+      "language": "en-GB",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "far-field", "meeting-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "ami_sdm_test_077",
+      "sourceId": "ami-utterances",
+      "acquisition": {"kind": "hf-viewer-row", "config": "sdm", "split": "test", "rowIndex": 77, "transcriptField": "text", "pathField": "audio_id", "speakerField": "speaker_id", "speakerId": "MEE071", "recordingField": "meeting_id", "recordingId": "EN2002a"},
+      "language": "en-GB",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "far-field", "meeting-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "ami_sdm_test_083",
+      "sourceId": "ami-utterances",
+      "acquisition": {"kind": "hf-viewer-row", "config": "sdm", "split": "test", "rowIndex": 83, "transcriptField": "text", "pathField": "audio_id", "speakerField": "speaker_id", "speakerId": "FEO070", "recordingField": "meeting_id", "recordingId": "EN2002a"},
+      "language": "en-GB",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "far-field", "meeting-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "ami_sdm_test_085",
+      "sourceId": "ami-utterances",
+      "acquisition": {"kind": "hf-viewer-row", "config": "sdm", "split": "test", "rowIndex": 85, "transcriptField": "text", "pathField": "audio_id", "speakerField": "speaker_id", "speakerId": "MEE073", "recordingField": "meeting_id", "recordingId": "EN2002a"},
+      "language": "en-GB",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "far-field", "meeting-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ja_jp_test_010",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "ja_jp", "split": "test", "rowIndex": 10},
+      "language": "ja-JP",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_fa_ir_test_011",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "fa_ir", "split": "test", "rowIndex": 11},
+      "language": "fa-IR",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_bn_in_test_012",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "bn_in", "split": "test", "rowIndex": 12},
+      "language": "bn-IN",
+      "region": "South Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_th_th_test_013",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "th_th", "split": "test", "rowIndex": 13},
+      "language": "th-TH",
+      "region": "Southeast Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_he_il_test_018",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "he_il", "split": "test", "rowIndex": 18},
+      "language": "he-IL",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_el_gr_test_019",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "el_gr", "split": "test", "rowIndex": 19},
+      "language": "el-GR",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_da_dk_test_020",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "da_dk", "split": "test", "rowIndex": 20},
+      "language": "da-DK",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_sv_se_test_021",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-streaming-row", "config": "sv_se", "split": "test", "rowIndex": 21},
+      "language": "sv-SE",
+      "region": "Europe",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ur_pk_validation_014",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ur_pk", "split": "validation", "rowIndex": 14},
+      "language": "ur-PK",
+      "region": "South Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ta_in_validation_015",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ta_in", "split": "validation", "rowIndex": 15},
+      "language": "ta-IN",
+      "region": "South Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_uk_ua_validation_016",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "uk_ua", "split": "validation", "rowIndex": 16},
+      "language": "uk-UA",
+      "region": "Eastern Europe and Central Asia",
+      "evaluationSplit": "regression",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_validation_017",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "yue_hant_hk", "split": "validation", "rowIndex": 17},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "regression",
       "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
       "expectedSpeakerCount": 1
     }

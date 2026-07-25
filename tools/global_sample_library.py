@@ -52,8 +52,22 @@ _CASE_FIELDS = frozenset(
     }
 )
 _ACQUISITION_FIELDS = frozenset(
-    {"kind", "config", "split", "rowIndex"}
+    {
+        "kind",
+        "config",
+        "split",
+        "rowIndex",
+        "transcriptField",
+        "rawTranscriptField",
+        "pathField",
+        "speakerField",
+        "speakerId",
+        "recordingField",
+        "recordingId",
+    }
 )
+_REQUIRED_ACQUISITION_FIELDS = frozenset({"kind", "config", "split", "rowIndex"})
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
 class GlobalSampleLibraryError(ValueError):
@@ -99,6 +113,24 @@ class GlobalSampleManifest:
 def _exact_fields(value: dict[str, Any], allowed: frozenset[str], field: str) -> None:
     unknown = sorted(set(value) - allowed)
     missing = sorted(allowed - set(value))
+    if missing or unknown:
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unknown:
+            details.append("unknown " + ", ".join(unknown))
+        raise GlobalSampleLibraryError(f"{field} fields are invalid: {'; '.join(details)}")
+
+
+def _required_and_allowed_fields(
+    value: dict[str, Any],
+    *,
+    required: frozenset[str],
+    allowed: frozenset[str],
+    field: str,
+) -> None:
+    unknown = sorted(set(value) - allowed)
+    missing = sorted(required - set(value))
     if missing or unknown:
         details: list[str] = []
         if missing:
@@ -173,7 +205,12 @@ def _case(value: Any, index: int, source_ids: set[str]) -> GlobalSampleCase:
     acquisition = value["acquisition"]
     if not isinstance(acquisition, dict):
         raise GlobalSampleLibraryError(f"{field}.acquisition must be an object")
-    _exact_fields(acquisition, _ACQUISITION_FIELDS, f"{field}.acquisition")
+    _required_and_allowed_fields(
+        acquisition,
+        required=_REQUIRED_ACQUISITION_FIELDS,
+        allowed=_ACQUISITION_FIELDS,
+        field=f"{field}.acquisition",
+    )
     kind = _text(acquisition["kind"], f"{field}.acquisition.kind")
     if kind not in _ACQUISITION_KINDS:
         raise GlobalSampleLibraryError(f"{field}.acquisition.kind is unsupported")
@@ -203,6 +240,41 @@ def _case(value: Any, index: int, source_ids: set[str]) -> GlobalSampleCase:
         raise GlobalSampleLibraryError(
             f"{field}.expectedSpeakerCount must be a positive integer"
         )
+    optional_acquisition: dict[str, str] = {}
+    for optional_field in (
+        "transcriptField",
+        "rawTranscriptField",
+        "pathField",
+        "speakerField",
+        "speakerId",
+        "recordingField",
+        "recordingId",
+    ):
+        if optional_field not in acquisition:
+            continue
+        optional_value = _text(
+            acquisition[optional_field],
+            f"{field}.acquisition.{optional_field}",
+        )
+        if optional_field.endswith("Field") and not _FIELD_NAME.fullmatch(
+            optional_value
+        ):
+            raise GlobalSampleLibraryError(
+                f"{field}.acquisition.{optional_field} is not a safe field name"
+            )
+        optional_acquisition[optional_field] = optional_value
+    if ("speakerField" in optional_acquisition) != (
+        "speakerId" in optional_acquisition
+    ):
+        raise GlobalSampleLibraryError(
+            f"{field}.acquisition speakerField and speakerId must be paired"
+        )
+    if ("recordingField" in optional_acquisition) != (
+        "recordingId" in optional_acquisition
+    ):
+        raise GlobalSampleLibraryError(
+            f"{field}.acquisition recordingField and recordingId must be paired"
+        )
     return GlobalSampleCase(
         case_id=case_id,
         source_id=source_id,
@@ -211,6 +283,7 @@ def _case(value: Any, index: int, source_ids: set[str]) -> GlobalSampleCase:
             "config": config,
             "split": split,
             "rowIndex": row_index,
+            **optional_acquisition,
         },
         language=language,
         region=_text(value["region"], f"{field}.region"),
@@ -254,6 +327,28 @@ def load_global_manifest(path: str | Path) -> GlobalSampleManifest:
     case_ids = [case.case_id for case in cases]
     if len(case_ids) != len(set(case_ids)):
         raise GlobalSampleLibraryError("case IDs must be unique")
+    group_splits: dict[tuple[str, str, str], set[str]] = {}
+    for case in cases:
+        for group_kind, acquisition_field in (
+            ("speaker", "speakerId"),
+            ("recording", "recordingId"),
+        ):
+            group_id = case.acquisition.get(acquisition_field)
+            if isinstance(group_id, str):
+                group_splits.setdefault(
+                    (case.source_id, group_kind, group_id),
+                    set(),
+                ).add(case.evaluation_split)
+    leaked_groups = sorted(
+        group
+        for group, splits in group_splits.items()
+        if len(splits) > 1
+    )
+    if leaked_groups:
+        raise GlobalSampleLibraryError(
+            "source speaker/recording groups cross evaluation splits: "
+            + ", ".join("/".join(group) for group in leaked_groups)
+        )
     if len({case.language for case in cases}) < 12:
         raise GlobalSampleLibraryError("global matrix must cover at least 12 languages")
     if len({case.region for case in cases}) < 8:

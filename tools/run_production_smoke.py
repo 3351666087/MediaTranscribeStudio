@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import queue
 import subprocess
@@ -21,7 +22,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 try:
     import psutil
@@ -83,6 +84,11 @@ class SmokeResult:
     worker_session_id: str | None = None
     worker_reused: bool = False
     session_event_log: str | None = None
+    idle_timeout_seconds: float | None = None
+    hard_timeout_seconds: float | None = None
+    progress_event_count: int = 0
+    last_progress_event_type: str | None = None
+    last_progress_elapsed_seconds: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -97,6 +103,16 @@ class BatchSmokeJob:
 
     start_payload: Mapping[str, Any]
     paths: SmokePaths
+    idle_timeout_seconds: float | None = None
+    hard_timeout_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("idle_timeout_seconds", "hard_timeout_seconds"):
+            value = getattr(self, name)
+            if value is not None and (
+                not math.isfinite(value) or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -106,11 +122,18 @@ class _BatchOutcome:
     event_count: int
     terminal_event: dict[str, Any] | None
     error: dict[str, Any] | None = None
+    idle_timeout_seconds: float | None = None
+    hard_timeout_seconds: float | None = None
+    progress_event_count: int = 0
+    last_progress_event_type: str | None = None
+    last_progress_elapsed_seconds: float | None = None
 
 
 @dataclass(frozen=True)
 class HarnessSettings:
     timeout_seconds: float = 7200.0
+    idle_timeout_seconds: float | None = None
+    hard_timeout_seconds: float | None = None
     shutdown_timeout_seconds: float = 30.0
     cleanup_timeout_seconds: float = 5.0
     stderr_tail_lines: int = 80
@@ -121,10 +144,123 @@ class HarnessSettings:
             "shutdown_timeout_seconds",
             "cleanup_timeout_seconds",
         ):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be positive")
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        for name in ("idle_timeout_seconds", "hard_timeout_seconds"):
+            value = getattr(self, name)
+            if value is not None and (
+                not math.isfinite(value) or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
         if self.stderr_tail_lines < 1:
             raise ValueError("stderr_tail_lines must be positive")
+
+    @property
+    def effective_idle_timeout_seconds(self) -> float:
+        return self.idle_timeout_seconds or self.timeout_seconds
+
+    @property
+    def effective_hard_timeout_seconds(self) -> float:
+        return self.hard_timeout_seconds or self.timeout_seconds
+
+    @property
+    def uses_legacy_job_timeout(self) -> bool:
+        return (
+            self.idle_timeout_seconds is None
+            and self.hard_timeout_seconds is None
+        )
+
+
+def calculate_job_hard_timeout_seconds(
+    *,
+    duration_seconds: float,
+    cold_start_p95_seconds: float,
+    rtf_p95: float,
+    safety_margin_seconds: float,
+    minimum_seconds: float,
+    maximum_seconds: float,
+) -> float:
+    """Return a bounded hard deadline without using model heartbeats."""
+
+    values = {
+        "duration_seconds": duration_seconds,
+        "cold_start_p95_seconds": cold_start_p95_seconds,
+        "rtf_p95": rtf_p95,
+        "safety_margin_seconds": safety_margin_seconds,
+        "minimum_seconds": minimum_seconds,
+        "maximum_seconds": maximum_seconds,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and non-negative")
+    if rtf_p95 <= 0:
+        raise ValueError("rtf_p95 must be positive")
+    if minimum_seconds <= 0:
+        raise ValueError("minimum_seconds must be positive")
+    if maximum_seconds < minimum_seconds:
+        raise ValueError("maximum_seconds must be at least minimum_seconds")
+    estimate = (
+        cold_start_p95_seconds
+        + duration_seconds * rtf_p95
+        + safety_margin_seconds
+    )
+    return round(min(maximum_seconds, max(minimum_seconds, estimate)), 3)
+
+
+def _is_job_progress_event(
+    event: Mapping[str, Any],
+    *,
+    job_id: str,
+    start_request_id: str,
+) -> bool:
+    if (
+        event.get("requestId") == start_request_id
+        and event.get("type") == "command.accepted"
+    ):
+        return True
+    return event.get("jobId") == job_id and isinstance(event.get("type"), str)
+
+
+def _job_timeout_code(
+    *,
+    idle_deadline: float,
+    hard_deadline: float,
+    legacy: bool,
+) -> str:
+    if legacy:
+        return "JOB_TIMEOUT"
+    if hard_deadline <= idle_deadline:
+        return "JOB_HARD_DEADLINE_EXCEEDED"
+    return "JOB_IDLE_TIMEOUT"
+
+
+def _job_timeout_details(
+    *,
+    process: subprocess.Popen[bytes],
+    job_id: str,
+    stderr_tail: deque[str],
+    started: float,
+    idle_timeout_seconds: float,
+    hard_timeout_seconds: float,
+    last_progress_at: float,
+    last_progress_event_type: str | None,
+) -> dict[str, Any]:
+    now = time.monotonic()
+    return {
+        "workerPid": process.pid,
+        "jobId": job_id,
+        "idleTimeoutSeconds": idle_timeout_seconds,
+        "hardTimeoutSeconds": hard_timeout_seconds,
+        "elapsedSeconds": round(max(0.0, now - started), 3),
+        "lastProgressAgeSeconds": round(
+            max(0.0, now - last_progress_at),
+            3,
+        ),
+        "lastProgressEventType": last_progress_event_type,
+        "stderrTail": list(stderr_tail),
+        "knownProcessTreePids": _process_tree_pids(process.pid),
+    }
 
 
 def _safe_artifact_path(output_directory: Path, suffix: str) -> Path:
@@ -484,7 +620,13 @@ class ProductionSmokeHarness:
         forced_cleanup_pids: tuple[int, ...] = ()
         harness_error: SmokeHarnessError | None = None
         shutdown_sent_at: float | None = None
-        deadline = started + self.settings.timeout_seconds
+        idle_timeout_seconds = self.settings.effective_idle_timeout_seconds
+        hard_timeout_seconds = self.settings.effective_hard_timeout_seconds
+        idle_deadline = started + idle_timeout_seconds
+        hard_deadline = started + hard_timeout_seconds
+        last_progress_at = started
+        last_progress_event_type: str | None = None
+        progress_event_count = 0
 
         try:
             _write_command(
@@ -501,24 +643,42 @@ class ProductionSmokeHarness:
                     active_deadline = (
                         shutdown_sent_at + self.settings.shutdown_timeout_seconds
                         if shutdown_sent_at is not None
-                        else deadline
+                        else min(idle_deadline, hard_deadline)
                     )
                     remaining = active_deadline - now
                     if remaining <= 0:
-                        code = (
-                            "SHUTDOWN_TIMEOUT"
-                            if shutdown_sent_at is not None
-                            else "JOB_TIMEOUT"
-                        )
-                        harness_error = SmokeHarnessError(
-                            "worker did not reach the required state before timeout",
-                            code=code,
-                            details={
+                        if shutdown_sent_at is not None:
+                            code = "SHUTDOWN_TIMEOUT"
+                            details = {
                                 "workerPid": process.pid,
                                 "jobId": job_id,
                                 "stderrTail": list(stderr_tail),
-                                "knownProcessTreePids": _process_tree_pids(process.pid),
-                            },
+                                "knownProcessTreePids": _process_tree_pids(
+                                    process.pid
+                                ),
+                            }
+                        else:
+                            code = _job_timeout_code(
+                                idle_deadline=idle_deadline,
+                                hard_deadline=hard_deadline,
+                                legacy=self.settings.uses_legacy_job_timeout,
+                            )
+                            details = _job_timeout_details(
+                                process=process,
+                                job_id=job_id,
+                                stderr_tail=stderr_tail,
+                                started=started,
+                                idle_timeout_seconds=idle_timeout_seconds,
+                                hard_timeout_seconds=hard_timeout_seconds,
+                                last_progress_at=last_progress_at,
+                                last_progress_event_type=(
+                                    last_progress_event_type
+                                ),
+                            )
+                        harness_error = SmokeHarnessError(
+                            "worker did not reach the required state before timeout",
+                            code=code,
+                            details=details,
                         )
                         break
 
@@ -588,6 +748,20 @@ class ProductionSmokeHarness:
                     event_type = event.get("type")
                     request_id = event.get("requestId")
                     event_job_id = event.get("jobId")
+                    if (
+                        shutdown_sent_at is None
+                        and _is_job_progress_event(
+                            event,
+                            job_id=job_id,
+                            start_request_id=START_REQUEST_ID,
+                        )
+                    ):
+                        last_progress_at = time.monotonic()
+                        idle_deadline = (
+                            last_progress_at + idle_timeout_seconds
+                        )
+                        last_progress_event_type = str(event_type)
+                        progress_event_count += 1
                     if (
                         terminal_event is None
                         and event_type in TARGET_JOB_EVENTS
@@ -725,6 +899,15 @@ class ProductionSmokeHarness:
             result_json=str(self.paths.result_json.resolve()),
             terminal_event=terminal_event,
             error=error,
+            idle_timeout_seconds=idle_timeout_seconds,
+            hard_timeout_seconds=hard_timeout_seconds,
+            progress_event_count=progress_event_count,
+            last_progress_event_type=last_progress_event_type,
+            last_progress_elapsed_seconds=(
+                round(max(0.0, last_progress_at - started), 3)
+                if progress_event_count
+                else None
+            ),
         )
         self.paths.result_json.write_text(
             json.dumps(
@@ -835,17 +1018,26 @@ class ProductionBatchSmokeHarness:
         stderr_tail: deque[str],
         deadline: float,
         line_number: int,
+        timeout_code: str = "JOB_TIMEOUT",
+        timeout_details: Mapping[str, Any] | None = None,
+        timeout_details_factory: Callable[[], Mapping[str, Any]] | None = None,
     ) -> tuple[bytes, dict[str, Any]]:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                extra_details = (
+                    timeout_details_factory()
+                    if timeout_details_factory is not None
+                    else dict(timeout_details or {})
+                )
                 raise SmokeHarnessError(
                     "worker did not emit the required event before timeout",
-                    code="JOB_TIMEOUT",
+                    code=timeout_code,
                     details={
                         "workerPid": process.pid,
                         "stderrTail": list(stderr_tail),
                         "knownProcessTreePids": _process_tree_pids(process.pid),
+                        **dict(extra_details),
                     },
                 )
             try:
@@ -1030,6 +1222,15 @@ class ProductionBatchSmokeHarness:
         active_job: BatchSmokeJob | None = None
         active_started = 0.0
         active_event_count = 0
+        active_idle_timeout_seconds = (
+            self.settings.effective_idle_timeout_seconds
+        )
+        active_hard_timeout_seconds = (
+            self.settings.effective_hard_timeout_seconds
+        )
+        active_progress_event_count = 0
+        active_last_progress_at = 0.0
+        active_last_progress_event_type: str | None = None
 
         try:
             with self.session_event_log.open("wb") as control_log:
@@ -1037,6 +1238,17 @@ class ProductionBatchSmokeHarness:
                     active_job = job
                     active_started = time.monotonic()
                     active_event_count = 0
+                    active_progress_event_count = 0
+                    active_last_progress_at = active_started
+                    active_last_progress_event_type = None
+                    active_idle_timeout_seconds = (
+                        job.idle_timeout_seconds
+                        or self.settings.effective_idle_timeout_seconds
+                    )
+                    active_hard_timeout_seconds = (
+                        job.hard_timeout_seconds
+                        or self.settings.effective_hard_timeout_seconds
+                    )
                     job_id = str(job.start_payload["jobId"])
                     request_id = f"{session_id}-start-{job_index}"
                     _write_command(
@@ -1048,15 +1260,50 @@ class ProductionBatchSmokeHarness:
                         ),
                     )
                     terminal_event: dict[str, Any] | None = None
-                    deadline = active_started + self.settings.timeout_seconds
+                    idle_deadline = (
+                        active_started + active_idle_timeout_seconds
+                    )
+                    hard_deadline = (
+                        active_started + active_hard_timeout_seconds
+                    )
+                    legacy_timeout = (
+                        job.idle_timeout_seconds is None
+                        and job.hard_timeout_seconds is None
+                        and self.settings.uses_legacy_job_timeout
+                    )
                     with job.paths.event_log.open("wb") as event_log:
                         while terminal_event is None:
                             raw_line, event = self._next_event(
                                 process=process,
                                 output=output,
                                 stderr_tail=stderr_tail,
-                                deadline=deadline,
+                                deadline=min(idle_deadline, hard_deadline),
                                 line_number=line_number + 1,
+                                timeout_code=_job_timeout_code(
+                                    idle_deadline=idle_deadline,
+                                    hard_deadline=hard_deadline,
+                                    legacy=legacy_timeout,
+                                ),
+                                timeout_details_factory=lambda: (
+                                    _job_timeout_details(
+                                        process=process,
+                                        job_id=job_id,
+                                        stderr_tail=stderr_tail,
+                                        started=active_started,
+                                        idle_timeout_seconds=(
+                                            active_idle_timeout_seconds
+                                        ),
+                                        hard_timeout_seconds=(
+                                            active_hard_timeout_seconds
+                                        ),
+                                        last_progress_at=(
+                                            active_last_progress_at
+                                        ),
+                                        last_progress_event_type=(
+                                            active_last_progress_event_type
+                                        ),
+                                    )
+                                ),
                             )
                             line_number += 1
                             active_event_count += 1
@@ -1065,6 +1312,20 @@ class ProductionBatchSmokeHarness:
                                 event_log.write(b"\n")
                             event_log.flush()
                             event_type = event.get("type")
+                            if _is_job_progress_event(
+                                event,
+                                job_id=job_id,
+                                start_request_id=request_id,
+                            ):
+                                active_last_progress_at = time.monotonic()
+                                idle_deadline = (
+                                    active_last_progress_at
+                                    + active_idle_timeout_seconds
+                                )
+                                active_last_progress_event_type = str(
+                                    event_type
+                                )
+                                active_progress_event_count += 1
                             if event_type == "worker.startup.failed":
                                 raise SmokeHarnessError(
                                     "production worker startup failed",
@@ -1091,6 +1352,30 @@ class ProductionBatchSmokeHarness:
                             elapsed_seconds=time.monotonic() - active_started,
                             event_count=active_event_count,
                             terminal_event=terminal_event,
+                            idle_timeout_seconds=(
+                                active_idle_timeout_seconds
+                            ),
+                            hard_timeout_seconds=(
+                                active_hard_timeout_seconds
+                            ),
+                            progress_event_count=(
+                                active_progress_event_count
+                            ),
+                            last_progress_event_type=(
+                                active_last_progress_event_type
+                            ),
+                            last_progress_elapsed_seconds=(
+                                round(
+                                    max(
+                                        0.0,
+                                        active_last_progress_at
+                                        - active_started,
+                                    ),
+                                    3,
+                                )
+                                if active_progress_event_count
+                                else None
+                            ),
                         )
                     )
                     active_job = None
@@ -1152,6 +1437,24 @@ class ProductionBatchSmokeHarness:
                         event_count=active_event_count,
                         terminal_event=None,
                         error=batch_error,
+                        idle_timeout_seconds=active_idle_timeout_seconds,
+                        hard_timeout_seconds=active_hard_timeout_seconds,
+                        progress_event_count=active_progress_event_count,
+                        last_progress_event_type=(
+                            active_last_progress_event_type
+                        ),
+                        last_progress_elapsed_seconds=(
+                            round(
+                                max(
+                                    0.0,
+                                    active_last_progress_at
+                                    - active_started,
+                                ),
+                                3,
+                            )
+                            if active_progress_event_count
+                            else None
+                        ),
                     )
                 )
         finally:
@@ -1208,6 +1511,14 @@ class ProductionBatchSmokeHarness:
                                 "sessionError": batch_error,
                             },
                         },
+                        idle_timeout_seconds=(
+                            job.idle_timeout_seconds
+                            or self.settings.effective_idle_timeout_seconds
+                        ),
+                        hard_timeout_seconds=(
+                            job.hard_timeout_seconds
+                            or self.settings.effective_hard_timeout_seconds
+                        ),
                     )
                 )
 
@@ -1248,6 +1559,15 @@ class ProductionBatchSmokeHarness:
                 worker_session_id=session_id,
                 worker_reused=len(jobs) > 1,
                 session_event_log=str(self.session_event_log.resolve()),
+                idle_timeout_seconds=outcome.idle_timeout_seconds,
+                hard_timeout_seconds=outcome.hard_timeout_seconds,
+                progress_event_count=outcome.progress_event_count,
+                last_progress_event_type=(
+                    outcome.last_progress_event_type
+                ),
+                last_progress_elapsed_seconds=(
+                    outcome.last_progress_elapsed_seconds
+                ),
             )
             outcome.job.paths.result_json.write_text(
                 json.dumps(
@@ -1354,7 +1674,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="business-v3",
     )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
-    parser.add_argument("--timeout-seconds", type=float, default=7200.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=7200.0,
+        help=(
+            "legacy fixed timeout used for idle and hard limits unless the "
+            "dedicated options are provided"
+        ),
+    )
+    parser.add_argument("--idle-timeout-seconds", type=float)
+    parser.add_argument("--hard-timeout-seconds", type=float)
     parser.add_argument("--shutdown-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--cleanup-timeout-seconds", type=float, default=5.0)
     parser.add_argument("--event-log", type=Path)
@@ -1410,6 +1740,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths=paths,
             settings=HarnessSettings(
                 timeout_seconds=args.timeout_seconds,
+                idle_timeout_seconds=args.idle_timeout_seconds,
+                hard_timeout_seconds=args.hard_timeout_seconds,
                 shutdown_timeout_seconds=args.shutdown_timeout_seconds,
                 cleanup_timeout_seconds=args.cleanup_timeout_seconds,
             ),

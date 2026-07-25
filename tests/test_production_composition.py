@@ -108,6 +108,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 "maxWorkers": 2,
                 "maxPendingJobs": 3,
                 "modelResidency": "worker",
+                "heartbeatIntervalSeconds": 7.5,
                 "strictStartupPreflight": True,
             },
             "speaker": {
@@ -155,6 +156,7 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
         self.assertEqual(config.runtime.vad_device, "cpu")
         self.assertEqual(config.runtime.model_residency, "worker")
+        self.assertEqual(config.runtime.heartbeat_interval_seconds, 7.5)
         self.assertTrue(config.offline)
 
     def test_rejects_pdf_font_not_bundled_by_renderer(self) -> None:
@@ -423,6 +425,10 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertIs(
             pipeline.overlap_adapter,
             pipeline.pyannote_adapter,
+        )
+        self.assertEqual(
+            composition.service.kwargs["heartbeat_interval_seconds"],
+            7.5,
         )
 
     def test_explicit_vad_device_override_is_preserved(self) -> None:

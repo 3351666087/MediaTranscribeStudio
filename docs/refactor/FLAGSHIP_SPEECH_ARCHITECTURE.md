@@ -134,9 +134,9 @@ flowchart TD
 
 ### 当前生命周期状态
 
-2026-07-25 的 60 样本共享 worker 基线只有 5 条 `observed`。第 6 条在 300 秒超时，日志显示 Qwen checkpoint、CAM++ 和 ERes2NetV2 在跨 job 生命周期中反复加载；其余 54 条被 `BATCH_ABORTED`。当前已加入 `stage|worker` 驻留策略、异常清理、worker shutdown 统一释放，以及仅继续未启动作业的有限恢复会话。两条不同真实音频已证明 `worker` 模式的 Qwen/CAM++/ERes 各只初始化一次。仍必须完成：
+2026-07-25 的 60 样本共享 worker 基线只有 5 条 `observed`。第 6 条在 300 秒超时，日志显示 Qwen checkpoint、CAM++ 和 ERes2NetV2 在跨 job 生命周期中反复加载；其余 54 条被 `BATCH_ABORTED`。当前已加入 `stage|worker` 驻留策略、异常清理、worker shutdown 统一释放，以及仅继续未启动作业的有限恢复会话。两条不同真实音频已证明 `worker` 模式的 Qwen/CAM++/ERes 各只初始化一次。持续进度协议也已落地，但完整 60 条重跑仍未完成：
 
-- worker 必须在长推理期间发 heartbeat/progress，超时预算使用 `冷启动 p95 + 音频时长 * 分桶 RTF p95 + 安全余量`。
+- worker 已在长推理期间发 heartbeat/progress；harness 分离 idle timeout 与不可延长 hard deadline，预算使用 `冷启动 p95 + 音频时长 * 分桶 RTF p95 + 安全余量`。
 - 60 条重跑必须让每条得到独立终态；恢复实现通过伪 worker 和两条健康样本回归，不等于 60/60 已完成。
 - macOS 必须采集 MPS/统一内存与系统压力峰值，不能继续用 `peakVramMb=0` 或普通 RSS 作容量门禁。
 - 并发 preflight 已改用同目录唯一可回收探针文件，并以 32 次、8 线程共享根回归验证；后续仍需在多进程 worker 启动压力测试中保留该门禁。

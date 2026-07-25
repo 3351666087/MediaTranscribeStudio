@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import threading
+import time
 import uuid
 from collections.abc import Mapping as MappingABC
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
@@ -179,6 +181,7 @@ class WorkerService:
         | None = publish_output_plans,
         subtitle_delivery_executor: Any | None = None,
         subtitle_visual_qa_hook: Callable[..., Any] | None = None,
+        heartbeat_interval_seconds: float = 15.0,
     ) -> None:
         if max_workers < 1:
             raise ValueError("max_workers must be positive")
@@ -189,6 +192,13 @@ class WorkerService:
         if high_speaker_margin_threshold <= low_speaker_margin_threshold:
             raise ValueError(
                 "high speaker margin threshold must exceed low margin threshold"
+            )
+        if (
+            not math.isfinite(heartbeat_interval_seconds)
+            or heartbeat_interval_seconds <= 0
+        ):
+            raise ValueError(
+                "heartbeat_interval_seconds must be finite and positive"
             )
         self.path_policy = path_policy
         self.transcription_adapter = (
@@ -214,9 +224,11 @@ class WorkerService:
         self.output_publisher = output_publisher
         self.subtitle_delivery_executor = subtitle_delivery_executor
         self.subtitle_visual_qa_hook = subtitle_visual_qa_hook
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._jobs: dict[str, JobRecord] = {}
         self._active_outputs: dict[Path, str] = {}
         self._lock = threading.RLock()
+        self._event_emit_lock = threading.Lock()
         self._closed = False
         self._adapter_resources_released = False
 
@@ -2445,7 +2457,50 @@ class WorkerService:
             record.business_error = error.as_payload()
             raise error from exc
 
+    def _heartbeat_loop(
+        self,
+        record: JobRecord,
+        stop: threading.Event,
+        started: float,
+    ) -> None:
+        while not stop.wait(self.heartbeat_interval_seconds):
+            with record.lock:
+                if record.status in _TERMINAL:
+                    return
+                stage = record.stage
+                status = record.status.value
+            self._emit(
+                record,
+                "stage.progress",
+                {
+                    "stage": stage,
+                    "kind": "heartbeat",
+                    "status": status,
+                    "elapsedSeconds": round(
+                        max(0.0, time.monotonic() - started),
+                        3,
+                    ),
+                    "intervalSeconds": self.heartbeat_interval_seconds,
+                },
+            )
+
     def _run_job(self, record: JobRecord) -> None:
+        heartbeat_stop = threading.Event()
+        started = time.monotonic()
+        heartbeat = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(record, heartbeat_stop, started),
+            name=f"mts-heartbeat-{record.request.job_id}",
+            daemon=True,
+        )
+        heartbeat.start()
+        try:
+            self._run_job_body(record)
+        finally:
+            heartbeat_stop.set()
+            heartbeat.join(timeout=self.heartbeat_interval_seconds)
+
+    def _run_job_body(self, record: JobRecord) -> None:
         context = AdapterContext(
             job_id=record.request.job_id,
             output_directory=record.request.output_directory,
@@ -3030,23 +3085,24 @@ class WorkerService:
     def _emit(
         self, record: JobRecord, event_type: str, payload: Mapping[str, Any]
     ) -> None:
-        with record.lock:
-            sequence = record.sequence
-            record.sequence += 1
-        event = {
-            "schemaVersion": PROTOCOL_VERSION,
-            "eventId": f"evt-{uuid.uuid4().hex}",
-            "jobId": record.request.job_id,
-            "sequence": sequence,
-            "timestamp": utc_now(),
-            "type": event_type,
-            "payload": dict(payload),
-        }
-        try:
-            self.event_sink(event)
-        except Exception:
-            # A broken observer must not corrupt persisted job state.
-            pass
+        with self._event_emit_lock:
+            with record.lock:
+                sequence = record.sequence
+                record.sequence += 1
+            event = {
+                "schemaVersion": PROTOCOL_VERSION,
+                "eventId": f"evt-{uuid.uuid4().hex}",
+                "jobId": record.request.job_id,
+                "sequence": sequence,
+                "timestamp": utc_now(),
+                "type": event_type,
+                "payload": dict(payload),
+            }
+            try:
+                self.event_sink(event)
+            except Exception:
+                # A broken observer must not corrupt persisted job state.
+                pass
 
     def _write_checkpoint(self, record: JobRecord) -> None:
         with record.lock:

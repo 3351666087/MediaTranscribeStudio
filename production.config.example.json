@@ -27,6 +27,8 @@
     "maxWorkers": 1,
     "maxPendingJobs": 1,
     "maxLineBytes": 1048576,
+    "modelResidency": "stage",
+    "heartbeatIntervalSeconds": 15,
     "vadDevice": "cpu",
     "asrDevice": "cuda:0",
     "asrDtype": "bfloat16",

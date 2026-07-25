@@ -200,6 +200,9 @@ def build_production_composition(
         event_sink=event_sink,
         max_workers=config.runtime.max_workers,
         max_pending_jobs=config.runtime.max_pending_jobs,
+        heartbeat_interval_seconds=(
+            config.runtime.heartbeat_interval_seconds
+        ),
         count_confidence_threshold=(
             config.speaker.auto_count_confidence_threshold
         ),

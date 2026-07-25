@@ -4849,6 +4849,7 @@ class SpeakerPipeline:
         durations = [
             window.end_ms - window.start_ms for window in prepared.windows
         ]
+        capacity_limited = False
         while sum(allocations) < required:
             candidates = [
                 index
@@ -4858,6 +4859,9 @@ class SpeakerPipeline:
                 * _MIN_SPEAKER_COUNT_PARTITION_MS
             ]
             if not candidates:
+                if constrained_minimum is None:
+                    capacity_limited = True
+                    break
                 raise WorkerError(
                     "SPEAKER_COUNT_AUDIO_TOO_SHORT",
                     "speech duration is too short to create independent "
@@ -4885,7 +4889,22 @@ class SpeakerPipeline:
         partitioned: list[SpeechWindow] = []
         for source, partition_count in zip(prepared.windows, allocations):
             if partition_count == 1:
-                partitioned.append(source)
+                if not capacity_limited:
+                    partitioned.append(source)
+                    continue
+                metadata = dict(source.metadata)
+                metadata["speakerCountPartition"] = {
+                    "method": "auto-acoustic-contiguous-partition-v1",
+                    "sourceWindowId": source.window_id,
+                    "requestedMinimum": None,
+                    "targetEvidenceWindowCount": required,
+                    "achievedEvidenceWindowCount": sum(allocations),
+                    "partitionCount": 1,
+                    "capacityLimited": True,
+                    "reviewRequired": True,
+                    "reasonCode": "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED",
+                }
+                partitioned.append(replace(source, metadata=metadata))
                 continue
             duration = source.end_ms - source.start_ms
             boundaries = tuple(
@@ -4919,10 +4938,14 @@ class SpeakerPipeline:
                             "sourceWindowId": source.window_id,
                             "requestedMinimum": constrained_minimum,
                             "targetEvidenceWindowCount": required,
+                            "achievedEvidenceWindowCount": sum(allocations),
                             "partitionCount": partition_count,
+                            "capacityLimited": capacity_limited,
                             "reviewRequired": True,
                             "reasonCode": (
-                                "AUTO_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                                "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED"
+                                if capacity_limited
+                                else "AUTO_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
                                 if constrained_minimum is None
                                 else (
                                     "SPEAKER_COUNT_REQUIRES_"
@@ -4950,10 +4973,14 @@ class SpeakerPipeline:
             (time.perf_counter() - started) * 1000.0,
         )
         metrics.set_policy(
-            speakerCountPartitionApplied=True,
+            speakerCountPartitionApplied=(
+                len(partitioned) > len(prepared.windows)
+            ),
             speakerCountPartitionMode=policy.mode.value,
             speakerCountPartitionSourceWindows=len(prepared.windows),
+            speakerCountPartitionTargetEvidenceWindows=required,
             speakerCountPartitionEvidenceWindows=len(partitioned),
+            speakerCountPartitionCapacityLimited=capacity_limited,
         )
         return replace(prepared, windows=tuple(partitioned))
 

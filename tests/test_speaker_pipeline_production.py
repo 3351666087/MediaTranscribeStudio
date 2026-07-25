@@ -1758,6 +1758,57 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             "auto",
         )
 
+    def test_auto_count_short_audio_caps_evidence_and_requires_review(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(
+            1,
+            window_ranges={"window-1": (0, 2_020)},
+        )
+        pipeline, _, _, cam, _ = self.pipeline(
+            1,
+            windows=1,
+            preparation=preparation,
+            cam=FakeCamPlusAdapter(1, identical=True),
+        )
+
+        result = pipeline.transcribe(
+            self.request(1, "auto", job_id="auto-short-audio"),
+            self.context("auto-short-audio"),
+        )
+
+        self.assertEqual(
+            cam.calls,
+            [
+                (
+                    "window-1.cardinality-01",
+                    "window-1.cardinality-02",
+                )
+            ],
+        )
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 1)
+        policy = result.pipeline_metrics["policy"]
+        self.assertTrue(policy["speakerCountPartitionApplied"])
+        self.assertTrue(policy["speakerCountPartitionCapacityLimited"])
+        self.assertEqual(policy["speakerCountPartitionTargetEvidenceWindows"], 3)
+        self.assertEqual(policy["speakerCountPartitionEvidenceWindows"], 2)
+        self.assertTrue(
+            all(
+                segment.evidence["speakerCountPartition"][
+                    "capacityLimited"
+                ]
+                is True
+                for segment in result.segments
+            )
+        )
+        self.assertTrue(
+            all(
+                segment.evidence["speakerCountPartition"]["reasonCode"]
+                == "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED"
+                for segment in result.segments
+            )
+        )
+
     def test_auto_count_uses_audited_full_timeline_pyannote_prior(self) -> None:
         overlap = FakePyannoteOverlapAdapter()
         second_axis = (1.0 - 0.99**2) ** 0.5

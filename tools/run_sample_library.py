@@ -26,12 +26,15 @@ from tools.run_production_smoke import (
     SmokePaths,
     SmokeResult,
     build_start_payload,
+    calculate_job_hard_timeout_seconds,
 )
 
 
 _RECOVERABLE_SESSION_FAILURES = frozenset(
     {
         "JOB_TIMEOUT",
+        "JOB_IDLE_TIMEOUT",
+        "JOB_HARD_DEADLINE_EXCEEDED",
         "WORKER_CAPACITY_RELEASE_TIMEOUT",
         "WORKER_EXITED_EARLY",
         "WORKER_STDOUT_CLOSED",
@@ -54,7 +57,8 @@ def _run_case(
     logs_root: Path,
     speaker_count_mode: str,
     expected_speaker_count: int | None,
-    timeout_seconds: float,
+    idle_timeout_seconds: float,
+    hard_timeout_seconds: float,
     render_pdf: bool,
     local_llm_mode: str,
     translation_targets: Sequence[str],
@@ -80,8 +84,10 @@ def _run_case(
         language,
         "--local-llm-mode",
         local_llm_mode,
-        "--timeout-seconds",
-        str(timeout_seconds),
+        "--idle-timeout-seconds",
+        str(idle_timeout_seconds),
+        "--hard-timeout-seconds",
+        str(hard_timeout_seconds),
         "--event-log",
         str(logs_root / f"{artifact_id}-events.jsonl"),
         "--stderr-log",
@@ -132,6 +138,8 @@ def _batch_job(
     logs_root: Path,
     speaker_count_mode: str,
     expected_speaker_count: int | None,
+    idle_timeout_seconds: float,
+    hard_timeout_seconds: float,
     render_pdf: bool,
     local_llm_mode: str,
     translation_targets: Sequence[str],
@@ -176,6 +184,8 @@ def _batch_job(
             stderr_log=logs_root / f"{artifact_id}-stderr.log",
             result_json=logs_root / f"{artifact_id}-result.json",
         ),
+        idle_timeout_seconds=idle_timeout_seconds,
+        hard_timeout_seconds=hard_timeout_seconds,
     )
 
 
@@ -292,7 +302,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WORKER_OUTPUTS,
     )
     parser.add_argument("--case", action="append", default=[])
-    parser.add_argument("--timeout-seconds", type=float, default=300.0)
+    parser.add_argument(
+        "--timeout-seconds",
+        type=float,
+        help=(
+            "fixed per-job hard deadline override; otherwise derive it from "
+            "cold-start p95, duration, RTF p95, and safety margin"
+        ),
+    )
+    parser.add_argument("--idle-timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--cold-start-p95-seconds",
+        type=float,
+        default=240.0,
+    )
+    parser.add_argument("--rtf-p95", type=float, default=25.0)
+    parser.add_argument(
+        "--deadline-safety-seconds",
+        type=float,
+        default=60.0,
+    )
+    parser.add_argument(
+        "--minimum-hard-timeout-seconds",
+        type=float,
+        default=300.0,
+    )
+    parser.add_argument(
+        "--maximum-hard-timeout-seconds",
+        type=float,
+        default=7200.0,
+    )
     parser.add_argument(
         "--speaker-count-mode",
         choices=("auto", "manual", "hybrid"),
@@ -339,8 +378,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     unknown = sorted(set(selected) - set(available))
     if unknown:
         raise SystemExit(f"unknown sample case(s): {', '.join(unknown)}")
-    if args.timeout_seconds <= 0:
+    if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be positive")
+    try:
+        HarnessSettings(
+            timeout_seconds=args.maximum_hard_timeout_seconds,
+            idle_timeout_seconds=args.idle_timeout_seconds,
+            hard_timeout_seconds=args.maximum_hard_timeout_seconds,
+        )
+        calculate_job_hard_timeout_seconds(
+            duration_seconds=0.0,
+            cold_start_p95_seconds=args.cold_start_p95_seconds,
+            rtf_p95=args.rtf_p95,
+            safety_margin_seconds=args.deadline_safety_seconds,
+            minimum_seconds=args.minimum_hard_timeout_seconds,
+            maximum_seconds=args.maximum_hard_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     args.results_root.mkdir(parents=True, exist_ok=True)
     args.worker_output_root.mkdir(parents=True, exist_ok=True)
     failures = 0
@@ -371,6 +426,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             and raw_expected > 0
             else None
         )
+        raw_duration = row.get("durationSeconds", 0.0)
+        if (
+            not isinstance(raw_duration, (int, float))
+            or isinstance(raw_duration, bool)
+        ):
+            raise SystemExit(
+                f"{case_id} has invalid durationSeconds for timeout budgeting"
+            )
+        try:
+            hard_timeout_seconds = (
+                args.timeout_seconds
+                if args.timeout_seconds is not None
+                else calculate_job_hard_timeout_seconds(
+                    duration_seconds=float(raw_duration),
+                    cold_start_p95_seconds=args.cold_start_p95_seconds,
+                    rtf_p95=args.rtf_p95,
+                    safety_margin_seconds=args.deadline_safety_seconds,
+                    minimum_seconds=args.minimum_hard_timeout_seconds,
+                    maximum_seconds=args.maximum_hard_timeout_seconds,
+                )
+            )
+        except ValueError as exc:
+            raise SystemExit(f"{case_id}: {exc}") from exc
         if (
             args.speaker_count_mode != "auto"
             and expected_speaker_count is None
@@ -396,6 +474,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     logs_root=logs_root,
                     speaker_count_mode=args.speaker_count_mode,
                     expected_speaker_count=expected_speaker_count,
+                    idle_timeout_seconds=args.idle_timeout_seconds,
+                    hard_timeout_seconds=hard_timeout_seconds,
                     render_pdf=args.render_pdf,
                     local_llm_mode=args.local_llm_mode,
                     translation_targets=args.translation_target,
@@ -414,7 +494,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 logs_root=logs_root,
                 speaker_count_mode=args.speaker_count_mode,
                 expected_speaker_count=expected_speaker_count,
-                timeout_seconds=args.timeout_seconds,
+                idle_timeout_seconds=args.idle_timeout_seconds,
+                hard_timeout_seconds=hard_timeout_seconds,
                 render_pdf=args.render_pdf,
                 local_llm_mode=args.local_llm_mode,
                 translation_targets=args.translation_target,
@@ -446,7 +527,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.results_root
                     / f"worker-session-{session_label}-stderr.log"
                 ),
-                settings=HarnessSettings(timeout_seconds=args.timeout_seconds),
+                settings=HarnessSettings(
+                    timeout_seconds=args.maximum_hard_timeout_seconds,
+                    idle_timeout_seconds=args.idle_timeout_seconds,
+                    hard_timeout_seconds=args.maximum_hard_timeout_seconds,
+                ),
             )
 
         results, session_ids = _run_recovering_batch(
@@ -472,6 +557,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "workerSessionId": session_ids[0] if session_ids else None,
                 "workerSessionIds": list(session_ids),
+                "timeoutPolicy": {
+                    "mode": (
+                        "fixed"
+                        if args.timeout_seconds is not None
+                        else "duration-rtf-p95"
+                    ),
+                    "idleTimeoutSeconds": args.idle_timeout_seconds,
+                    "fixedHardTimeoutSeconds": args.timeout_seconds,
+                    "coldStartP95Seconds": args.cold_start_p95_seconds,
+                    "rtfP95": args.rtf_p95,
+                    "safetyMarginSeconds": (
+                        args.deadline_safety_seconds
+                    ),
+                    "minimumHardTimeoutSeconds": (
+                        args.minimum_hard_timeout_seconds
+                    ),
+                    "maximumHardTimeoutSeconds": (
+                        args.maximum_hard_timeout_seconds
+                    ),
+                    "heartbeatExtendsHardDeadline": False,
+                },
             },
             ensure_ascii=False,
             indent=2,

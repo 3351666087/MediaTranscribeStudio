@@ -22,6 +22,7 @@ def _manifest(root: Path) -> Path:
                         "path": source.name,
                         "language": "auto",
                         "expectedSpeakerCount": None,
+                        "durationSeconds": 10.0,
                     }
                 ],
             }
@@ -58,6 +59,8 @@ def test_auto_mode_accepts_case_without_reference_speaker_count(
 
     assert exit_code == 0
     assert captured["expected_speaker_count"] is None
+    assert captured["idle_timeout_seconds"] == 120.0
+    assert captured["hard_timeout_seconds"] == 550.0
 
 
 def test_auto_language_mode_does_not_pass_reference_language(
@@ -174,6 +177,8 @@ def test_shared_worker_recovers_unstarted_jobs_in_original_order(
 
         def run(self, jobs: object) -> tuple[run_sample_library.SmokeResult, ...]:
             current = tuple(jobs)
+            assert all(job.idle_timeout_seconds == 120.0 for job in current)
+            assert all(job.hard_timeout_seconds == 300.0 for job in current)
             calls.append(
                 tuple(str(job.start_payload["jobId"]) for job in current)
             )

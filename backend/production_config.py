@@ -223,6 +223,7 @@ class ProductionRuntime:
     max_pending_jobs: int = 1
     max_line_bytes: int = 1024 * 1024
     model_residency: str = "stage"
+    heartbeat_interval_seconds: float = 15.0
     vad_device: str = "cpu"
     asr_device: str = "cuda:0"
     asr_dtype: str = "bfloat16"
@@ -514,6 +515,7 @@ class ProductionConfig:
                 "maxPendingJobs",
                 "maxLineBytes",
                 "modelResidency",
+                "heartbeatIntervalSeconds",
                 "vadDevice",
                 "asrDevice",
                 "asrDtype",
@@ -546,6 +548,12 @@ class ProductionConfig:
                 raw_runtime.get("modelResidency", "stage"),
                 field="runtime.modelResidency",
                 choices={"stage", "worker"},
+            ),
+            heartbeat_interval_seconds=_number(
+                raw_runtime.get("heartbeatIntervalSeconds", 15.0),
+                field="runtime.heartbeatIntervalSeconds",
+                minimum=0.25,
+                maximum=300.0,
             ),
             vad_device=_nonempty_text(
                 raw_runtime.get("vadDevice", "cpu"),
@@ -934,6 +942,9 @@ class ProductionConfig:
                 max_pending_jobs=self.runtime.max_pending_jobs,
                 max_line_bytes=self.runtime.max_line_bytes,
                 model_residency=self.runtime.model_residency,
+                heartbeat_interval_seconds=(
+                    self.runtime.heartbeat_interval_seconds
+                ),
                 vad_device=self.runtime.vad_device,
                 asr_device=self.runtime.asr_device,
                 asr_dtype=self.runtime.asr_dtype,
@@ -958,6 +969,9 @@ class ProductionConfig:
             "pyannoteMode": self.speaker.pyannote_mode,
             "maxWorkers": self.runtime.max_workers,
             "modelResidency": self.runtime.model_residency,
+            "heartbeatIntervalSeconds": (
+                self.runtime.heartbeat_interval_seconds
+            ),
             "maxAutoSpeakers": self.speaker.max_auto_speakers,
             "maxClusteringWindows": self.speaker.max_clustering_windows,
             "maxClusteringWorkItems": (
@@ -1455,6 +1469,9 @@ def production_diagnostics(
         },
         "runtime": {
             "modelResidency": config.runtime.model_residency,
+            "heartbeatIntervalSeconds": (
+                config.runtime.heartbeat_interval_seconds
+            ),
         },
         "pdf": {
             "engine": "OpenHTMLtoPDF 1.0.10 + PDFBox 2.0.30",

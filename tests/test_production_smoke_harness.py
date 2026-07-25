@@ -18,6 +18,7 @@ from tools.run_production_smoke import (
     SmokePaths,
     build_parser,
     build_start_payload,
+    calculate_job_hard_timeout_seconds,
 )
 
 
@@ -113,6 +114,30 @@ if behavior == "early":
 if behavior == "invalid-json":
     sys.stdout.buffer.write(b"\xff\xfe-not-json\n")
     sys.stdout.buffer.flush()
+    time.sleep(60)
+    raise SystemExit(0)
+
+if behavior == "silent":
+    time.sleep(60)
+    raise SystemExit(0)
+
+if behavior == "heartbeat-hard":
+    for sequence in range(1, 40):
+        time.sleep(0.02)
+        emit(
+            {
+                "schemaVersion": "1.0.0",
+                "eventId": "evt-heartbeat-" + str(sequence),
+                "jobId": job_id,
+                "sequence": sequence,
+                "timestamp": "2026-07-22T00:00:02Z",
+                "type": "stage.progress",
+                "payload": {
+                    "stage": "transcription",
+                    "kind": "heartbeat",
+                },
+            }
+        )
     time.sleep(60)
     raise SystemExit(0)
 
@@ -288,6 +313,41 @@ for raw in sys.stdin.buffer:
 
 
 class ProductionSmokeHarnessTests(unittest.TestCase):
+    def test_duration_rtf_budget_is_bounded_and_rejects_invalid_inputs(
+        self,
+    ) -> None:
+        self.assertEqual(
+            calculate_job_hard_timeout_seconds(
+                duration_seconds=10.0,
+                cold_start_p95_seconds=240.0,
+                rtf_p95=25.0,
+                safety_margin_seconds=60.0,
+                minimum_seconds=300.0,
+                maximum_seconds=7200.0,
+            ),
+            550.0,
+        )
+        self.assertEqual(
+            calculate_job_hard_timeout_seconds(
+                duration_seconds=0.1,
+                cold_start_p95_seconds=1.0,
+                rtf_p95=1.0,
+                safety_margin_seconds=1.0,
+                minimum_seconds=300.0,
+                maximum_seconds=7200.0,
+            ),
+            300.0,
+        )
+        with self.assertRaisesRegex(ValueError, "maximum_seconds"):
+            calculate_job_hard_timeout_seconds(
+                duration_seconds=1.0,
+                cold_start_p95_seconds=1.0,
+                rtf_p95=1.0,
+                safety_margin_seconds=1.0,
+                minimum_seconds=10.0,
+                maximum_seconds=5.0,
+            )
+
     def test_cli_default_uses_supported_business_prompt_version(self) -> None:
         args = build_parser().parse_args(
             [
@@ -599,6 +659,63 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             child_pid,
             result.error["details"]["knownProcessTreePids"],
         )
+
+    def test_idle_timeout_fires_when_current_job_stops_emitting_progress(
+        self,
+    ) -> None:
+        harness, _capture = self.harness(
+            "silent",
+            "idle-timeout",
+            settings=HarnessSettings(
+                timeout_seconds=2.0,
+                idle_timeout_seconds=0.12,
+                hard_timeout_seconds=1.0,
+                shutdown_timeout_seconds=0.2,
+                cleanup_timeout_seconds=1.0,
+            ),
+        )
+
+        result = harness.run(self.payload("idle-timeout"))
+
+        self.assertEqual(result.status, "harness-failed")
+        self.assertEqual(result.error["code"], "JOB_IDLE_TIMEOUT")
+        self.assertEqual(result.idle_timeout_seconds, 0.12)
+        self.assertEqual(result.hard_timeout_seconds, 1.0)
+        self.assertLess(result.elapsed_seconds, 0.8)
+        self.assertGreaterEqual(result.progress_event_count, 2)
+        self.assertTrue(self.wait_pid_gone(result.worker_pid))
+
+    def test_heartbeat_refreshes_idle_timeout_but_never_extends_hard_deadline(
+        self,
+    ) -> None:
+        harness, _capture = self.harness(
+            "heartbeat-hard",
+            "hard-timeout",
+            settings=HarnessSettings(
+                timeout_seconds=2.0,
+                idle_timeout_seconds=0.08,
+                hard_timeout_seconds=0.24,
+                shutdown_timeout_seconds=0.2,
+                cleanup_timeout_seconds=1.0,
+            ),
+        )
+
+        result = harness.run(self.payload("hard-timeout"))
+
+        self.assertEqual(result.status, "harness-failed")
+        self.assertEqual(
+            result.error["code"],
+            "JOB_HARD_DEADLINE_EXCEEDED",
+        )
+        self.assertGreaterEqual(result.progress_event_count, 8)
+        self.assertEqual(result.last_progress_event_type, "stage.progress")
+        self.assertGreaterEqual(result.elapsed_seconds, 0.20)
+        self.assertLess(result.elapsed_seconds, 0.8)
+        self.assertEqual(
+            result.error["details"]["hardTimeoutSeconds"],
+            0.24,
+        )
+        self.assertTrue(self.wait_pid_gone(result.worker_pid))
 
     def test_invalid_utf8_jsonl_fails_closed_and_cleans_exact_worker(self) -> None:
         harness, _capture = self.harness(

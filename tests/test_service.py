@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -51,6 +52,7 @@ def _service(
     output_publisher: Any | None = None,
     subtitle_delivery_executor: Any | None = None,
     subtitle_visual_qa_hook: Any | None = None,
+    heartbeat_interval_seconds: float = 15.0,
 ) -> WorkerService:
     input_root = root / "input"
     output_root = root / "output"
@@ -65,6 +67,7 @@ def _service(
         transcription_adapter=adapter,
         renderer_adapter=renderer,
         event_sink=event_sink,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
         max_workers=1,
         business_provider=provider,
         business_runner_factory=runner_factory,
@@ -391,6 +394,59 @@ def test_shutdown_releases_transcription_resources_once() -> None:
         service.shutdown()
 
         assert adapter.release_calls == 1
+
+
+def test_long_job_emits_ordered_heartbeat_progress_until_terminal() -> None:
+    class SlowTranscription(FakeTranscriptionAdapter):
+        def transcribe(self, request: Any, context: Any) -> Any:
+            time.sleep(0.08)
+            return super().transcribe(request, context)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        events: list[dict[str, Any]] = []
+        service = _service(
+            Path(temporary),
+            adapter=SlowTranscription(result_mapping(1)),
+            event_sink=events.append,
+            heartbeat_interval_seconds=0.01,
+        )
+
+        started = service.start(
+            {
+                "jobId": "heartbeat-progress",
+                "sourcePath": "source.wav",
+                "outputDirectory": "heartbeat-output",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+        service.shutdown()
+
+        assert final["status"] in {"completed", "review_required"}
+        heartbeat_events = [
+            event
+            for event in events
+            if event["type"] == "stage.progress"
+            and event["payload"].get("kind") == "heartbeat"
+        ]
+        assert len(heartbeat_events) >= 2
+        assert all(
+            event["payload"]["intervalSeconds"] == 0.01
+            for event in heartbeat_events
+        )
+        sequences = [event["sequence"] for event in events]
+        assert sequences == list(range(len(events)))
+        terminal_index = max(
+            index
+            for index, event in enumerate(events)
+            if event["type"]
+            in {"job.completed", "review.required", "job.failed"}
+        )
+        assert all(
+            event["type"] != "stage.progress"
+            for event in events[terminal_index + 1 :]
+        )
 
 
 def test_unexpected_job_failure_logs_traceback_but_sanitizes_public_error(

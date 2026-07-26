@@ -732,10 +732,11 @@
       "sourceId": "voxconverse",
       "config": "default",
       "split": "dev",
-      "targetSpeakerCounts": [2, 3, 5, 8],
+      "targetSpeakerCounts": [1, 2, 3, 5, 8],
       "parquetPath": "data/dev-00000-of-00005.parquet",
       "parquetBytes": 485283393,
       "rowTargets": [
+        {"rowIndex": 35, "targetSpeakerCount": 1},
         {"rowIndex": 35, "targetSpeakerCount": 2},
         {"rowIndex": 22, "targetSpeakerCount": 3},
         {"rowIndex": 20, "targetSpeakerCount": 5},

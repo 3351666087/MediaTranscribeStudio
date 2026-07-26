@@ -303,7 +303,7 @@ def test_global_manifest_dynamic_n_matrices_cover_stress_counts() -> None:
     assert len(matrices["overlap-speaker-mixture"]["sourceCaseIds"]) >= 13
 
 
-def test_global_manifest_pins_real_mandarin_five_speaker_source() -> None:
+def test_global_manifest_pins_real_diarization_sources() -> None:
     manifest = load_global_manifest(MANIFEST)
     sources = {source.source_id: source for source in manifest.sources}
     plans = {
@@ -320,6 +320,11 @@ def test_global_manifest_pins_real_mandarin_five_speaker_source() -> None:
     assert plans["aishell4"]["officialEvaluationRevision"] == (
         "bad82b77c3753df1b232c5c6491cd3e2f2e32d24"
     )
+    assert plans["voxconverse"]["targetSpeakerCounts"] == [1, 2, 3, 5, 8]
+    assert {
+        (target["rowIndex"], target["targetSpeakerCount"])
+        for target in plans["voxconverse"]["rowTargets"]
+    } >= {(35, 1)}
 
 
 def test_overlap_intervals_tracks_distinct_active_speakers() -> None:

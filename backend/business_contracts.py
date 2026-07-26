@@ -23,7 +23,6 @@ class BusinessOutputContractError(ValueError):
 
 _CONTRACTS_DIRECTORY = Path(__file__).resolve().parents[1] / "contracts"
 _OUTPUT_SCHEMA_BY_VARIANT = {
-    "polish": "polish-output.schema.json",
     "summary": "summary-output.schema.json",
 }
 
@@ -39,7 +38,7 @@ def _schema_filename(variant: str) -> str:
         ) from exc
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=2)
 def _validator(filename: str) -> Draft202012Validator:
     path = _CONTRACTS_DIRECTORY / filename
     try:

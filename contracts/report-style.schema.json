@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mediatranscribestudio.local/contracts/report-style/1.0.0",
+  "$id": "https://mediatranscribestudio.local/contracts/report-style/1.1.0",
   "title": "MediaTranscribeStudio Report Appearance Configuration",
   "description": "A fully resolved, offline, presentation-only report style. This contract never authorizes changes to source transcript content.",
   "type": "object",
@@ -26,7 +26,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "preset": {
       "$ref": "#/$defs/preset"
@@ -192,7 +192,6 @@
         "speakerDirectory",
         "transcript",
         "translation",
-        "polishNotes",
         "summary",
         "qualityAppendix",
         "provenance"
@@ -216,9 +215,6 @@
         "translation": {
           "type": "boolean"
         },
-        "polishNotes": {
-          "type": "boolean"
-        },
         "summary": {
           "type": "boolean"
         },
@@ -240,13 +236,6 @@
         {
           "properties": {
             "translation": {
-              "const": true
-            }
-          }
-        },
-        {
-          "properties": {
-            "polishNotes": {
               "const": true
             }
           }

@@ -6,7 +6,8 @@
 report appearance. Its public JSON contract is
 `contracts/report-style.schema.json`.
 
-The current contract version is `1.0.0`.
+The current contract version is `1.1.0`. Version 1.1 removes the retired
+standalone polishing-notes section.
 
 This layer is deliberately independent from transcription, semantic
 arbitration, translation, summarization, HTML construction, PDF rendering, and

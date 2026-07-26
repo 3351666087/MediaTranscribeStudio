@@ -62,7 +62,7 @@ def _document() -> dict[str, Any]:
                 "startMs": 1_234,
                 "endMs": 3_456,
                 "speakerId": "speaker-1",
-                "rawText": "原始 <script>alert('x')</script> & 未润色。",
+                "rawText": "原始 <script>alert('x')</script> & 未修改。",
                 "normalizedText": "原始内容 & 已校正。",
                 "displayText": "原始内容 & 已校正！\n第二行 `code`。",
                 "language": "zh-Hans",
@@ -209,7 +209,7 @@ def test_txt_and_markdown_preserve_ids_speakers_timestamps_and_all_text() -> Non
         assert "speaker-2" in rendered
         assert "00:00:01.234 --> 00:00:03.456" in rendered
         assert "24:00:01.234 --> 24:00:05.678" in rendered
-        assert "原始 <script>alert('x')</script> & 未润色。" in rendered
+        assert "原始 <script>alert('x')</script> & 未修改。" in rendered
         assert "原始内容 & 已校正。" in rendered
         assert "原始内容 & 已校正！\n第二行 `code`。" in rendered
         assert "مرحبا بالعالم — naïve façade 😀" in rendered

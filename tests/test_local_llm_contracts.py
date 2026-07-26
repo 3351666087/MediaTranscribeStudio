@@ -36,10 +36,6 @@ def test_business_contract_schemas_are_valid_json_and_versioned() -> None:
             "MediaTranscribeStudio Translation Variant",
             "1.1.0",
         ),
-        "polish-output.schema.json": (
-            "MediaTranscribeStudio Polished Transcript Variant",
-            "1.1.0",
-        ),
         "summary-output.schema.json": (
             "MediaTranscribeStudio Evidence-Grounded Summary Variant",
             "1.1.0",
@@ -55,6 +51,15 @@ def test_business_contract_schemas_are_valid_json_and_versioned() -> None:
         assert schema["$id"].endswith(f"/{version}")
         assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
+
+
+def test_standalone_polish_contract_is_removed() -> None:
+    assert not (CONTRACTS / "polish-output.schema.json").exists()
+    with pytest.raises(
+        BusinessOutputContractError,
+        match="unsupported business output variant",
+    ):
+        validate_business_output_contract({}, variant="polish")
 
 
 def test_runtime_validator_enforces_the_public_summary_schema() -> None:

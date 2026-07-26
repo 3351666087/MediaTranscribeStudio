@@ -47,8 +47,8 @@ legacy flows.
 
 Local meeting-content processing and local LLM business processing are separate
 runtime privacy boundaries. Legacy distribution utilities must never upload
-meeting media, source transcripts, speaker evidence, derived translation,
-polish or summary artifacts, or generated reports.
+meeting media, source transcripts, speaker evidence, semantic-arbitration
+artifacts, derived translation or summary artifacts, or generated reports.
 
 ## Historical commands
 

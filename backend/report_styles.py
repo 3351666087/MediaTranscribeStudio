@@ -21,7 +21,7 @@ from types import MappingProxyType
 from typing import Any
 
 
-REPORT_STYLE_SCHEMA_VERSION = "1.0.0"
+REPORT_STYLE_SCHEMA_VERSION = "1.1.0"
 FONT_AVAILABILITY_DECLARATION = "declared-not-verified"
 FONT_EMBEDDING_DECLARATION = "not-embedded"
 
@@ -144,7 +144,6 @@ class SectionInclusion:
     speaker_directory: bool
     transcript: bool
     translation: bool
-    polish_notes: bool
     summary: bool
     quality_appendix: bool
     provenance: bool
@@ -157,7 +156,6 @@ class SectionInclusion:
             "speakerDirectory": self.speaker_directory,
             "transcript": self.transcript,
             "translation": self.translation,
-            "polishNotes": self.polish_notes,
             "summary": self.summary,
             "qualityAppendix": self.quality_appendix,
             "provenance": self.provenance,
@@ -514,7 +512,6 @@ def _parse_sections(value: Any) -> SectionInclusion:
         "speakerDirectory",
         "transcript",
         "translation",
-        "polishNotes",
         "summary",
         "qualityAppendix",
         "provenance",
@@ -527,7 +524,6 @@ def _parse_sections(value: Any) -> SectionInclusion:
     content_keys = (
         "transcript",
         "translation",
-        "polishNotes",
         "summary",
         "qualityAppendix",
         "provenance",
@@ -543,7 +539,6 @@ def _parse_sections(value: Any) -> SectionInclusion:
         speaker_directory=normalized["speakerDirectory"],
         transcript=normalized["transcript"],
         translation=normalized["translation"],
-        polish_notes=normalized["polishNotes"],
         summary=normalized["summary"],
         quality_appendix=normalized["qualityAppendix"],
         provenance=normalized["provenance"],
@@ -735,7 +730,6 @@ def _base_payload(preset: str) -> dict[str, Any]:
             "speakerDirectory": True,
             "transcript": True,
             "translation": True,
-            "polishNotes": True,
             "summary": True,
             "qualityAppendix": True,
             "provenance": True,
@@ -797,7 +791,6 @@ _RAW_PRESETS: dict[ReportStylePreset, dict[str, Any]] = {
             "brandAccent": "#2E90FA",
             "sectionInclusion": {
                 "translation": False,
-                "polishNotes": False,
                 "summary": False,
             },
         },
@@ -830,7 +823,6 @@ _RAW_PRESETS: dict[ReportStylePreset, dict[str, Any]] = {
             "sectionInclusion": {
                 "speakerDirectory": False,
                 "translation": False,
-                "polishNotes": False,
                 "qualityAppendix": False,
             },
             "brandAccent": "#315C8C",
@@ -848,7 +840,6 @@ _RAW_PRESETS: dict[ReportStylePreset, dict[str, Any]] = {
                 "cover": False,
                 "tableOfContents": False,
                 "translation": False,
-                "polishNotes": False,
                 "summary": False,
             },
             "margins": {

@@ -184,35 +184,6 @@ def _translation_output(language: str) -> dict[str, Any]:
     }
 
 
-def _polish_output(language: str) -> dict[str, Any]:
-    return {
-        "schemaVersion": "1.1.0",
-        "variant": "polish",
-        "inputHash": SHA256,
-        "model": "qwen3.5:4b",
-        "promptVersion": "polish-v1",
-        "provider": _provider(),
-        "temperature": 0,
-        "status": "completed",
-        "language": language,
-        "applicationPolicy": "suggestion-only",
-        "requiresHumanApproval": True,
-        "segments": [
-            {
-                "id": "segment-001",
-                "speakerId": "speaker-1",
-                "startMs": 0,
-                "endMs": 1_000,
-                "sourceTextHash": SHA256,
-                "text": "Source-language polished text.",
-                "language": language,
-                "diffReason": "PUNCTUATION_ONLY",
-            }
-        ],
-        "diff": [],
-    }
-
-
 def _summary_output(language: str) -> dict[str, Any]:
     evidence = {
         "text": "Evidence-grounded point.",
@@ -248,7 +219,6 @@ SCHEMA_FIXTURES: tuple[
     ("semantic-arbitration.schema.json", _semantic_arbitration),
     ("business-processing-request.schema.json", _business_request),
     ("translation-output.schema.json", _translation_output),
-    ("polish-output.schema.json", _polish_output),
     ("summary-output.schema.json", _summary_output),
 )
 

@@ -87,7 +87,6 @@ JSON Schema alone:
 | `pdf-quality-report.schema.json` | PDF hard gates, quality findings, and deterministic repair queue. |
 | `pdf-render-request.schema.json` | Request sent to the Java PDF sidecar. |
 | `pdf-render-result.schema.json` | Renderer outcome and generated artifact paths. |
-| `polish-output.schema.json` | Legacy read-only contract for historical polishing artifacts; current producers must not generate it. |
 | `report-document.schema.json` | Canonical transcript and report document with a dynamic speaker set. |
 | `semantic-arbitration.schema.json` | Constrained semantic proposal for human or deterministic arbitration. |
 | `summary-output.schema.json` | Evidence-grounded summary artifact. |
@@ -139,9 +138,9 @@ Local small models operate only within these suggestion and derived-artifact
 boundaries. They cannot silently rewrite the source transcript, timestamps,
 speaker assignments, voiceprint evidence, or human locks. Any source-language
 correction that is accepted into a later source revision must remain explicit,
-attributable, and auditable. The former independent polishing request and
-producer have been retired; `polish-output.schema.json` remains solely for
-validating historical artifacts.
+attributable, and auditable. Independent polishing is not part of the product
+or public contract; source-language repair belongs exclusively to mandatory
+semantic arbitration.
 
 The default local provider implementation is loopback-only and rejects
 redirects, but transport policy is enforced by the backend rather than by JSON

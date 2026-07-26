@@ -52,8 +52,8 @@ def test_schema_is_draft_2020_12_and_versioned(
     validator: Draft202012Validator,
 ) -> None:
     assert validator.schema["$schema"].endswith("draft/2020-12/schema")
-    assert validator.schema["properties"]["schemaVersion"]["const"] == "1.0.0"
-    assert REPORT_STYLE_SCHEMA_VERSION == "1.0.0"
+    assert validator.schema["properties"]["schemaVersion"]["const"] == "1.1.0"
+    assert REPORT_STYLE_SCHEMA_VERSION == "1.1.0"
 
 
 def test_six_shipped_presets_plus_custom_are_stable() -> None:
@@ -406,12 +406,19 @@ def test_at_least_one_content_section_is_required(
     for key in (
         "transcript",
         "translation",
-        "polishNotes",
         "summary",
         "qualityAppendix",
         "provenance",
     ):
         payload["sectionInclusion"][key] = False
+    _assert_rejected_by_python_and_schema(payload, validator)
+
+
+def test_retired_polish_notes_section_is_rejected(
+    validator: Draft202012Validator,
+) -> None:
+    payload = effective_defaults("custom")
+    payload["sectionInclusion"]["polishNotes"] = False
     _assert_rejected_by_python_and_schema(payload, validator)
 
 

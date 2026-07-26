@@ -95,44 +95,6 @@ def _translated_segment(
     }
 
 
-def _polished_segment(
-    segment_id: str,
-    speaker_id: str,
-    start_ms: int,
-    end_ms: int,
-    source_text: str,
-    text: str,
-) -> dict[str, object]:
-    return {
-        "id": segment_id,
-        "speakerId": speaker_id,
-        "startMs": start_ms,
-        "endMs": end_ms,
-        "sourceTextHash": _source_hash(source_text),
-        "text": text,
-        "language": "zh-CN",
-        "diffReason": "clarified punctuation",
-    }
-
-
-def _polished_segment_for_language(
-    source_text: str,
-    text: str,
-    *,
-    language: str,
-) -> dict[str, object]:
-    return {
-        "id": "segment-1",
-        "speakerId": "speaker-1",
-        "startMs": 0,
-        "endMs": 1_200,
-        "sourceTextHash": _source_hash(source_text),
-        "text": text,
-        "language": language,
-        "diffReason": "Conservative readability suggestion.",
-    }
-
-
 def _summary_item(text: str, segment_id: str, start_ms: int, end_ms: int) -> dict[str, object]:
     return {
         "text": text,

@@ -25,6 +25,7 @@ from .local_llm import (
     LocalLLMError,
     LocalLLMProvider,
     assert_loopback_provider,
+    estimate_input_tokens,
     parse_strict_json_object,
 )
 from .persistence import canonical_json_sha256, validate_strict_json
@@ -792,8 +793,10 @@ class SemanticProcessingRunner:
         provider: LocalLLMProvider,
         model: str,
         cancellation_check: Any = None,
-        batch_size: int = 2,
+        batch_size: int = 3,
         speaker_top_k: int = 3,
+        context_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> None:
         if batch_size < 1 or batch_size > 6:
             raise ValueError("semantic batch_size must be between 1 and 6")
@@ -806,6 +809,38 @@ class SemanticProcessingRunner:
         self.cancellation_check = cancellation_check
         self.batch_size = batch_size
         self.speaker_top_k = speaker_top_k
+        provider_config = getattr(provider, "config", None)
+        configured_context = getattr(provider_config, "context_tokens", None)
+        configured_output = getattr(provider_config, "output_tokens", None)
+        resolved_context = (
+            configured_context if context_tokens is None else context_tokens
+        )
+        resolved_output = (
+            configured_output if output_tokens is None else output_tokens
+        )
+        if resolved_context is None:
+            resolved_context = 4096
+        if resolved_output is None:
+            resolved_output = 1024
+        if (
+            isinstance(resolved_context, bool)
+            or not isinstance(resolved_context, int)
+            or resolved_context < 1024
+            or resolved_context > 262_144
+        ):
+            raise ValueError("semantic context_tokens must be between 1024 and 262144")
+        if (
+            isinstance(resolved_output, bool)
+            or not isinstance(resolved_output, int)
+            or resolved_output < 128
+            or resolved_output > resolved_context
+        ):
+            raise ValueError(
+                "semantic output_tokens must be between 128 and context_tokens"
+            )
+        self.context_tokens = resolved_context
+        self.output_tokens = resolved_output
+        self.input_token_budget = resolved_context - resolved_output
 
     def _check_cancelled(self) -> None:
         check = self.cancellation_check
@@ -853,6 +888,45 @@ class SemanticProcessingRunner:
             "at least segment:<segmentId>. Do not output explanations outside JSON.\n"
             f"input={payload}"
         )
+
+    def _estimate_batch_tokens(self, batch: Sequence[Mapping[str, Any]]) -> int:
+        schema_text = json.dumps(
+            _semantic_batch_response_schema(batch),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return estimate_input_tokens(
+            self._system_prompt(),
+            self._user_prompt(batch),
+            schema_text,
+        )
+
+    def _plan_batches(
+        self,
+        requests: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[list[dict[str, Any]]], int]:
+        """Pack adjacent requests without knowingly exceeding provider input budget."""
+
+        planned: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        max_estimated_tokens = 0
+        for request in requests:
+            candidate = [*current, dict(request)]
+            if current and (
+                len(candidate) > self.batch_size
+                or self._estimate_batch_tokens(candidate) > self.input_token_budget
+            ):
+                estimated = self._estimate_batch_tokens(current)
+                planned.append(current)
+                max_estimated_tokens = max(max_estimated_tokens, estimated)
+                current = [dict(request)]
+            else:
+                current = candidate
+        if current:
+            estimated = self._estimate_batch_tokens(current)
+            planned.append(current)
+            max_estimated_tokens = max(max_estimated_tokens, estimated)
+        return planned, max_estimated_tokens
 
     def run(self, document: Mapping[str, Any]) -> dict[str, Any]:
         self._check_cancelled()
@@ -923,10 +997,8 @@ class SemanticProcessingRunner:
         failures: list[dict[str, Any]] = []
         calls = 0
         context_split_count = 0
-        pending_batches = deque(
-            requests[offset : offset + self.batch_size]
-            for offset in range(0, len(requests), self.batch_size)
-        )
+        planned_batches, max_estimated_input_tokens = self._plan_batches(requests)
+        pending_batches = deque(planned_batches)
         while pending_batches:
             self._check_cancelled()
             batch = pending_batches.popleft()
@@ -1097,6 +1169,13 @@ class SemanticProcessingRunner:
                 "segmentsEvaluated": len(segments),
                 "providerCalls": calls,
                 "contextSplitCount": context_split_count,
+                "plannedBatchCount": len(planned_batches),
+                "plannedMaxBatchSize": max(
+                    (len(batch) for batch in planned_batches),
+                    default=0,
+                ),
+                "contextTokenBudget": self.input_token_budget,
+                "maxEstimatedInputTokens": max_estimated_input_tokens,
                 "suggestionCount": len(suggestions),
                 "speakerSuggestionCount": sum(
                     "speaker" in item["changes"] for item in suggestions

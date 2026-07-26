@@ -224,7 +224,7 @@ def test_ollama_provider_sends_strict_json_chat_request(
     assert captured["payload"]["keep_alive"] == "10m"
     assert captured["payload"]["options"]["temperature"] == 0.0
     assert captured["payload"]["options"]["top_p"] == 0.1
-    assert captured["payload"]["options"]["num_ctx"] == 4096
+    assert captured["payload"]["options"]["num_ctx"] == 8192
     assert captured["payload"]["options"]["num_predict"] == 1024
     assert captured["payload"]["messages"] == [
         {"role": "system", "content": "Return JSON."},

@@ -68,7 +68,7 @@ class LocalLLMConfig:
     timeout_seconds: float = 180.0
     temperature: float = 0.0
     top_p: float = 0.1
-    context_tokens: int = 4096
+    context_tokens: int = 8192
     output_tokens: int = 1024
     keep_alive: str = "10m"
     offline_only: bool = True
@@ -274,8 +274,8 @@ def _assert_loopback_response_url(response: Any, requested_url: str) -> None:
         ) from exc
 
 
-def _estimated_tokens(*values: str) -> int:
-    """Return a conservative deterministic token estimate for preflight checks."""
+def estimate_input_tokens(*values: str) -> int:
+    """Return the conservative token estimate shared by planning and preflight."""
 
     encoded_size = sum(len(value.encode("utf-8")) for value in values)
     return max(1, math.ceil(encoded_size / 3)) + 64
@@ -424,7 +424,7 @@ class OllamaLocalProvider:
             if schema is not None
             else ""
         )
-        estimated_input_tokens = _estimated_tokens(
+        estimated_input_tokens = estimate_input_tokens(
             system_prompt,
             user_prompt,
             schema_text,
@@ -549,5 +549,6 @@ __all__ = [
     "MappingLocalLLMProvider",
     "OllamaLocalProvider",
     "assert_loopback_provider",
+    "estimate_input_tokens",
     "parse_strict_json_object",
 ]

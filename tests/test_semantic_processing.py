@@ -6,6 +6,7 @@ import json
 import pytest
 
 from backend import (
+    LocalLLMConfig,
     LocalLLMContextWindowError,
     MappingLocalLLMProvider,
     SemanticProcessingRunner,
@@ -266,6 +267,10 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
         "segmentsEvaluated": 3,
         "providerCalls": 1,
         "contextSplitCount": 0,
+        "plannedBatchCount": 1,
+        "plannedMaxBatchSize": 3,
+        "contextTokenBudget": 3072,
+        "maxEstimatedInputTokens": 2669,
         "suggestionCount": 2,
         "speakerSuggestionCount": 1,
         "textSuggestionCount": 1,
@@ -296,6 +301,54 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
     ]
     assert queue["openCount"] == 2
     assert document == before
+
+
+def test_token_budget_aware_packing_avoids_known_context_overflow() -> None:
+    class BudgetRecordingProvider:
+        provider_id = "budget-recording-fixture"
+        provider_version = "1"
+        network_policy = "loopback-only"
+        config = LocalLLMConfig(context_tokens=4_096, output_tokens=1_024)
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def generate_json(self, **kwargs: object) -> dict[str, object]:
+            payload = json.loads(str(kwargs["user_prompt"]).split("input=", 1)[1])
+            batch = payload["segments"]
+            self.batch_sizes.append(len(batch))
+            return {
+                "results": [
+                    _keep(
+                        item["segmentId"],
+                        item["currentSpeakerId"],
+                        item["currentNormalizedText"],
+                    )
+                    for item in batch
+                ]
+            }
+
+    document = _document()
+    for segment in document["segments"]:
+        long_text = "word " * 160
+        segment["rawText"] = long_text
+        segment["normalizedText"] = long_text
+        segment["displayText"] = long_text
+    provider = BudgetRecordingProvider()
+
+    artifact = SemanticProcessingRunner(
+        provider=provider,
+        model="fixture",
+        batch_size=3,
+    ).run(document)
+
+    assert artifact["status"] == "completed"
+    assert provider.batch_sizes == [1, 1, 1]
+    assert artifact["metrics"]["plannedBatchCount"] == 3
+    assert artifact["metrics"]["plannedMaxBatchSize"] == 1
+    assert artifact["metrics"]["contextTokenBudget"] == 3_072
+    assert artifact["metrics"]["maxEstimatedInputTokens"] <= 3_072
+    assert artifact["metrics"]["contextSplitCount"] == 0
 
 
 def test_context_overflow_splits_batches_without_recording_false_failure() -> None:

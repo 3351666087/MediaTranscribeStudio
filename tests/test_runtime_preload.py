@@ -40,6 +40,12 @@ def test_preload_appends_pyannote_only_when_enabled() -> None:
     assert modules[:-1] == production_runtime_modules(include_pyannote=False)
 
 
+def test_preload_activates_setuptools_before_funasr_registration() -> None:
+    modules = production_runtime_modules(include_pyannote=False)
+
+    assert modules.index("setuptools") < modules.index("funasr")
+
+
 def test_pyav_stub_exposes_valid_import_specs() -> None:
     av_module = sys.modules.get("av")
     if av_module is None or not getattr(av_module, "__mts_stub__", False):

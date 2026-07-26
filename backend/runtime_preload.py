@@ -25,6 +25,10 @@ from typing import Any
 from .errors import WorkerError
 
 _BASE_MODULES = (
+    # Python 3.12 removed stdlib distutils. FunASR still imports
+    # distutils.version while auto-registering CAMPPlus, so activate the
+    # pinned setuptools compatibility shim before importing FunASR.
+    "setuptools",
     "numpy",
     "scipy",
     "soundfile",

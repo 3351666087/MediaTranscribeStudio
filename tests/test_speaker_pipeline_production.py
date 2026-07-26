@@ -647,6 +647,95 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             by_id["ambiguous"].evidence["speakerSequenceDecode"]["applied"]
         )
 
+    def test_global_sequence_decode_never_reassigns_outside_acoustic_top2(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(3)
+        segments = (
+            self.transcript_segment(
+                "left",
+                0,
+                1_000,
+                "speaker-1",
+                margin=0.85,
+                scores=(
+                    ("speaker-1", 0.95),
+                    ("speaker-2", 0.10),
+                    ("speaker-3", 0.05),
+                ),
+            ),
+            self.transcript_segment(
+                "real-n8-regression",
+                1_000,
+                2_000,
+                "speaker-3",
+                margin=0.0043836728,
+                scores=(
+                    ("speaker-3", 0.6546816271),
+                    ("speaker-2", 0.6502979543),
+                    ("speaker-1", 0.6382821299),
+                ),
+            ),
+            self.transcript_segment(
+                "right",
+                2_000,
+                3_000,
+                "speaker-1",
+                margin=0.85,
+                scores=(
+                    ("speaker-1", 0.95),
+                    ("speaker-2", 0.10),
+                    ("speaker-3", 0.05),
+                ),
+            ),
+            self.transcript_segment(
+                "speaker-2-anchor",
+                3_000,
+                4_000,
+                "speaker-2",
+                margin=0.85,
+                scores=(
+                    ("speaker-2", 0.95),
+                    ("speaker-1", 0.10),
+                    ("speaker-3", 0.05),
+                ),
+            ),
+            self.transcript_segment(
+                "speaker-3-anchor",
+                4_000,
+                5_000,
+                "speaker-3",
+                margin=0.85,
+                scores=(
+                    ("speaker-3", 0.95),
+                    ("speaker-2", 0.10),
+                    ("speaker-1", 0.05),
+                ),
+            ),
+        )
+
+        decoded = pipeline._decode_global_speaker_sequence(segments)
+
+        target = decoded[1]
+        self.assertEqual(target.speaker_id, "speaker-3")
+        self.assertEqual(target.revisions, ())
+        for segment in decoded:
+            top_two = {
+                item.speaker_id
+                for item in sorted(
+                    segment.speaker_scores,
+                    key=lambda item: (-item.score, item.speaker_id),
+                )[:2]
+            }
+            self.assertTrue(
+                all(
+                    revision.after in top_two
+                    for revision in segment.revisions
+                    if revision.revision_type == "speaker"
+                    and revision.source != "manual"
+                )
+            )
+
     def test_global_sequence_decode_human_lock_is_a_hard_constraint(self) -> None:
         pipeline, _, _, _, _ = self.pipeline(2)
         locked = self.transcript_segment(

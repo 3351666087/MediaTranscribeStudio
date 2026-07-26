@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -48,6 +49,31 @@ class FakeService:
 
 
 class ProductionCompositionTests(unittest.TestCase):
+    @staticmethod
+    def _write_model_fixture(path: Path, *, model_key: str) -> None:
+        payload = path / "weights.bin"
+        content = f"fixture:{model_key}".encode("utf-8")
+        payload.write_bytes(content)
+        manifest = {
+            "schemaVersion": "1.0.0",
+            "provider": "modelscope",
+            "modelKey": model_key,
+            "repoId": f"fixture/{model_key}",
+            "revision": "fixture-revision",
+            "totalBytes": len(content),
+            "files": [
+                {
+                    "path": payload.name,
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            ],
+        }
+        (path / ".mts-model-manifest.json").write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
@@ -56,8 +82,18 @@ class ProductionCompositionTests(unittest.TestCase):
         self.cache_root = self.root / "cache"
         self.input_root.mkdir()
         self.output_root.mkdir()
-        for name in ("vad", "asr", "aligner", "cam", "eres", "pyannote"):
-            (self.root / name).mkdir()
+        model_fixtures = {
+            "vad": "funasrVad",
+            "asr": "qwen3Asr",
+            "aligner": "qwen3ForcedAligner",
+            "cam": "camPlus",
+            "eres": "eres2netV2",
+            "pyannote": "pyannoteCommunity1",
+        }
+        for name, model_key in model_fixtures.items():
+            path = self.root / name
+            path.mkdir()
+            self._write_model_fixture(path, model_key=model_key)
         self.jar = self.root / "renderer.jar"
         with zipfile.ZipFile(self.jar, "w") as archive:
             archive.writestr("META-INF/MANIFEST.MF", "Main-Class: test.Main\n")
@@ -266,6 +302,44 @@ class ProductionCompositionTests(unittest.TestCase):
             self.assertTrue(_probe_runtime_import("funasr"))
 
         self.assertEqual(run.call_args.kwargs["timeout"], 120.0)
+        code = run.call_args.args[0][-1]
+        self.assertLess(code.index("import setuptools"), code.index("importlib"))
+
+    def test_preflight_checks_funasr_campplus_registration_module(self) -> None:
+        config = self.load()
+        probed: list[str] = []
+
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda module: probed.append(module) or True,
+            probe_executables=False,
+        )
+
+        self.assertTrue(report.passed)
+        self.assertIn("funasr.models.campplus.model", probed)
+        self.assertIn(
+            "runtime-funasr-campplus",
+            {check.check_id for check in report.checks},
+        )
+
+    def test_preflight_rejects_present_but_corrupted_model_content(self) -> None:
+        config = self.load()
+        (config.models.cam_plus / "weights.bin").write_bytes(b"corrupted")
+
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        by_id = {check.check_id: check for check in report.checks}
+
+        self.assertTrue(by_id["cam-plus-model"].passed)
+        self.assertFalse(by_id["cam-plus-model-integrity"].passed)
+        self.assertEqual(
+            by_id["cam-plus-model-integrity"].reason_code,
+            "LOCKED_MODEL_CONTENT_INTEGRITY",
+        )
+        self.assertFalse(report.passed)
 
     def test_preflight_write_probes_are_concurrency_safe(self) -> None:
         config = self.load()

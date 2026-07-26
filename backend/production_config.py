@@ -13,13 +13,14 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .errors import WorkerError
@@ -27,7 +28,11 @@ from .errors import WorkerError
 PRODUCTION_CONFIG_SCHEMA_VERSION = "1.0.0"
 PRODUCTION_MODE = "offline-production"
 _MAX_CONFIG_BYTES = 1024 * 1024
+_MAX_MODEL_MANIFEST_BYTES = 4 * 1024 * 1024
+_MODEL_MANIFEST_NAME = ".mts-model-manifest.json"
+_MODEL_MANIFEST_SCHEMA_VERSION = "1.0.0"
 _URI_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _RUNTIME_IMPORT_TIMEOUT_SECONDS = 120.0
 
 
@@ -1102,6 +1107,9 @@ def _probe_command(command: Sequence[str], *, timeout_seconds: float = 10.0) -> 
 
 def _probe_runtime_import(module: str) -> bool:
     code = (
+        # Python 3.12 no longer ships distutils, while the pinned FunASR
+        # CAMPPlus implementation still imports distutils.version.
+        "import setuptools;"
         "import importlib;"
         f"importlib.import_module({module!r});"
         "print('ok')"
@@ -1192,6 +1200,120 @@ def _directory_writable(path: Path) -> bool:
     return True
 
 
+def _path_is_dataless(path: Path) -> bool:
+    """Detect macOS cloud placeholders without triggering an implicit fetch."""
+
+    try:
+        flags = path.stat(follow_symlinks=False).st_flags
+    except (AttributeError, OSError):
+        return False
+    return bool(flags & getattr(stat, "SF_DATALESS", 0))
+
+
+def _sha256_file(path: Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_manifest_valid(root: Path, *, expected_key: str) -> bool:
+    """Verify a published model against its local, revision-bound manifest."""
+
+    if not root.is_dir() or root.is_symlink():
+        return False
+    manifest_path = root / _MODEL_MANIFEST_NAME
+    try:
+        manifest_stat = manifest_path.stat(follow_symlinks=False)
+        if (
+            not manifest_path.is_file()
+            or manifest_path.is_symlink()
+            or _path_is_dataless(manifest_path)
+            or manifest_stat.st_size <= 0
+            or manifest_stat.st_size > _MAX_MODEL_MANIFEST_BYTES
+        ):
+            return False
+        raw = manifest_path.read_bytes()
+        if len(raw) != manifest_stat.st_size:
+            return False
+        document = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    if (
+        document.get("schemaVersion") != _MODEL_MANIFEST_SCHEMA_VERSION
+        or document.get("modelKey") != expected_key
+        or document.get("provider") not in {"huggingface", "modelscope"}
+        or not isinstance(document.get("repoId"), str)
+        or not document["repoId"]
+        or not isinstance(document.get("revision"), str)
+        or not document["revision"]
+    ):
+        return False
+    raw_total = document.get("totalBytes")
+    raw_files = document.get("files")
+    if (
+        not isinstance(raw_total, int)
+        or isinstance(raw_total, bool)
+        or raw_total < 0
+        or not isinstance(raw_files, list)
+        or not raw_files
+    ):
+        return False
+
+    resolved_root = root.resolve()
+    seen_paths: set[str] = set()
+    declared_total = 0
+    for raw_file in raw_files:
+        if not isinstance(raw_file, Mapping):
+            return False
+        relative_path = raw_file.get("path")
+        expected_size = raw_file.get("size")
+        expected_sha256 = raw_file.get("sha256")
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+            or not isinstance(expected_sha256, str)
+            or _SHA256_PATTERN.fullmatch(expected_sha256) is None
+        ):
+            return False
+        normalized = PurePosixPath(relative_path)
+        if normalized.is_absolute() or ".." in normalized.parts:
+            return False
+        normalized_text = normalized.as_posix()
+        folded = normalized_text.casefold()
+        if folded in seen_paths:
+            return False
+        seen_paths.add(folded)
+        candidate = resolved_root / Path(*normalized.parts)
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+            resolved_candidate.relative_to(resolved_root)
+            candidate_stat = candidate.stat(follow_symlinks=False)
+        except (OSError, ValueError):
+            return False
+        if (
+            resolved_candidate != candidate
+            or not candidate.is_file()
+            or candidate.is_symlink()
+            or _path_is_dataless(candidate)
+            or candidate_stat.st_size != expected_size
+        ):
+            return False
+        try:
+            if _sha256_file(candidate) != expected_sha256:
+                return False
+        except OSError:
+            return False
+        declared_total += expected_size
+    return declared_total == raw_total
+
+
 def offline_environment(
     extra: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
@@ -1278,30 +1400,45 @@ def run_production_preflight(
         "LOCAL_CACHE_ROOT_WRITABLE",
     )
 
-    model_paths: list[tuple[str, Path, bool]] = [
-        ("funasr-vad-model", config.models.funasr_vad, True),
-        ("qwen3-asr-model", config.models.qwen3_asr, True),
-        ("cam-plus-model", config.models.cam_plus, True),
-        ("eres2net-v2-model", config.models.eres2net_v2, True),
+    model_paths: list[tuple[str, str, Path, bool]] = [
+        ("funasr-vad-model", "funasrVad", config.models.funasr_vad, True),
+        ("qwen3-asr-model", "qwen3Asr", config.models.qwen3_asr, True),
+        ("cam-plus-model", "camPlus", config.models.cam_plus, True),
+        ("eres2net-v2-model", "eres2netV2", config.models.eres2net_v2, True),
     ]
     if config.models.qwen3_forced_aligner is not None:
         model_paths.append(
             (
                 "qwen3-forced-aligner-model",
+                "qwen3ForcedAligner",
                 config.models.qwen3_forced_aligner,
                 True,
             )
         )
     if config.speaker.pyannote_mode != "disabled":
         assert config.models.pyannote is not None
-        model_paths.append(("pyannote-model", config.models.pyannote, True))
-    for check_id, path, required in model_paths:
+        model_paths.append(
+            (
+                "pyannote-model",
+                "pyannoteCommunity1",
+                config.models.pyannote,
+                True,
+            )
+        )
+    for check_id, model_key, path, required in model_paths:
         add(
             check_id,
             "model",
             required,
             path.is_dir(),
             "LOCAL_MODEL_DIRECTORY",
+        )
+        add(
+            f"{check_id}-integrity",
+            "model",
+            required,
+            _model_manifest_valid(path, expected_key=model_key),
+            "LOCKED_MODEL_CONTENT_INTEGRITY",
         )
 
     ffmpeg = _resolve_executable(config.executables.ffmpeg)
@@ -1358,6 +1495,11 @@ def run_production_preflight(
 
     runtime_modules: list[tuple[str, str, bool]] = [
         ("runtime-funasr", "funasr", True),
+        (
+            "runtime-funasr-campplus",
+            "funasr.models.campplus.model",
+            True,
+        ),
         ("runtime-qwen-asr", "qwen_asr", True),
         ("runtime-modelscope", "modelscope.pipelines", True),
         ("runtime-simplejson", "simplejson", True),

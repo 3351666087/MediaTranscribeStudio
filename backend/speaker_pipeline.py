@@ -4252,7 +4252,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.12.0"
+    version = "2.12.1"
 
     def __init__(
         self,
@@ -5819,6 +5819,7 @@ class SpeakerPipeline:
                 for segment in segments
             ),
             SequenceDecoderConfig(
+                top_m=2,
                 preserve_original_cardinality=True,
             ),
         )

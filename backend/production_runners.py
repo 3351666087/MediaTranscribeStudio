@@ -54,6 +54,7 @@ from .speaker_pipeline import (
     PreparedAudio,
     ReviewCandidate,
     ReviewProposal,
+    SpeakerIdentityWindow,
     SpeechWindow,
 )
 from .voice_activity import build_voice_activity
@@ -1529,8 +1530,8 @@ class LocalFunAsrCamPlusAdapter:
     """
 
     adapter_id = "CAM++"
-    version = "2.4.0"
-    refinement_method = "cam-plus-multiresolution-language-window-v5"
+    version = "2.6.0"
+    refinement_method = "cam-plus-multiresolution-identity-turn-projection-v7"
 
     def __init__(
         self,
@@ -2432,10 +2433,35 @@ class LocalFunAsrCamPlusAdapter:
         timings = dict(prepared.stage_durations_ms)
         timings["speakerChangeRefinement"] = elapsed_ms
         timings["boundary"] = float(timings.get("boundary", 0.0)) + elapsed_ms
+        identity_windows = tuple(
+            sorted(
+                (
+                    SpeakerIdentityWindow(
+                        window_id=window.window_id,
+                        source_window_id=source.window_id,
+                        start_ms=window.start_ms,
+                        end_ms=window.end_ms,
+                        vector=embeddings[window.window_id].embedding,
+                        confidence=embeddings[window.window_id].confidence,
+                        resolution=resolution,
+                    )
+                    for source in prepared.windows
+                    for resolution in ("fine", "context")
+                    for window in by_source[source.window_id][resolution]
+                ),
+                key=lambda item: (
+                    item.start_ms,
+                    item.end_ms,
+                    item.resolution,
+                    item.window_id,
+                ),
+            )
+        )
         return replace(
             prepared,
             windows=tuple(refined),
             stage_durations_ms=timings,
+            speaker_identity_windows=identity_windows,
         )
 
     def embed_batch(

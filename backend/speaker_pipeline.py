@@ -382,6 +382,87 @@ class SpeechWindow:
 
 
 @dataclass(frozen=True)
+class SpeakerIdentityWindow:
+    """Reusable contextual voiceprint evidence independent of output turns."""
+
+    window_id: str
+    source_window_id: str
+    start_ms: int
+    end_ms: int
+    vector: tuple[float, ...]
+    confidence: float = 1.0
+    resolution: str = "context"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.window_id, str)
+            or not self.window_id.strip()
+            or not isinstance(self.source_window_id, str)
+            or not self.source_window_id.strip()
+            or isinstance(self.start_ms, bool)
+            or isinstance(self.end_ms, bool)
+            or self.start_ms < 0
+            or self.end_ms <= self.start_ms
+        ):
+            raise ValueError("speaker identity window is invalid")
+        normalized = tuple(
+            _finite_float(value, "speakerIdentityWindow.vector")
+            for value in self.vector
+        )
+        if not normalized or math.sqrt(
+            sum(value * value for value in normalized)
+        ) <= 1e-12:
+            raise ValueError(
+                "speaker identity window vector must be non-zero"
+            )
+        object.__setattr__(self, "vector", normalized)
+        object.__setattr__(
+            self,
+            "confidence",
+            _probability(
+                self.confidence,
+                "speakerIdentityWindow.confidence",
+            ),
+        )
+        if self.resolution not in {"fine", "context"}:
+            raise ValueError(
+                "speaker identity window resolution must be fine or context"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.window_id,
+            "sourceWindowId": self.source_window_id,
+            "startMs": self.start_ms,
+            "endMs": self.end_ms,
+            "vector": list(self.vector),
+            "confidence": self.confidence,
+            "resolution": self.resolution,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> "SpeakerIdentityWindow":
+        if not isinstance(value, Mapping):
+            raise ValueError(
+                "speaker identity window cache entry must be an object"
+            )
+        raw_vector = value.get("vector")
+        if not isinstance(raw_vector, list):
+            raise ValueError(
+                "speaker identity window vector must be an array"
+            )
+        return cls(
+            window_id=str(value.get("id") or ""),
+            source_window_id=str(value.get("sourceWindowId") or ""),
+            start_ms=int(value.get("startMs")),
+            end_ms=int(value.get("endMs")),
+            vector=tuple(raw_vector),
+            confidence=value.get("confidence", 1.0),
+            resolution=str(value.get("resolution") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class PreparedAudio:
     duration_ms: int
     source_fingerprint: str
@@ -390,6 +471,7 @@ class PreparedAudio:
     stage_durations_ms: Mapping[str, float]
     reference_turns: tuple[ReferenceTurn, ...] = ()
     audio_path: str | None = None
+    speaker_identity_windows: tuple[SpeakerIdentityWindow, ...] = ()
 
     def __post_init__(self) -> None:
         if self.duration_ms < 1 or not self.windows:
@@ -412,6 +494,19 @@ class PreparedAudio:
         if self.audio_path is not None:
             if not isinstance(self.audio_path, str) or not self.audio_path.strip():
                 raise ValueError("prepared audio_path must be non-empty text")
+        previous_identity = -1
+        seen_identity_ids: set[str] = set()
+        for identity_window in self.speaker_identity_windows:
+            if (
+                identity_window.window_id in seen_identity_ids
+                or identity_window.start_ms < previous_identity
+                or identity_window.end_ms > self.duration_ms
+            ):
+                raise ValueError(
+                    "speaker identity windows must be unique, sorted, and bounded"
+                )
+            seen_identity_ids.add(identity_window.window_id)
+            previous_identity = identity_window.start_ms
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -431,6 +526,10 @@ class PreparedAudio:
                 }
                 for turn in self.reference_turns
             ],
+            "speakerIdentityWindows": [
+                window.as_dict()
+                for window in self.speaker_identity_windows
+            ],
         }
         if self.audio_path is not None:
             value["audioPath"] = self.audio_path
@@ -443,10 +542,12 @@ class PreparedAudio:
         raw_windows = value.get("windows")
         raw_timings = value.get("stageDurationsMs")
         raw_reference = value.get("referenceTurns", [])
+        raw_identity_windows = value.get("speakerIdentityWindows", [])
         if (
             not isinstance(raw_windows, list)
             or not isinstance(raw_timings, Mapping)
             or not isinstance(raw_reference, list)
+            or not isinstance(raw_identity_windows, list)
         ):
             raise ValueError("prepared audio cache entry is malformed")
         return cls(
@@ -470,6 +571,10 @@ class PreparedAudio:
                 str(value["audioPath"]).strip()
                 if value.get("audioPath") is not None
                 else None
+            ),
+            speaker_identity_windows=tuple(
+                SpeakerIdentityWindow.from_mapping(item)
+                for item in raw_identity_windows
             ),
         )
 
@@ -4270,7 +4375,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.12.1"
+    version = "2.13.0"
 
     def __init__(
         self,
@@ -4714,6 +4819,25 @@ class SpeakerPipeline:
                 "speaker-change refinement produced windows outside the "
                 "original speech timeline",
             )
+        original_by_id = {
+            window.window_id: window for window in original.windows
+        }
+        for identity_window in refined.speaker_identity_windows:
+            source = original_by_id.get(identity_window.source_window_id)
+            if (
+                source is None
+                or identity_window.start_ms < source.start_ms
+                or identity_window.end_ms > source.end_ms
+            ):
+                raise WorkerError(
+                    "PIPELINE_ADAPTER_RESULT_INVALID",
+                    "contextual speaker identity evidence must remain inside "
+                    "its source VAD window",
+                    details={
+                        "identityWindowId": identity_window.window_id,
+                        "sourceWindowId": identity_window.source_window_id,
+                    },
+                )
         return refined
 
     def _refinement_cache_identity(
@@ -5364,6 +5488,618 @@ class SpeakerPipeline:
         )
         return projected
 
+    @staticmethod
+    def _clip_overlap_evidence(
+        decision: OverlapDecision,
+        *,
+        target: SpeechWindow,
+    ) -> OverlapDecision:
+        evidence = dict(decision.evidence)
+
+        def clipped_items(
+            name: str,
+            *,
+            require_local_speaker: bool = False,
+        ) -> list[dict[str, Any]] | None:
+            raw_items = evidence.get(name)
+            if not isinstance(raw_items, list):
+                return None
+            output: list[dict[str, Any]] = []
+            for raw in raw_items:
+                if not isinstance(raw, Mapping):
+                    return None
+                start_ms = raw.get("startMs")
+                end_ms = raw.get("endMs")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or end_ms <= start_ms
+                ):
+                    return None
+                if require_local_speaker and (
+                    not isinstance(raw.get("localSpeaker"), str)
+                    or not str(raw["localSpeaker"]).strip()
+                ):
+                    return None
+                clipped_start = max(target.start_ms, start_ms)
+                clipped_end = min(target.end_ms, end_ms)
+                if clipped_end <= clipped_start:
+                    continue
+                item = dict(raw)
+                item["startMs"] = clipped_start
+                item["endMs"] = clipped_end
+                output.append(item)
+            return output
+
+        clipped_overlap = clipped_items("overlapIntervals")
+        clipped_regular = clipped_items(
+            "speakerTurns",
+            require_local_speaker=True,
+        )
+        clipped_exclusive = clipped_items(
+            "exclusiveSpeakerTurns",
+            require_local_speaker=True,
+        )
+        if clipped_overlap is not None:
+            evidence["overlapIntervals"] = clipped_overlap
+            overlapping = bool(clipped_overlap)
+        else:
+            overlapping = decision.overlapping
+        if clipped_regular is not None:
+            evidence["speakerTurns"] = clipped_regular
+        if clipped_exclusive is not None:
+            evidence["exclusiveSpeakerTurns"] = clipped_exclusive
+        evidence["turnProjection"] = {
+            "method": "contextual-voiceprint-output-turn-v1",
+            "sourceWindowId": decision.window_id,
+            "targetWindowId": target.window_id,
+            "targetStartMs": target.start_ms,
+            "targetEndMs": target.end_ms,
+        }
+        return OverlapDecision(
+            window_id=target.window_id,
+            overlapping=overlapping,
+            confidence=decision.confidence,
+            secondary_speaker_hint=decision.secondary_speaker_hint,
+            evidence=evidence,
+        )
+
+    def _project_contextual_speaker_turns(
+        self,
+        *,
+        prepared: PreparedAudio,
+        asr: Sequence[AsrHypothesis],
+        embeddings: Sequence[EmbeddingRecord],
+        overlap: Sequence[OverlapDecision],
+        clusters: _ClusterResult,
+        metrics: PipelineMetricsCollector,
+    ) -> tuple[
+        PreparedAudio,
+        list[AsrHypothesis],
+        list[EmbeddingRecord],
+        list[OverlapDecision],
+        _ClusterResult,
+    ] | None:
+        """Project cached multi-resolution voiceprints onto reviewable turns.
+
+        Clustering still uses the original evidence windows.  This stage only
+        reuses already-computed CAM++ identity embeddings and reviewable
+        acoustic change proposals to derive output turns.
+        """
+
+        started = time.perf_counter()
+        identity_windows = prepared.speaker_identity_windows
+        if (
+            not identity_windows
+            or len(prepared.windows) != len(asr)
+            or len(asr) != len(embeddings)
+            or len(embeddings) != len(overlap)
+            or len(overlap) != len(clusters.assignments)
+        ):
+            metrics.set_policy(
+                contextualTurnProjectionApplied=False,
+                contextualTurnProjectionReason="CONTEXT_IDENTITY_EVIDENCE_UNAVAILABLE",
+            )
+            return None
+
+        normalized_embeddings = [
+            _normalize(item.vector) for item in embeddings
+        ]
+        dimension = len(normalized_embeddings[0])
+        if any(len(item) != dimension for item in normalized_embeddings):
+            raise WorkerError(
+                "CONTEXT_IDENTITY_EVIDENCE_INVALID",
+                "speaker evidence embeddings have inconsistent dimensions",
+            )
+        members: list[list[tuple[float, ...]]] = [
+            [] for _ in range(clusters.count)
+        ]
+        for vector, assignment in zip(
+            normalized_embeddings,
+            clusters.assignments,
+        ):
+            members[assignment].append(vector)
+        if any(not cluster_members for cluster_members in members):
+            raise WorkerError(
+                "CONTEXT_IDENTITY_EVIDENCE_INVALID",
+                "canonical speaker profile has no acoustic evidence",
+            )
+        centroids = tuple(
+            _mean_vector(cluster_members, dimension)
+            for cluster_members in members
+        )
+
+        contextual_scores: dict[str, tuple[float, ...]] = {}
+        contextual_assignments: dict[str, int] = {}
+        contextual_margins: dict[str, float] = {}
+        identity_by_id: dict[str, SpeakerIdentityWindow] = {}
+        for identity in identity_windows:
+            if len(identity.vector) != dimension:
+                raise WorkerError(
+                    "CONTEXT_IDENTITY_EVIDENCE_INVALID",
+                    "contextual and clustering embeddings have different dimensions",
+                    details={"identityWindowId": identity.window_id},
+                )
+            vector = _normalize(identity.vector)
+            scores = tuple(
+                max(-1.0, min(1.0, _dot(vector, centroid)))
+                for centroid in centroids
+            )
+            ranked = sorted(
+                enumerate(scores),
+                key=lambda item: (-item[1], item[0]),
+            )
+            contextual_scores[identity.window_id] = scores
+            contextual_assignments[identity.window_id] = ranked[0][0]
+            contextual_margins[identity.window_id] = (
+                ranked[0][1] - ranked[1][1]
+                if len(ranked) > 1
+                else 2.0
+            )
+            identity_by_id[identity.window_id] = identity
+
+        proposals_by_split: dict[int, dict[str, Any]] = {}
+        seen_refinements: set[str] = set()
+        for window in prepared.windows:
+            refinement = window.metadata.get("speakerChangeRefinement")
+            if not isinstance(refinement, Mapping):
+                continue
+            refinement_key = _digest(refinement)
+            if refinement_key in seen_refinements:
+                continue
+            seen_refinements.add(refinement_key)
+            plans = refinement.get("plans")
+            if not isinstance(plans, Mapping):
+                continue
+            for resolution in ("fine", "context"):
+                plan = plans.get(resolution)
+                raw_proposals = (
+                    plan.get("proposals")
+                    if isinstance(plan, Mapping)
+                    else None
+                )
+                if not isinstance(raw_proposals, Sequence) or isinstance(
+                    raw_proposals,
+                    (str, bytes, bytearray),
+                ):
+                    continue
+                for raw in raw_proposals:
+                    if not isinstance(raw, Mapping):
+                        continue
+                    split_ms = raw.get("splitMs")
+                    support = raw.get("supportWindowIds")
+                    if (
+                        isinstance(split_ms, bool)
+                        or not isinstance(split_ms, int)
+                        or raw.get("overlapRisk") is True
+                        or not isinstance(support, Sequence)
+                        or isinstance(support, (str, bytes, bytearray))
+                        or len(support) != 2
+                        or any(
+                            not isinstance(item, str)
+                            or item not in identity_by_id
+                            or identity_by_id[item].resolution != resolution
+                            for item in support
+                        )
+                    ):
+                        continue
+                    left_id, right_id = str(support[0]), str(support[1])
+                    if (
+                        contextual_assignments[left_id]
+                        == contextual_assignments[right_id]
+                        or contextual_margins[left_id]
+                        < self.config.low_margin_threshold
+                        or contextual_margins[right_id]
+                        < self.config.low_margin_threshold
+                    ):
+                        continue
+                    change_score = raw.get("changeScore", 0.0)
+                    acoustic_confidence = raw.get(
+                        "acousticConfidence",
+                        0.0,
+                    )
+                    if (
+                        isinstance(change_score, bool)
+                        or not isinstance(change_score, (int, float))
+                        or not math.isfinite(float(change_score))
+                        or isinstance(acoustic_confidence, bool)
+                        or not isinstance(
+                            acoustic_confidence,
+                            (int, float),
+                        )
+                        or not math.isfinite(float(acoustic_confidence))
+                    ):
+                        continue
+                    candidate = {
+                        "splitMs": split_ms,
+                        "proposalId": str(raw.get("proposalId") or ""),
+                        "resolution": resolution,
+                        "leftIdentityWindowId": left_id,
+                        "rightIdentityWindowId": right_id,
+                        "leftSpeakerId": (
+                            f"speaker-{contextual_assignments[left_id] + 1}"
+                        ),
+                        "rightSpeakerId": (
+                            f"speaker-{contextual_assignments[right_id] + 1}"
+                        ),
+                        "leftMargin": contextual_margins[left_id],
+                        "rightMargin": contextual_margins[right_id],
+                        "changeScore": float(change_score),
+                        "acousticConfidence": float(acoustic_confidence),
+                        "applyAutomatically": (
+                            raw.get("applyAutomatically") is True
+                        ),
+                        "reviewStatus": str(
+                            raw.get("reviewStatus") or "REVIEW_REQUIRED"
+                        ),
+                    }
+                    current = proposals_by_split.get(split_ms)
+                    if current is None or (
+                        candidate["applyAutomatically"],
+                        candidate["acousticConfidence"],
+                        candidate["changeScore"],
+                        candidate["resolution"] == "context",
+                        candidate["proposalId"],
+                    ) > (
+                        current["applyAutomatically"],
+                        current["acousticConfidence"],
+                        current["changeScore"],
+                        current["resolution"] == "context",
+                        current["proposalId"],
+                    ):
+                        proposals_by_split[split_ms] = candidate
+
+        if not proposals_by_split:
+            metrics.set_policy(
+                contextualTurnProjectionApplied=False,
+                contextualTurnProjectionReason="NO_IDENTITY_CHANGING_CONTEXT_PROPOSALS",
+            )
+            return None
+
+        source_hypotheses = {
+            window.window_id: hypothesis
+            for window, hypothesis in zip(prepared.windows, asr)
+        }
+        output_windows: list[SpeechWindow] = []
+        output_scores: list[tuple[float, ...]] = []
+        output_assignments: list[int] = []
+        output_embeddings: list[EmbeddingRecord] = []
+        output_overlap: list[OverlapDecision] = []
+        selected_proposal_ids: list[str] = []
+        added_boundary_count = 0
+
+        for source_index, (
+            source,
+            source_embedding,
+            source_overlap,
+        ) in enumerate(zip(prepared.windows, embeddings, overlap)):
+            hypothesis = source_hypotheses[source.window_id]
+            raw_timestamps = hypothesis.evidence.get("timestamps")
+            token_midpoints = sorted(
+                (
+                    (int(item["startMs"]) + int(item["endMs"])) // 2
+                    for item in raw_timestamps
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("startMs"), int)
+                    and not isinstance(item.get("startMs"), bool)
+                    and isinstance(item.get("endMs"), int)
+                    and not isinstance(item.get("endMs"), bool)
+                )
+                if isinstance(raw_timestamps, list)
+                else ()
+            )
+            candidates = [
+                proposal
+                for split_ms, proposal in sorted(proposals_by_split.items())
+                if (
+                    source.start_ms
+                    + _MIN_SPEAKER_COUNT_PARTITION_MS
+                    <= split_ms
+                    <= source.end_ms
+                    - _MIN_SPEAKER_COUNT_PARTITION_MS
+                )
+            ]
+            accepted: list[dict[str, Any]] = []
+            cursor = source.start_ms
+            if not source.locked_speaker_id:
+                for proposal in candidates:
+                    split_ms = int(proposal["splitMs"])
+                    if (
+                        split_ms - cursor
+                        < _MIN_SPEAKER_COUNT_PARTITION_MS
+                        or not any(
+                            cursor <= midpoint < split_ms
+                            for midpoint in token_midpoints
+                        )
+                        or not any(
+                            split_ms <= midpoint <= source.end_ms
+                            for midpoint in token_midpoints
+                        )
+                    ):
+                        continue
+                    accepted.append(proposal)
+                    cursor = split_ms
+            boundaries = (
+                source.start_ms,
+                *(int(item["splitMs"]) for item in accepted),
+                source.end_ms,
+            )
+            added_boundary_count += len(accepted)
+            selected_proposal_ids.extend(
+                str(item["proposalId"])
+                for item in accepted
+                if item["proposalId"]
+            )
+
+            for child_index, (start_ms, end_ms) in enumerate(
+                zip(boundaries, boundaries[1:]),
+                start=1,
+            ):
+                child_id = (
+                    source.window_id
+                    if len(boundaries) == 2
+                    else f"{source.window_id}.turn-{child_index:02d}"
+                )
+                weighted_scores_by_resolution = {
+                    "fine": [0.0] * clusters.count,
+                    "context": [0.0] * clusters.count,
+                }
+                total_weight_by_resolution = {
+                    "fine": 0.0,
+                    "context": 0.0,
+                }
+                supporting_ids: list[str] = []
+                for identity in identity_windows:
+                    overlap_ms = min(end_ms, identity.end_ms) - max(
+                        start_ms,
+                        identity.start_ms,
+                    )
+                    if overlap_ms <= 0:
+                        continue
+                    weight = overlap_ms * identity.confidence
+                    total_weight_by_resolution[identity.resolution] += weight
+                    supporting_ids.append(identity.window_id)
+                    for score_index, score in enumerate(
+                        contextual_scores[identity.window_id]
+                    ):
+                        weighted_scores_by_resolution[
+                            identity.resolution
+                        ][score_index] += weight * score
+                resolution_scores = {
+                    resolution: tuple(
+                        value / total_weight_by_resolution[resolution]
+                        for value in weighted_scores
+                    )
+                    for resolution, weighted_scores
+                    in weighted_scores_by_resolution.items()
+                    if total_weight_by_resolution[resolution] > 0.0
+                }
+                if resolution_scores:
+                    score_row = tuple(
+                        sum(
+                            scores[score_index]
+                            for scores in resolution_scores.values()
+                        )
+                        / len(resolution_scores)
+                        for score_index in range(clusters.count)
+                    )
+                else:
+                    score_row = clusters.scores[source_index]
+                ranked = sorted(
+                    enumerate(score_row),
+                    key=lambda item: (-item[1], item[0]),
+                )
+                contextual_assignment = ranked[0][0]
+                contextual_margin = (
+                    ranked[0][1] - ranked[1][1]
+                    if len(ranked) > 1
+                    else 2.0
+                )
+                inherited = (
+                    source.locked_speaker_id is not None
+                    or contextual_margin < self.config.low_margin_threshold
+                )
+                assignment = (
+                    clusters.assignments[source_index]
+                    if inherited
+                    else contextual_assignment
+                )
+                source_partition = source.metadata.get(
+                    "speakerCountPartition"
+                )
+                partition = (
+                    dict(source_partition)
+                    if isinstance(source_partition, Mapping)
+                    else {}
+                )
+                original_partition_source = partition.get("sourceWindowId")
+                partition.update(
+                    {
+                        "sourceWindowId": source.window_id,
+                        "identityEvidenceSourceWindowId": (
+                            original_partition_source
+                        ),
+                    }
+                )
+                left_proposal = (
+                    accepted[child_index - 2]
+                    if child_index > 1
+                    else None
+                )
+                right_proposal = (
+                    accepted[child_index - 1]
+                    if child_index <= len(accepted)
+                    else None
+                )
+                projection = {
+                    "method": "multiresolution-voiceprint-output-turn-v2",
+                    "sourceWindowId": source.window_id,
+                    "sourceSpeakerId": (
+                        f"speaker-{clusters.assignments[source_index] + 1}"
+                    ),
+                    "projectedSpeakerId": f"speaker-{assignment + 1}",
+                    "supportingIdentityWindowIds": supporting_ids,
+                    "contextualScores": {
+                        f"speaker-{index + 1}": round(score, 9)
+                        for index, score in enumerate(score_row)
+                    },
+                    "resolutionScores": {
+                        resolution: {
+                            f"speaker-{index + 1}": round(score, 9)
+                            for index, score in enumerate(scores)
+                        }
+                        for resolution, scores in sorted(
+                            resolution_scores.items()
+                        )
+                    },
+                    "contextualMargin": round(contextual_margin, 9),
+                    "minimumMargin": self.config.low_margin_threshold,
+                    "assignmentInherited": inherited,
+                    "leftBoundaryProposalId": (
+                        left_proposal["proposalId"]
+                        if left_proposal is not None
+                        else None
+                    ),
+                    "rightBoundaryProposalId": (
+                        right_proposal["proposalId"]
+                        if right_proposal is not None
+                        else None
+                    ),
+                    "reviewStatus": "REVIEW_REQUIRED",
+                    "sourceTextMutable": False,
+                }
+                metadata = {
+                    **dict(source.metadata),
+                    "turnId": (
+                        f"turn:context:{source.window_id}:"
+                        f"{start_ms}-{end_ms}"
+                    ),
+                    "speakerCountPartition": partition,
+                    "speakerTurnProjection": projection,
+                }
+                child = SpeechWindow(
+                    window_id=child_id,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    boundary_conflict=source.boundary_conflict,
+                    locked_speaker_id=source.locked_speaker_id,
+                    metadata=metadata,
+                )
+                output_windows.append(child)
+                output_scores.append(score_row)
+                output_assignments.append(assignment)
+                output_embeddings.append(
+                    EmbeddingRecord(
+                        window_id=child_id,
+                        vector=source_embedding.vector,
+                        confidence=min(
+                            source_embedding.confidence,
+                            max(
+                                identity_by_id[item].confidence
+                                for item in supporting_ids
+                            )
+                            if supporting_ids
+                            else source_embedding.confidence,
+                        ),
+                        evidence={
+                            **dict(source_embedding.evidence),
+                            "turnProjection": projection,
+                        },
+                    )
+                )
+                output_overlap.append(
+                    self._clip_overlap_evidence(
+                        source_overlap,
+                        target=child,
+                    )
+                )
+
+        if added_boundary_count < 1:
+            metrics.set_policy(
+                contextualTurnProjectionApplied=False,
+                contextualTurnProjectionReason="NO_TOKEN_SAFE_CONTEXT_BOUNDARIES",
+            )
+            return None
+        expected_assignments = set(clusters.assignments)
+        if set(output_assignments) != expected_assignments:
+            metrics.set_policy(
+                contextualTurnProjectionApplied=False,
+                contextualTurnProjectionReason="CARDINALITY_PRESERVATION_BLOCKED",
+                contextualTurnProjectionCandidateBoundaries=added_boundary_count,
+            )
+            return None
+
+        output_prepared = replace(
+            prepared,
+            windows=tuple(output_windows),
+        )
+        output_asr = self._project_asr_to_speaker_windows(
+            source_windows=prepared.windows,
+            source_hypotheses=asr,
+            target_windows=output_windows,
+            metrics=metrics,
+        )
+        if any(
+            hypothesis.evidence.get("disposition")
+            == _ASR_NON_LEXICAL_DISPOSITION
+            for hypothesis in output_asr
+        ):
+            metrics.set_policy(
+                contextualTurnProjectionApplied=False,
+                contextualTurnProjectionReason="TOKEN_PROJECTION_EMPTY_CHILD",
+            )
+            return None
+
+        metrics.record_stage(
+            "contextual-turn-projection",
+            (time.perf_counter() - started) * 1000.0,
+        )
+        metrics.set_policy(
+            contextualTurnProjectionApplied=True,
+            contextualTurnProjectionReason=(
+                "ACOUSTIC_MULTIRESOLUTION_IDENTITY_CHANGE"
+            ),
+            contextualTurnProjectionSourceWindows=len(prepared.windows),
+            contextualTurnProjectionOutputWindows=len(output_windows),
+            contextualTurnProjectionAddedBoundaries=added_boundary_count,
+            contextualTurnProjectionSelectedProposalIds="|".join(
+                sorted(set(selected_proposal_ids))
+            ),
+        )
+        return (
+            output_prepared,
+            output_asr,
+            output_embeddings,
+            output_overlap,
+            replace(
+                clusters,
+                assignments=tuple(output_assignments),
+                scores=tuple(output_scores),
+            ),
+        )
+
     def _window_stage(
         self,
         *,
@@ -5704,6 +6440,9 @@ class SpeakerPipeline:
             count_partition_evidence = window.metadata.get(
                 "speakerCountPartition"
             )
+            turn_projection_evidence = window.metadata.get(
+                "speakerTurnProjection"
+            )
             revisions: list[Revision] = []
             if normalized_text != raw_text:
                 revisions.append(
@@ -5784,6 +6523,18 @@ class SpeakerPipeline:
                             }
                             if isinstance(
                                 count_partition_evidence,
+                                Mapping,
+                            )
+                            else {}
+                        ),
+                        **(
+                            {
+                                "speakerTurnProjection": dict(
+                                    turn_projection_evidence
+                                )
+                            }
+                            if isinstance(
+                                turn_projection_evidence,
                                 Mapping,
                             )
                             else {}
@@ -6483,8 +7234,9 @@ class SpeakerPipeline:
             )
 
         ordered_local = sorted(local_speakers)
-        if len(ordered_local) != len(canonical_speakers):
+        if len(ordered_local) > len(canonical_speakers):
             return tuple(segments)
+        complete_cardinality = len(ordered_local) == len(canonical_speakers)
         local_index = {
             speaker_id: index for index, speaker_id in enumerate(ordered_local)
         }
@@ -6537,7 +7289,7 @@ class SpeakerPipeline:
                     alternative_score,
                     self._assignment_score(weights, candidate),
                 )
-        if len(ordered_local) == 1:
+        if len(ordered_local) == len(canonical_speakers) == 1:
             mapping_margin = 1.0
             alternative_score_value: float | None = None
         else:
@@ -6553,8 +7305,19 @@ class SpeakerPipeline:
             ordered_local[row]: canonical_speakers[column]
             for row, column in assignment
         }
-        mapping_accepted = (
-            mapping_margin >= self.config.pyannote_mapping_margin_threshold
+        margin_accepted = (
+            mapping_margin
+            >= self.config.pyannote_mapping_margin_threshold
+        )
+        mapping_accepted = complete_cardinality and margin_accepted
+        partial_mapping_accepted = (
+            not complete_cardinality and margin_accepted
+        )
+        unmatched_canonical = sorted(
+            set(canonical_speakers) - set(mapping.values()),
+            key=lambda speaker_id: (
+                _speaker_number(speaker_id) or math.inf
+            ),
         )
         mapping_evidence = {
             "provider": {
@@ -6563,7 +7326,14 @@ class SpeakerPipeline:
                     getattr(self.pyannote_adapter, "version", "unknown")
                 ),
             },
-            "method": "global-duration-weighted-acoustic-hungarian-v1",
+            "method": (
+                "global-duration-weighted-acoustic-hungarian-v1"
+                if complete_cardinality
+                else (
+                    "global-duration-weighted-acoustic-"
+                    "rectangular-hungarian-v1"
+                )
+            ),
             "mapping": dict(sorted(mapping.items())),
             "weights": {
                 ordered_local[row]: {
@@ -6587,6 +7357,12 @@ class SpeakerPipeline:
                 self.config.pyannote_primary_dominance_threshold
             ),
             "accepted": mapping_accepted,
+            "partialAccepted": partial_mapping_accepted,
+            "completeCanonicalBijection": complete_cardinality,
+            "observedLocalSpeakerCount": len(ordered_local),
+            "canonicalSpeakerCount": len(canonical_speakers),
+            "unmatchedCanonicalSpeakerIds": unmatched_canonical,
+            "authoritativeTimelineEligible": mapping_accepted,
         }
 
         proposed: list[TranscriptSegment] = []
@@ -6595,6 +7371,8 @@ class SpeakerPipeline:
             exclusive_local_durations: dict[str, int] = {}
             canonical_turns: list[dict[str, Any]] = []
             canonical_exclusive_turns: list[dict[str, Any]] = []
+            partial_canonical_turns: list[dict[str, Any]] = []
+            partial_canonical_exclusive_turns: list[dict[str, Any]] = []
             for turn in turns_by_segment[segment.segment_id]:
                 local_speaker = str(turn["localSpeaker"]).strip()
                 duration_ms = int(turn["endMs"]) - int(turn["startMs"])
@@ -6610,7 +7388,19 @@ class SpeakerPipeline:
                             "localSpeaker": local_speaker,
                         }
                     )
-            if mapping_accepted and native_exclusive_available:
+                elif partial_mapping_accepted:
+                    partial_canonical_turns.append(
+                        {
+                            "startMs": int(turn["startMs"]),
+                            "endMs": int(turn["endMs"]),
+                            "speakerId": mapping[local_speaker],
+                            "localSpeaker": local_speaker,
+                        }
+                    )
+            if (
+                (mapping_accepted or partial_mapping_accepted)
+                and native_exclusive_available
+            ):
                 for turn in exclusive_turns_by_segment[segment.segment_id]:
                     local_speaker = str(turn["localSpeaker"]).strip()
                     if local_speaker not in mapping:
@@ -6618,7 +7408,12 @@ class SpeakerPipeline:
                             "SPEAKER_TIMELINE_INVALID",
                             "pyannote exclusive timeline contains an unmapped speaker",
                         )
-                    canonical_exclusive_turns.append(
+                    destination = (
+                        canonical_exclusive_turns
+                        if mapping_accepted
+                        else partial_canonical_exclusive_turns
+                    )
+                    destination.append(
                         {
                             "startMs": int(turn["startMs"]),
                             "endMs": int(turn["endMs"]),
@@ -6653,8 +7448,12 @@ class SpeakerPipeline:
                 else segment.speaker_id
             )
             blockers: list[str] = []
-            if not mapping_accepted:
+            if not margin_accepted:
                 blockers.append("PYANNOTE_MAPPING_MARGIN_BELOW_THRESHOLD")
+            if not complete_cardinality:
+                blockers.append(
+                    "PYANNOTE_CANONICAL_CARDINALITY_MISMATCH"
+                )
             if dominant_local is None:
                 blockers.append("PYANNOTE_NO_LOCAL_SPEECH")
             if (
@@ -6693,6 +7492,14 @@ class SpeakerPipeline:
                     overlap["canonicalExclusiveSpeakerTurns"] = (
                         canonical_exclusive_turns
                     )
+            if partial_mapping_accepted:
+                overlap["partialCanonicalSpeakerTurns"] = (
+                    partial_canonical_turns
+                )
+                if native_exclusive_available:
+                    overlap["partialCanonicalExclusiveSpeakerTurns"] = (
+                        partial_canonical_exclusive_turns
+                    )
             proposed.append(
                 replace(
                     segment,
@@ -6716,6 +7523,12 @@ class SpeakerPipeline:
                             ),
                             "dominantLocalSpeaker": dominant_local,
                             "dominance": round(dominance, 9),
+                            "partialCanonicalSpeakerTurns": (
+                                partial_canonical_turns
+                            ),
+                            "partialCanonicalExclusiveSpeakerTurns": (
+                                partial_canonical_exclusive_turns
+                            ),
                             "beforeSpeakerId": segment.speaker_id,
                             "afterSpeakerId": (
                                 target_speaker if applied else segment.speaker_id
@@ -7011,6 +7824,15 @@ class SpeakerPipeline:
                     reasons.append("COUNT_UNCERTAINTY")
             if segment.overlapping:
                 reasons.append("OVERLAP")
+            pyannote_mapping = segment.evidence.get(
+                "pyannoteCanonicalMapping"
+            )
+            if (
+                isinstance(pyannote_mapping, Mapping)
+                and pyannote_mapping.get("partialAccepted") is True
+                and pyannote_mapping.get("accepted") is not True
+            ):
+                reasons.append("PYANNOTE_PARTIAL_MAPPING")
             refinement_evidence = segment.evidence.get(
                 "speakerChangeRefinement"
             )
@@ -8359,6 +9181,22 @@ class SpeakerPipeline:
             prepared, embeddings, overlap, request, metrics
         )
         metrics.set_policy(resolvedSpeakerCount=clusters.count)
+        contextual_projection = self._project_contextual_speaker_turns(
+            prepared=prepared,
+            asr=asr,
+            embeddings=embeddings,
+            overlap=overlap,
+            clusters=clusters,
+            metrics=metrics,
+        )
+        if contextual_projection is not None:
+            (
+                prepared,
+                asr,
+                embeddings,
+                overlap,
+                clusters,
+            ) = contextual_projection
         segments = self._initial_segments(
             prepared,
             asr,

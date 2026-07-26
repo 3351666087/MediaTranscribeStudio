@@ -1364,6 +1364,33 @@ class ProductionRunnerTests(unittest.TestCase):
             [item.window_id for item in full_turn_embeddings],
             ["vad-1.sc01", "vad-1.sc02", "vad-1.sc03"],
         )
+        self.assertEqual(
+            [
+                (
+                    item.source_window_id,
+                    item.start_ms,
+                    item.end_ms,
+                    item.resolution,
+                )
+                for item in refined.speaker_identity_windows
+            ],
+            [
+                ("vad-1", 0, 1_200, "fine"),
+                ("vad-1", 0, 3_000, "context"),
+                ("vad-1", 375, 1_575, "fine"),
+                ("vad-1", 600, 3_600, "context"),
+                ("vad-1", 750, 1_950, "fine"),
+                ("vad-1", 1_125, 2_325, "fine"),
+                ("vad-1", 1_500, 2_700, "fine"),
+                ("vad-1", 1_875, 3_075, "fine"),
+                ("vad-1", 2_250, 3_450, "fine"),
+                ("vad-1", 2_400, 3_600, "fine"),
+            ],
+        )
+        self.assertEqual(
+            PreparedAudio.from_mapping(refined.as_dict()),
+            refined,
+        )
         for left, right in zip(refined.windows, refined.windows[1:]):
             self.assertEqual(left.end_ms, right.start_ms)
         evidence = refined.windows[0].metadata[

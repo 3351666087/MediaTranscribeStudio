@@ -37,6 +37,7 @@ from backend.speaker_pipeline import (
     PreparedAudio,
     ReviewProposal,
     ReviewCandidate,
+    SpeakerIdentityWindow,
     SpeakerPipeline,
     SpeakerPipelineConfig,
     SpeechWindow,
@@ -250,6 +251,69 @@ class FakeCamPlusAdapter:
                 )
             )
         return output
+
+
+class ContextualTurnCamPlusAdapter(FakeCamPlusAdapter):
+    version = "contextual-turn-fixture-v1"
+
+    def refinement_identity(self):
+        return {"method": self.version}
+
+    def refine_windows(self, prepared, context):
+        context.raise_if_cancelled()
+        proposal = {
+            "proposalId": "context-change-1000",
+            "splitMs": 1_000,
+            "supportWindowIds": ["context-left", "context-right"],
+            "changeScore": 0.8,
+            "acousticConfidence": 0.9,
+            "applyAutomatically": False,
+            "overlapRisk": False,
+            "reviewStatus": "REVIEW_REQUIRED",
+        }
+        refinement = {
+            "reviewRequired": True,
+            "plans": {
+                "context": {"proposals": [proposal]},
+                "fine": {"proposals": []},
+            },
+        }
+        return replace(
+            prepared,
+            windows=tuple(
+                replace(
+                    window,
+                    metadata={
+                        **dict(window.metadata),
+                        "speakerChangeRefinement": refinement,
+                    },
+                )
+                for window in prepared.windows
+            ),
+            speaker_identity_windows=(
+                SpeakerIdentityWindow(
+                    "context-left",
+                    "window-1",
+                    0,
+                    1_200,
+                    (1.0, 0.0),
+                ),
+                SpeakerIdentityWindow(
+                    "context-right",
+                    "window-1",
+                    800,
+                    2_000,
+                    (0.0, 1.0),
+                ),
+                SpeakerIdentityWindow(
+                    "context-second",
+                    "window-2",
+                    2_000,
+                    4_000,
+                    (0.0, 1.0),
+                ),
+            ),
+        )
 
 
 class FakeOverlapAdapter:
@@ -1099,6 +1163,125 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             pipeline._build_pyannote_speaker_timeline(
                 locked_mapping,
                 duration_ms=4_500,
+            )
+        )
+
+    def test_partial_pyannote_mapping_is_review_evidence_not_authority(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(
+            3,
+            secondary=FakeSecondaryVerifier(),
+            pyannote=FakePyannoteAudit(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+        base = (
+            self.transcript_segment(
+                "one",
+                0,
+                1_000,
+                "speaker-1",
+                scores=(
+                    ("speaker-1", 1.0),
+                    ("speaker-2", 0.0),
+                    ("speaker-3", 0.0),
+                ),
+            ),
+            self.transcript_segment(
+                "two",
+                1_000,
+                3_000,
+                "speaker-2",
+                scores=(
+                    ("speaker-1", 0.0),
+                    ("speaker-2", 1.0),
+                    ("speaker-3", 0.0),
+                ),
+            ),
+            self.transcript_segment(
+                "three",
+                3_000,
+                3_500,
+                "speaker-3",
+                scores=(
+                    ("speaker-1", 0.0),
+                    ("speaker-2", 0.0),
+                    ("speaker-3", 1.0),
+                ),
+            ),
+        )
+        local_by_segment = {
+            "one": "LOCAL_A",
+            "two": "LOCAL_B",
+            "three": "LOCAL_B",
+        }
+        segments = tuple(
+            replace(
+                segment,
+                evidence={
+                    **dict(segment.evidence),
+                    "overlap": {
+                        "provider": {
+                            "id": "pyannote-community-1",
+                            "version": "2.0.0",
+                        },
+                        "speakerTurns": [
+                            {
+                                "startMs": segment.start_ms,
+                                "endMs": segment.end_ms,
+                                "localSpeaker": local_by_segment[
+                                    segment.segment_id
+                                ],
+                            }
+                        ],
+                        "exclusiveSpeakerTurns": [
+                            {
+                                "startMs": segment.start_ms,
+                                "endMs": segment.end_ms,
+                                "localSpeaker": local_by_segment[
+                                    segment.segment_id
+                                ],
+                            }
+                        ],
+                        "overlapIntervals": [],
+                    },
+                },
+            )
+            for segment in base
+        )
+
+        mapped = pipeline._apply_pyannote_canonical_mapping(segments)
+
+        self.assertEqual(
+            [segment.speaker_id for segment in mapped],
+            ["speaker-1", "speaker-2", "speaker-3"],
+        )
+        for segment in mapped:
+            evidence = segment.evidence["pyannoteCanonicalMapping"]
+            self.assertFalse(evidence["accepted"])
+            self.assertTrue(evidence["partialAccepted"])
+            self.assertFalse(evidence["completeCanonicalBijection"])
+            self.assertFalse(evidence["authoritativeTimelineEligible"])
+            self.assertEqual(
+                evidence["unmatchedCanonicalSpeakerIds"],
+                ["speaker-3"],
+            )
+            self.assertIn(
+                "PYANNOTE_CANONICAL_CARDINALITY_MISMATCH",
+                evidence["blockers"],
+            )
+            self.assertNotIn(
+                "canonicalSpeakerTurns",
+                segment.evidence["overlap"],
+            )
+            self.assertIn(
+                "partialCanonicalSpeakerTurns",
+                segment.evidence["overlap"],
+            )
+        self.assertIsNone(
+            pipeline._build_pyannote_speaker_timeline(
+                mapped,
+                duration_ms=3_500,
             )
         )
 
@@ -1983,6 +2166,89 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         )
         self.assertTrue(
             result.pipeline_metrics["policy"]["speakerCountPartitionApplied"]
+        )
+
+    def test_context_identity_windows_project_output_turns_without_reembedding(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(
+            2,
+            window_ranges={
+                "window-1": (0, 2_000),
+                "window-2": (2_000, 4_000),
+            },
+        )
+        cam = ContextualTurnCamPlusAdapter(2)
+        pipeline, _, asr, _, overlap = self.pipeline(
+            2,
+            preparation=preparation,
+            cam=cam,
+        )
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", job_id="context-output-turns"),
+            self.context("context-output-turns"),
+        )
+
+        self.assertEqual(
+            [
+                (segment.start_ms, segment.end_ms, segment.speaker_id)
+                for segment in result.segments
+            ],
+            [
+                (0, 1_000, "speaker-1"),
+                (1_000, 2_000, "speaker-2"),
+                (2_000, 4_000, "speaker-2"),
+            ],
+        )
+        self.assertEqual(
+            [segment.raw_text for segment in result.segments],
+            ["词1", "词2", "词1 词2"],
+        )
+        self.assertEqual(asr.calls, [("window-1", "window-2")])
+        self.assertEqual(
+            cam.calls,
+            [("window-1", "window-2")],
+        )
+        self.assertEqual(
+            overlap.calls,
+            [("window-1", "window-2")],
+        )
+        policy = result.pipeline_metrics["policy"]
+        self.assertTrue(policy["contextualTurnProjectionApplied"])
+        self.assertEqual(
+            policy["contextualTurnProjectionAddedBoundaries"],
+            1,
+        )
+        self.assertEqual(
+            policy["contextualTurnProjectionSelectedProposalIds"],
+            "context-change-1000",
+        )
+        for segment in result.segments[:2]:
+            evidence = segment.evidence["speakerTurnProjection"]
+            self.assertEqual(
+                evidence["method"],
+                "multiresolution-voiceprint-output-turn-v2",
+            )
+            self.assertEqual(
+                sorted(evidence["resolutionScores"]),
+                ["context"],
+            )
+            self.assertFalse(evidence["sourceTextMutable"])
+            self.assertEqual(evidence["reviewStatus"], "REVIEW_REQUIRED")
+
+        prepared = preparation.prepare(
+            self.source,
+            normalization_profile="mono-16khz-f32-v1",
+            context=self.context("context-round-trip"),
+        )
+        refined = cam.refine_windows(
+            prepared,
+            self.context("context-round-trip"),
+        )
+        self.assertEqual(
+            PreparedAudio.from_mapping(refined.as_dict()),
+            refined,
         )
 
     def test_constrained_count_uses_acoustic_boundaries_without_extra_windows(

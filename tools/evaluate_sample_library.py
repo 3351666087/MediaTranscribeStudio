@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -517,6 +518,148 @@ def _diarization_quality(
     )
 
 
+def _native_full_timeline_quality(
+    *,
+    case: dict[str, Any],
+    segments: Sequence[dict[str, Any]],
+    duration_ms: int | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Score an immutable model-native timeline before canonical mapping."""
+
+    snapshots: list[Mapping[str, Any]] = []
+    for segment in segments:
+        if not isinstance(segment, Mapping):
+            continue
+        evidence = segment.get("evidence")
+        overlap = evidence.get("overlap") if isinstance(evidence, Mapping) else None
+        snapshot = (
+            overlap.get("fullTimelineInference")
+            if isinstance(overlap, Mapping)
+            else None
+        )
+        if snapshot is not None:
+            if not isinstance(snapshot, Mapping):
+                raise ValueError("model-native full timeline must be an object")
+            snapshots.append(snapshot)
+    if not snapshots:
+        return None, None
+    if (
+        isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 1
+        or len(snapshots) != len(segments)
+    ):
+        raise ValueError(
+            "model-native full timeline requires complete segment coverage "
+            "and transcript duration"
+        )
+
+    serialized = {
+        json.dumps(
+            snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for snapshot in snapshots
+    }
+    if len(serialized) != 1:
+        raise ValueError("model-native full timeline snapshots must be immutable")
+    snapshot = snapshots[0]
+    turns = snapshot.get("speakerTurns")
+    local_speakers = snapshot.get("localSpeakers")
+    declared_hash = snapshot.get("speakerTurnsSha256")
+    if (
+        snapshot.get("scope") != "full-normalized-timeline"
+        or snapshot.get("startMs") != 0
+        or snapshot.get("endMs") != duration_ms
+        or not isinstance(turns, list)
+        or not turns
+        or snapshot.get("turnCount") != len(turns)
+        or not isinstance(local_speakers, list)
+        or not local_speakers
+        or snapshot.get("localSpeakerCount") != len(local_speakers)
+        or not isinstance(declared_hash, str)
+    ):
+        raise ValueError("model-native full timeline metadata is invalid")
+    serialized_turns = json.dumps(
+        turns,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if hashlib.sha256(serialized_turns).hexdigest() != declared_hash:
+        raise ValueError("model-native full timeline hash is invalid")
+
+    predicted: list[dict[str, Any]] = []
+    observed_speakers: set[str] = set()
+    previous_start = -1
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, Mapping):
+            raise ValueError("model-native full timeline turn is invalid")
+        start_ms = turn.get("startMs")
+        end_ms = turn.get("endMs")
+        speaker_id = turn.get("localSpeaker")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or start_ms < previous_start
+            or start_ms < 0
+            or end_ms <= start_ms
+            or end_ms > duration_ms
+            or not isinstance(speaker_id, str)
+            or not speaker_id.strip()
+        ):
+            raise ValueError(
+                f"model-native full timeline turn {index} is invalid"
+            )
+        previous_start = start_ms
+        observed_speakers.add(speaker_id.strip())
+        predicted.append(
+            {
+                "startMs": start_ms,
+                "endMs": end_ms,
+                "speakerId": speaker_id.strip(),
+            }
+        )
+    if sorted(observed_speakers) != local_speakers:
+        raise ValueError(
+            "model-native full timeline speaker inventory is invalid"
+        )
+
+    diarization, boundary = _diarization_quality(case, predicted)
+    expected_count = case.get("expectedSpeakerCount")
+    count_eligible = (
+        isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and expected_count > 0
+        and (
+            not isinstance(case.get("truthEligibility"), Mapping)
+            or case["truthEligibility"].get("speakerCount") is not False
+        )
+    )
+    quality = {
+        "authority": "model-native-full-timeline-unmapped",
+        "localSpeakerCount": len(local_speakers),
+        "expectedSpeakerCount": expected_count,
+        "speakerCountAbsoluteError": (
+            abs(len(local_speakers) - expected_count)
+            if count_eligible
+            else None
+        ),
+        "speakerCountMatch": (
+            len(local_speakers) == expected_count if count_eligible else None
+        ),
+        "turnCount": len(turns),
+        "speakerTurnsSha256": declared_hash,
+        "speakerCountConstraints": snapshot.get("speakerCountConstraints"),
+        **(diarization or {}),
+    }
+    return quality, boundary
+
+
 def evaluate_case(
     *,
     case: dict[str, Any],
@@ -623,6 +766,15 @@ def evaluate_case(
         segments,
         speaker_timeline=speaker_timeline,
     )
+    source = transcript.get("source")
+    duration_ms = (
+        source.get("durationMs") if isinstance(source, Mapping) else None
+    )
+    native_diarization, native_boundary = _native_full_timeline_quality(
+        case=case,
+        segments=segments,
+        duration_ms=duration_ms,
+    )
     base["evidence"] = {
         "transcript": str(transcript_path),
         "segmentCount": len(segments),
@@ -688,6 +840,8 @@ def evaluate_case(
     )
     base["diarizationQuality"] = diarization
     base["boundaryQuality"] = boundary
+    base["nativeDiarizationQuality"] = native_diarization
+    base["nativeBoundaryQuality"] = native_boundary
     base["runtimeQuality"] = _runtime_quality(transcript_path)
     base["reviewQuality"] = _review_quality(transcript_path)
     base["subtitleQuality"] = _subtitle_quality(

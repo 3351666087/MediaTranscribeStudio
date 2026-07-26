@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -328,3 +329,189 @@ def test_reference_language_prompt_is_not_scored_as_detection(
 
     assert report["languageQuality"]["automaticDetectionEligible"] is False
     assert report["languageQuality"]["segmentAccuracy"] is None
+
+
+def test_evaluator_scores_hash_bound_unmapped_model_native_timeline(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "outputs" / "native-timeline"
+    artifact_root.mkdir(parents=True)
+    turns = [
+        {"startMs": 0, "endMs": 1000, "localSpeaker": "SPEAKER_00"},
+        {"startMs": 1000, "endMs": 2000, "localSpeaker": "SPEAKER_01"},
+    ]
+    turns_hash = hashlib.sha256(
+        json.dumps(
+            turns,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    full_timeline = {
+        "scope": "full-normalized-timeline",
+        "startMs": 0,
+        "endMs": 2000,
+        "turnCount": 2,
+        "speakerTurns": turns,
+        "speakerTurnsSha256": turns_hash,
+        "localSpeakerCount": 2,
+        "localSpeakers": ["SPEAKER_00", "SPEAKER_01"],
+        "speakerCountConstraints": {"numSpeakers": 2},
+    }
+    segments = [
+        {
+            "startMs": start_ms,
+            "endMs": end_ms,
+            "speakerId": speaker_id,
+            "displayText": text,
+            "evidence": {
+                "overlap": {"fullTimelineInference": full_timeline}
+            },
+        }
+        for start_ms, end_ms, speaker_id, text in (
+            (0, 1000, "speaker-1", "hello"),
+            (1000, 2000, "speaker-2", "world"),
+        )
+    ]
+    transcript = artifact_root / "transcript-document.v2.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "source": {"durationMs": 2000},
+                "speakerPolicy": {"resolvedCount": 2},
+                "segments": segments,
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "native-timeline-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": [str(transcript)]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = evaluate_case(
+        case={
+            "id": "native-timeline",
+            "expectedSpeakerCount": 2,
+            "turns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                },
+                {
+                    "startSeconds": 1.0,
+                    "endSeconds": 2.0,
+                    "speakerId": "truth-b",
+                },
+            ],
+            "truthEligibility": {
+                "speakerCount": True,
+                "derJer": True,
+                "asr": False,
+            },
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="native-timeline",
+    )
+
+    assert report["nativeDiarizationQuality"] == {
+        "authority": "model-native-full-timeline-unmapped",
+        "localSpeakerCount": 2,
+        "expectedSpeakerCount": 2,
+        "speakerCountAbsoluteError": 0,
+        "speakerCountMatch": True,
+        "turnCount": 2,
+        "speakerTurnsSha256": turns_hash,
+        "speakerCountConstraints": {"numSpeakers": 2},
+        "der": 0.0,
+        "jer": 0.0,
+        "speakerConfusion": 0.0,
+        "overlapF1": 1.0,
+    }
+    assert report["nativeBoundaryQuality"]["maxAbsoluteErrorMs"] == 0
+
+
+def test_evaluator_rejects_tampered_model_native_timeline_hash(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "outputs" / "tampered-native-timeline"
+    artifact_root.mkdir(parents=True)
+    full_timeline = {
+        "scope": "full-normalized-timeline",
+        "startMs": 0,
+        "endMs": 1000,
+        "turnCount": 1,
+        "speakerTurns": [
+            {
+                "startMs": 0,
+                "endMs": 1000,
+                "localSpeaker": "SPEAKER_00",
+            }
+        ],
+        "speakerTurnsSha256": "0" * 64,
+        "localSpeakerCount": 1,
+        "localSpeakers": ["SPEAKER_00"],
+        "speakerCountConstraints": None,
+    }
+    transcript = artifact_root / "transcript-document.v2.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "source": {"durationMs": 1000},
+                "speakerPolicy": {"resolvedCount": 1},
+                "segments": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1000,
+                        "speakerId": "speaker-1",
+                        "displayText": "hello",
+                        "evidence": {
+                            "overlap": {
+                                "fullTimelineInference": full_timeline
+                            }
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "tampered-native-timeline-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": [str(transcript)]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="model-native full timeline hash is invalid",
+    ):
+        evaluate_case(
+            case={
+                "id": "tampered-native-timeline",
+                "expectedSpeakerCount": 1,
+            },
+            result_path=result_path,
+            results_root=tmp_path,
+            worker_output_root=tmp_path / "outputs",
+            artifact_id="tampered-native-timeline",
+        )

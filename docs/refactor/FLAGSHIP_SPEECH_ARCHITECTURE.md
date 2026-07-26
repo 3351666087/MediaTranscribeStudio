@@ -32,7 +32,7 @@
 8. `FireRedASR2S` 是中文和中英代码切换专用挑战者：8B+ LLM / 1B+ AED、20+ 中文方言/口音、100+ 语言 VAD/LID、singing/music 多标签门控和中英 punctuation 均有公开权重与部署代码。`FireRedASR2-LLM` 官方模型卡明确单次输入上限为 40 秒，因此只能在有界切分上评测；它可接管已验证的中文方言、歌声或人声门控分桶，但不能代表 1600+ 语言、任意长音频或任意多人 diarization。
 9. `DiariZen` 是高价值的 Dynamic-N 研究挑战者。独立 196.6 小时五语言比较报告其总体 DER `13.3%`，仅次于托管 PyannoteAI/Precision-2 的 `11.2%`，且 5+ 人分桶 DER `7.1%`；但当前最佳公开权重为 CC BY-NC 4.0，默认商业产品只能研究评测或复用 MIT 代码以许可兼容数据重训，不能打包其权重。
 10. NVIDIA 官方 Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。官方公开 checkpoint 输出维度固定为 4，且在 5 人以上数据上的 DER 明显退化。2026-03 发布的第三方 Apache-2.0 `Ultra Diar Streaming Sortformer 8spk` 由官方 4spk 基模经 2 张 H100 微调与结构修改扩到最多 8 人，可进入隔离研究挑战，但它仍是固定容量、非 NVIDIA 官方权重，且模型卡没有足够的独立跨域结果，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
-11. 本地 LLM 与声学权威完全分离。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。LLM 只能在已有声学 N-best 内做约束重排、术语、翻译、保守润色和证据化报告，不能创建说话人、语言或原音频不存在的文本。
+11. 本地 LLM 与声学模型职责分离，但必须进入联合决策闭环。当前 M4 的下一候选是 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`，资源允许时再评测 `122B-A10B`。第一条语义路径在已有 acoustic top-K speaker states、原生时间线和 ASR token 时间内重排 who-said-what，利用问答关系、未完句连续性、称谓、角色和话题连贯性修复 orchestration 错位；第二条路径在 ASR N-best、强制对齐、术语表和邻接上下文内生成最小语法/同音词修复。LLM 不能创建新说话人、移动声学边界、覆盖重叠轨道、修改 `rawText` 或生成原音频无证据的词，低置信冲突必须 abstain 并进入人工复核。
 
 这些是模型晋级候选，不是发布声明。官方自报指标只用于缩小候选集，最终权威是本项目按数据源、录音、说话人隔离的 held-out 结果。
 
@@ -53,6 +53,8 @@
 | 音频语言识别 | Qwen/Whisper/SpeechBrain VoxLingua107 校准共识 | 未来基于许可兼容数据训练更广 LID head | MMS-LID-4017 是 CC BY-NC 4.0，不能进入默认商业模型包 |
 | 时间对齐 | Qwen3-ForcedAligner-0.6B 的 11 语言支持集 | 每语言 CTC aligner、WhisperX/MFA 候选 | 不支持的语言不得伪造词级时间戳，只能保留段级时间和复核状态 |
 | 重叠说话 | Community-1 多轨活动 + 局部重叠路由 | 经 SI-SDRi 与 tcpWER 验证的局部分离/多说话人 ASR | 当前没有一个成熟开源模型能对任意语言、任意并发人数无条件分离；全场分离会引入伪影 |
+| 语义说话人纠错 | 声学 top-K/候选时间线 + 本地 LLM 约束重排 + transcript-preserving transfer | Qwen3.5-9B/35B；DiarizationLM 仅作英语研究挑战 | 零样本 LLM 可显著恶化 diarization；单 ASR/单数据集微调存在跨 ASR 与跨域回退，不能让语义自由改人 |
+| 语法与同音词修复 | 不可变 `rawText` + ASR N-best/强制对齐/术语证据 + 本地 LLM 最小 patch | 9B 边缘建议、35B/122B 服务器挑战 | “读起来更顺”不证明声学正确；无候选证据的内容词修改只能人工确认 |
 | 文本推理与交付 | M4: Qwen3.5-9B 候选；服务器: 35B-A3B/122B-A10B 候选 | 4B 仅保留已验证的 suggestion-only 业务路径 | 4B 正式基准未达到自动修改门槛；更大参数也不能越过声学证据边界 |
 
 ## 目标数据流
@@ -75,12 +77,15 @@ flowchart TD
   QWEN --> ALIGN["强制对齐或段级时间回退"]
   SPECIALIST --> ALIGN
   OMNI --> ALIGN
-  ALIGN --> NBEST["不可变声学 N-best 与校准置信度"]
+  ALIGN --> NBEST["不可变声学 N-best、token 时间与校准置信度"]
   SEG --> JOINT["MOSS 0.9B / VibeVoice 7B 全局联合挑战"]
   JOINT --> NBEST
-  NBEST --> LLM["本地 LLM 约束重排/术语/翻译/润色/摘要"]
-  LLM --> VALIDATE["schema + 数字/专名/时间/说话人不变量"]
-  VALIDATE --> REVIEW["最小人工复核队列"]
+  FUSION --> SEMANTIC["本地 LLM 语义说话人候选重排"]
+  NBEST --> SEMANTIC
+  SEMANTIC --> TEXTFIX["本地 LLM 最小语法/同音词修复建议"]
+  TEXTFIX --> VALIDATE["候选来源 + 转写保真 + 数字/专名/时间/说话人不变量"]
+  VALIDATE --> BUSINESS["翻译/润色/摘要派生产物"]
+  BUSINESS --> REVIEW["最小人工复核队列"]
   REVIEW --> OUTPUT["转写、字幕、视频交付、Java PDF、质量报告"]
 ```
 
@@ -121,9 +126,11 @@ flowchart TD
 ### 5. 本地 LLM
 
 - 将音频模型全部卸载后再启动/保留 Ollama 推理，当前 16 GB M4 不并驻 Qwen3-ASR、Pyannote 和 9B LLM。
-- 输入是带证据 ID 的 N-best、术语表和不可修改字段；输出必须是版本化 JSON patch 或派生产物。
-- 说话人、时间、源文和 review blocker 默认只读。翻译、润色和摘要是独立文件，不覆盖 `rawText`。
-- 自动应用需按任务和语言分别通过 held-out。`qwen3.5:9b` 参数更多不自动获得权限。
+- 语义说话人路径输入完整相邻 turn、acoustic top-K speaker scores、原生 regular/exclusive 时间线、overlap 状态、ASR token 时间和人工锁；输出只能是对现有 segment/word 的 candidate-state 重排。使用 transcript-preserving speaker transfer 校验词序和词集合不变，禁止新增/删除词、创建 speaker、merge/split 声学轨道或越过 human lock。
+- 语法修复路径输入带证据 ID 的 ASR N-best、token/character 时间、术语表、语言区间和相邻文本；输出是版本化最小 JSON patch。标点、大小写、空格、句界、机械重复和填充词可单列低风险候选；内容词、数字、专名、否定词、单位和代码切换 token 只有被 N-best、发音/字形候选或术语证据直接支持时才可建议，否则必须复核。
+- `rawText`、时间、原生 speaker timeline 和 review blocker 永久不可变。获批的文本修复写入 `normalizedText/displayText` revision；获批的说话人建议只能由人工决策或未来已通过门禁的 candidate-state selector 写入 speaker revision。翻译、风格润色和摘要仍是独立派生产物。
+- 零样本 LLM speaker correction 默认不得自动应用。DiarizationLM 在 Fisher/Callhome 英语上证明微调语义后处理有较高潜力，但后续独立研究显示零样本可恶化 diarization、针对单一 ASR 的微调跨 ASR 会退化；因此 Qwen、DiarizationLM 或专用 adapter 都从 `suggestion-only` 起步，并按 ASR 基模、语言、人数、overlap 和场景分别晋级。
+- LLM 必须输出自身以外的可验证证据，模型自报 confidence 不参与自动权限。说话人建议看 WDER、SA-WER/tcpWER、proposal precision/recall 和漏轨；语法建议看 edit-span precision/recall、WER/CER、受保护 token 保留率与 semantic drift。`qwen3.5:9b` 参数更多不自动获得权限。
 
 ## 计算与模型生命周期
 
@@ -192,11 +199,12 @@ flowchart TD
 | 人声与内容 | speech frame F1、每小时误报、漏报、lexical/non-lexical macro F1、abstention rate |
 | 人数 | exact-count accuracy、count MAE、欠分/过分率、人数后验校准误差 |
 | diarization | DER/JER（含 overlap、0 collar 与标准 collar）、speaker confusion、overlap P/R/F1 |
-| 联合说话人转录 | cpWER、tcpWER、SA-WER、漏说话人率；不能只分别报 DER 和 WER |
+| 联合说话人转录 | cpWER、tcpWER、SA-WER、WDER、漏说话人率；不能只分别报 DER 和 WER |
 | ASR | 每语言 WER/CER、数字/专名错误率、幻觉率、空转录率 |
 | 语言与切换 | macro F1、支持集内/外分开统计、切换点 MAE、PIER/切换词错误率、`und` 与复核率 |
 | 对齐 | word/character AAS、边界 p50/p95、越过媒体时长或相互覆盖率 |
 | 重叠分离 | SI-SDRi、重叠 tcpWER、非重叠污染率 |
+| LLM 语义纠错 | candidate-state 命中率、speaker proposal precision/recall、SA-WER/tcpWER delta、edit-span P/R/F1、受保护 token 保留率、semantic drift、abstention |
 | LLM 派生 | schema、数字/专名/说话人/时间不变量、COMET/MQM 或人工偏好、semantic drift |
 | 系统 | 冷/热 RTF、阶段 p50/p95、峰值 RAM/VRAM、加载次数、缓存命中、升级率、失败隔离 |
 | 交付 | cue 覆盖/CPS/CPL/安全区、多语字体、mux/burn-in 像素证据、PDF 内容与视觉硬门槛 |
@@ -212,7 +220,7 @@ flowchart TD
 5. 在服务器烟测 `omniASR_LLM_Unlimited_7B_v2`，并用支持集外语言和长音频 held-out 验证；普通 LLM-7B/7B-ZS 单列短音频对照，不用 300M、普通 7B 或第三方转换结果替代 unlimited 7B。
 6. 评测 FireRedASR2S 的中文方言/歌声/VAD-LID 分桶、Parakeet 欧洲语种、Canary-Qwen 英语和 Sortformer 1-4 人；只有分桶胜出才启用路由。
 7. 建立真实代码切换和重叠多说话人门禁，再决定 LID 序列模型、分离模型或多说话人 ASR 的微调方向。
-8. 在 M4 上完整评测 `qwen3.5:9b`，服务器评测 35B-A3B；先通过 suggestion-only，再分别评估翻译、润色、摘要和 N-best 重排。
+8. 在 M4 上完整评测 `qwen3.5:9b`，服务器评测 35B-A3B；先把 acoustic top-K speaker states、ASR N-best/token 时间和不可变证据接入生产 `suggestion-only`，分别评估语义 speaker 重排、最小语法修复、翻译、润色、摘要。任何自动权限均按基模、语言、人数、overlap 和场景单独晋级。
 9. 对逐次授权上传的同一冻结音频运行 Universal-3.5 Pro、Scribe v2、Melia 1 与其他登记 API，单列语言覆盖、说话人数上限、cpWER/tcpWER、DER/JER、代码切换、时间轴、成本、区域与删除证据；供应商自报胜负只用于候选排序。
 10. 同一批 held-out 输出真实 SRT/WebVTT/ASS、soft-mux、burn-in、Java PDF 和证据报告，任何上游 blocker 都必须传递到发布状态。
 
@@ -242,6 +250,8 @@ flowchart TD
 - [VibeVoice-ASR-BitNet](https://huggingface.co/microsoft/VibeVoice-ASR-BitNet) 与 [technical report](https://arxiv.org/abs/2607.21075), MIT；1.58 GB CPU 边缘派生模型，适合低延迟候选，不代表 7B 质量上限。
 - [RW-Voice-EQ](https://arxiv.org/abs/2607.14846) 将真实口音、情绪、噪声、背景说话人与对话条件拆成独立 ASR 鲁棒性维度；数据进入样本库前仍需逐项核验许可、同意范围和训练泄漏。
 - [Adding Robust Code-Switching Capabilities to High Performance Multilingual ASR](https://arxiv.org/abs/2606.21990) 在 Whisper v3 turbo 的德英实验中报告普通 LoRA 可显著破坏原单语与代码切换能力，而 BLoRA 在该单一设置中改善 PIER/WER；这里只把它作为“微调必须做 backward-retention 与切换词评分”的证据，不能外推为 Qwen 或任意语言对的默认微调方案。
+- [DiarizationLM](https://arxiv.org/abs/2401.03506) 与 [Google 开源 8B Fisher v2 model card](https://huggingface.co/google/DiarizationLM-8b-Fisher-v2) 证明微调 LLM 可作为 transcript-preserving speaker post-processor，在 Fisher/Callhome 英语上降低 WDER；checkpoint revision `668ce4eda93af6333c69aaf65d5bb1f3ac1d1433`、Llama 3 许可，6000 字符/4096 token 上下文，不能代表多语、多人或任意 ASR。
+- [LLM-based speaker diarization correction: A generalizable approach](https://arxiv.org/abs/2406.04927) 报告零样本 7B/8x7B 明显恶化 diarization，ASR 专用微调在未见 ASR 上也可能回退；它支持“语义纠错必须按上游 ASR 和场景 held-out、默认 suggestion-only”的门禁，而不是否定 LLM 协同价值。
 - [FireRedASR2S repository](https://github.com/FireRedTeam/FireRedASR2S)、[model collection](https://huggingface.co/collections/FireRedTeam/fireredasr2s) 与 [FireRedASR2-LLM model card](https://huggingface.co/FireRedTeam/FireRedASR2-LLM), Apache-2.0；公开权重覆盖中文/方言 ASR、100+ 语言 VAD/LID 和 singing/music 门控，LLM checkpoint 单次输入上限为 40 秒。
 - [TagSpeech](https://arxiv.org/abs/2601.06896)、[SpeakerLM](https://arxiv.org/abs/2508.06372) 与 [Speaker-Reasoner](https://arxiv.org/abs/2604.03074)；joint SDR 研究挑战，需先通过开放权重、许可证和跨域 held-out 门禁。
 - [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text)，`gpt-4o-transcribe-diarize` 的 speaker/time/text 约束、30 秒以上 chunking、最多四个已知说话人参考和 prompt 限制；仅逐次授权托管挑战者。

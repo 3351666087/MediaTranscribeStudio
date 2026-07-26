@@ -108,6 +108,7 @@ matplotlib-inline
 mdurl
 mediapy
 megatron-core
+meeteval==0.4.3
 mir-eval
 ml-dtypes
 mlx; platform_system == "Darwin"

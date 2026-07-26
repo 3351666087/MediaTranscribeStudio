@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
+import importlib.metadata
 import json
 import re
 import statistics
 import sys
+from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
@@ -17,13 +20,21 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.language import normalize_language_tag
-from backend.pipeline_metrics import ReferenceTurn, evaluate_reference_quality
+from backend.pipeline_metrics import (
+    ReferenceTurn,
+    evaluate_reference_quality,
+    maximum_weight_assignment,
+)
 from backend.speaker_timeline import (
     speaker_timeline_turns,
     validate_speaker_timeline,
 )
-from tools.sample_library import word_error_rate
+from tools.sample_library import tokenize_for_score, word_error_rate
 
+_MEETEVAL_VERSION = "0.4.3"
+_MEETEVAL_REVISION = "badcd3c7cf82f98d2ac1f292801fbe6e9093ee2f"
+_MEETEVAL_MAX_SPEAKER_STREAMS = 20
+_TCPWER_COLLAR_SECONDS = 5.0
 _SRT_TIMESTAMP = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}$"
 )
@@ -660,6 +671,575 @@ def _native_full_timeline_quality(
     return quality, boundary
 
 
+def _metric_transcript_text(segment: Mapping[str, Any]) -> str:
+    for field in ("rawText", "normalizedText", "displayText"):
+        value = segment.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _scoring_unit(texts: Sequence[str]) -> str:
+    uses_character_tokens = [
+        any("\u3400" <= char <= "\u9fff" for char in text)
+        for text in texts
+        if text.strip()
+    ]
+    if uses_character_tokens and all(uses_character_tokens):
+        return "character"
+    if any(uses_character_tokens):
+        return "mixed-character-word"
+    return "word"
+
+
+def _joint_metric_labels(scoring_unit: str) -> dict[str, str]:
+    if scoring_unit == "character":
+        return {
+            "cpWer": "cpCER",
+            "tcpWer": "tcpCER",
+            "speakerAttributedWer": "speaker-attributed CER",
+        }
+    if scoring_unit == "word":
+        return {
+            "cpWer": "cpWER",
+            "tcpWer": "tcpWER",
+            "speakerAttributedWer": "SA-WER",
+        }
+    return {
+        "cpWer": "concatenated-permutation mixed-token error rate",
+        "tcpWer": "time-constrained mixed-token error rate",
+        "speakerAttributedWer": "speaker-attributed mixed-token error rate",
+    }
+
+
+def _scoring_segment(
+    *,
+    speaker: str,
+    text: str,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, Any]:
+    return {
+        "speaker": speaker,
+        "words": tokenize_for_score(text),
+        "start_time": start_ms / 1000.0,
+        "end_time": end_ms / 1000.0,
+    }
+
+
+def _reference_transcript_segments(
+    case: Mapping[str, Any],
+    *,
+    duration_ms: int | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    raw_turns = case.get("referenceTranscriptTurns")
+    if not isinstance(raw_turns, list) or not raw_turns:
+        return [], "reference-transcript-turns-missing"
+    segments: list[dict[str, Any]] = []
+    for index, turn in enumerate(raw_turns):
+        if not isinstance(turn, Mapping):
+            raise ValueError(
+                f"reference transcript turn {index} must be an object"
+            )
+        speaker = turn.get("speakerId")
+        start_seconds = turn.get("startSeconds")
+        end_seconds = turn.get("endSeconds")
+        transcript = turn.get("transcript")
+        if (
+            not isinstance(speaker, str)
+            or not speaker.strip()
+            or isinstance(start_seconds, bool)
+            or not isinstance(start_seconds, (int, float))
+            or isinstance(end_seconds, bool)
+            or not isinstance(end_seconds, (int, float))
+            or not isinstance(transcript, str)
+            or not transcript.strip()
+        ):
+            raise ValueError(
+                f"reference transcript turn {index} is incomplete"
+            )
+        start_ms = round(float(start_seconds) * 1000)
+        end_ms = round(float(end_seconds) * 1000)
+        if (
+            start_ms < 0
+            or end_ms <= start_ms
+            or (
+                isinstance(duration_ms, int)
+                and end_ms > duration_ms
+            )
+        ):
+            raise ValueError(
+                f"reference transcript turn {index} has invalid boundaries"
+            )
+        segment = _scoring_segment(
+            speaker=speaker.strip(),
+            text=transcript,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        if not segment["words"]:
+            raise ValueError(
+                f"reference transcript turn {index} has no scoring tokens"
+            )
+        segments.append(segment)
+    segments.sort(
+        key=lambda item: (
+            item["start_time"],
+            item["end_time"],
+            item["speaker"],
+        )
+    )
+    expected_speakers = case.get("speakerSet")
+    if isinstance(expected_speakers, list):
+        normalized_expected = {
+            str(item).strip()
+            for item in expected_speakers
+            if isinstance(item, str) and item.strip()
+        }
+        observed = {str(item["speaker"]) for item in segments}
+        if normalized_expected != observed:
+            raise ValueError(
+                "reference transcript speakers do not match the truth speaker set"
+            )
+    return segments, None
+
+
+def _hypothesis_transcript_segments(
+    segments: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments):
+        start_ms = segment.get("startMs")
+        end_ms = segment.get("endMs")
+        speaker = segment.get("speakerId")
+        if (
+            isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or start_ms < 0
+            or end_ms <= start_ms
+            or not isinstance(speaker, str)
+            or not speaker.strip()
+        ):
+            raise ValueError(
+                f"hypothesis transcript segment {index} has invalid attribution"
+            )
+        raw_text = segment.get("rawText")
+        derived_text_available = any(
+            isinstance(segment.get(field), str)
+            and bool(str(segment[field]).strip())
+            for field in ("normalizedText", "displayText")
+        )
+        if not isinstance(raw_text, str):
+            if derived_text_available:
+                raise ValueError(
+                    "joint transcription scoring requires immutable rawText"
+                )
+            continue
+        text = raw_text
+        if not text.strip():
+            if derived_text_available:
+                raise ValueError(
+                    "joint transcription scoring rejects empty rawText with "
+                    "non-empty derived text"
+                )
+            continue
+        scoring = _scoring_segment(
+            speaker=speaker.strip(),
+            text=text,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        if scoring["words"]:
+            output.append(scoring)
+    output.sort(
+        key=lambda item: (
+            item["start_time"],
+            item["end_time"],
+            item["speaker"],
+        )
+    )
+    return output
+
+
+def _acoustic_prediction_turns(
+    *,
+    segments: Sequence[Mapping[str, Any]],
+    speaker_timeline: Mapping[str, Any] | None,
+) -> list[tuple[int, int, str]]:
+    if speaker_timeline is not None:
+        timeline_turns = speaker_timeline_turns(
+            speaker_timeline,
+            mode="regular",
+        )
+        if timeline_turns:
+            return [
+                (
+                    int(turn["startMs"]),
+                    int(turn["endMs"]),
+                    str(turn["speakerId"]),
+                )
+                for turn in timeline_turns
+            ]
+    return [
+        (
+            int(segment["startMs"]),
+            int(segment["endMs"]),
+            str(segment["speakerId"]),
+        )
+        for segment in segments
+        if isinstance(segment.get("startMs"), int)
+        and not isinstance(segment.get("startMs"), bool)
+        and isinstance(segment.get("endMs"), int)
+        and not isinstance(segment.get("endMs"), bool)
+        and int(segment["endMs"]) > int(segment["startMs"])
+        and isinstance(segment.get("speakerId"), str)
+        and str(segment["speakerId"]).strip()
+    ]
+
+
+def _speaker_overlap_assignment(
+    *,
+    reference: Sequence[Mapping[str, Any]],
+    hypothesis_turns: Sequence[tuple[int, int, str]],
+    hypothesis_speakers: set[str],
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+    list[str],
+]:
+    reference_speakers = sorted(
+        {str(segment["speaker"]) for segment in reference}
+    )
+    predicted_speakers = sorted(
+        {
+            *(str(speaker) for _, _, speaker in hypothesis_turns),
+            *hypothesis_speakers,
+        }
+    )
+    reference_index = {
+        speaker: index for index, speaker in enumerate(reference_speakers)
+    }
+    predicted_index = {
+        speaker: index for index, speaker in enumerate(predicted_speakers)
+    }
+    weights = [
+        [0.0 for _ in predicted_speakers]
+        for _ in reference_speakers
+    ]
+    for segment in reference:
+        reference_start = round(float(segment["start_time"]) * 1000)
+        reference_end = round(float(segment["end_time"]) * 1000)
+        reference_id = str(segment["speaker"])
+        for predicted_start, predicted_end, predicted_id in hypothesis_turns:
+            overlap_ms = min(reference_end, predicted_end) - max(
+                reference_start,
+                predicted_start,
+            )
+            if overlap_ms > 0:
+                weights[reference_index[reference_id]][
+                    predicted_index[predicted_id]
+                ] += float(overlap_ms)
+    mapping: list[dict[str, Any]] = []
+    mapped_reference: set[str] = set()
+    mapped_hypothesis: set[str] = set()
+    for reference_row, predicted_column in maximum_weight_assignment(weights):
+        overlap_ms = weights[reference_row][predicted_column]
+        if overlap_ms <= 0.0:
+            continue
+        reference_id = reference_speakers[reference_row]
+        hypothesis_id = predicted_speakers[predicted_column]
+        mapping.append(
+            {
+                "referenceSpeaker": reference_id,
+                "hypothesisSpeaker": hypothesis_id,
+                "overlapMs": round(overlap_ms, 6),
+            }
+        )
+        mapped_reference.add(reference_id)
+        mapped_hypothesis.add(hypothesis_id)
+    return (
+        mapping,
+        sorted(set(reference_speakers) - mapped_reference),
+        sorted(set(predicted_speakers) - mapped_hypothesis),
+    )
+
+
+def _error_rate_payload(value: Any) -> dict[str, Any]:
+    payload = dataclasses.asdict(value)
+    assignment = payload.pop("assignment", None)
+    reference_self_overlap = payload.pop("reference_self_overlap", None)
+    hypothesis_self_overlap = payload.pop("hypothesis_self_overlap", None)
+    output = {
+        "errorRate": (
+            round(float(payload["error_rate"]), 9)
+            if payload.get("error_rate") is not None
+            else None
+        ),
+        "errors": int(payload["errors"]),
+        "referenceTokens": int(payload["length"]),
+        "insertions": int(payload["insertions"]),
+        "deletions": int(payload["deletions"]),
+        "substitutions": int(payload["substitutions"]),
+    }
+    if "missed_speaker" in payload:
+        output.update(
+            {
+                "missedSpeakers": int(payload["missed_speaker"]),
+                "falseAlarmSpeakers": int(payload["falarm_speaker"]),
+                "scoredSpeakers": int(payload["scored_speaker"]),
+            }
+        )
+    if assignment is not None:
+        output["assignment"] = [
+            {
+                "referenceSpeaker": pair[0],
+                "hypothesisSpeaker": pair[1],
+            }
+            for pair in assignment
+        ]
+    if reference_self_overlap is not None:
+        output["referenceSelfOverlap"] = {
+            "overlapSeconds": float(reference_self_overlap["overlap_time"]),
+            "totalSeconds": float(reference_self_overlap["total_time"]),
+            "rate": round(
+                float(reference_self_overlap["overlap_rate"]),
+                9,
+            ),
+        }
+    if hypothesis_self_overlap is not None:
+        output["hypothesisSelfOverlap"] = {
+            "overlapSeconds": float(hypothesis_self_overlap["overlap_time"]),
+            "totalSeconds": float(hypothesis_self_overlap["total_time"]),
+            "rate": round(
+                float(hypothesis_self_overlap["overlap_rate"]),
+                9,
+            ),
+        }
+    return output
+
+
+def _speaker_attributed_error_rate(
+    *,
+    reference: Sequence[Mapping[str, Any]],
+    hypothesis: Sequence[Mapping[str, Any]],
+    hypothesis_turns: Sequence[tuple[int, int, str]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from meeteval.wer.wer.error_rate import combine_error_rates
+    from meeteval.wer.wer.siso import siso_word_error_rate
+
+    reference_tokens: dict[str, list[str]] = defaultdict(list)
+    hypothesis_tokens: dict[str, list[str]] = defaultdict(list)
+    for segment in reference:
+        reference_tokens[str(segment["speaker"])].extend(segment["words"])
+    for segment in hypothesis:
+        hypothesis_tokens[str(segment["speaker"])].extend(segment["words"])
+    mapping, missed_reference, false_alarm_hypothesis = (
+        _speaker_overlap_assignment(
+            reference=reference,
+            hypothesis_turns=hypothesis_turns,
+            hypothesis_speakers=set(hypothesis_tokens),
+        )
+    )
+    rates = []
+    for item in mapping:
+        rates.append(
+            siso_word_error_rate(
+                [{"words": reference_tokens[item["referenceSpeaker"]]}],
+                [{"words": hypothesis_tokens[item["hypothesisSpeaker"]]}],
+            )
+        )
+    for speaker in missed_reference:
+        rates.append(
+            siso_word_error_rate(
+                [{"words": reference_tokens[speaker]}],
+                [{"words": []}],
+            )
+        )
+    for speaker in false_alarm_hypothesis:
+        if not hypothesis_tokens[speaker]:
+            continue
+        rates.append(
+            siso_word_error_rate(
+                [{"words": []}],
+                [{"words": hypothesis_tokens[speaker]}],
+            )
+        )
+    if not rates:
+        raise ValueError("speaker-attributed scoring has no token streams")
+    quality = _error_rate_payload(combine_error_rates(*rates))
+    quality.update(
+        {
+            "mappingPolicy": "time-overlap-max-weight-hungarian-v1",
+            "missedReferenceSpeakers": missed_reference,
+            "falseAlarmHypothesisSpeakers": false_alarm_hypothesis,
+        }
+    )
+    return quality, mapping
+
+
+def _joint_transcription_quality(
+    *,
+    case: Mapping[str, Any],
+    transcript: Mapping[str, Any],
+    segments: Sequence[Mapping[str, Any]],
+    speaker_timeline: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    eligibility = case.get("truthEligibility")
+    if (
+        not isinstance(eligibility, Mapping)
+        or eligibility.get("asr") is not True
+    ):
+        return {
+            "eligible": False,
+            "scored": False,
+            "reason": "asr-truth-ineligible",
+        }
+    source = transcript.get("source")
+    duration_ms = (
+        source.get("durationMs") if isinstance(source, Mapping) else None
+    )
+    if (
+        isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 1
+    ):
+        raise ValueError(
+            "joint transcription scoring requires transcript duration"
+        )
+    reference, unavailable_reason = _reference_transcript_segments(
+        case,
+        duration_ms=duration_ms,
+    )
+    if unavailable_reason is not None:
+        return {
+            "eligible": False,
+            "scored": False,
+            "reason": unavailable_reason,
+        }
+    hypothesis = _hypothesis_transcript_segments(segments)
+    if not hypothesis:
+        return {
+            "eligible": False,
+            "scored": False,
+            "reason": "hypothesis-transcript-empty",
+        }
+    installed_version = importlib.metadata.version("meeteval")
+    if installed_version != _MEETEVAL_VERSION:
+        raise RuntimeError(
+            "meeting metrics require exactly "
+            f"meeteval=={_MEETEVAL_VERSION}; found {installed_version}"
+        )
+
+    from meeteval.wer.wer.cp import cp_word_error_rate
+    from meeteval.wer.wer.time_constrained import tcp_word_error_rate
+
+    timing_eligible = eligibility.get("turnBoundaries") is True
+    attribution_eligible = eligibility.get("derJer") is True
+    reference_speakers = {
+        str(segment["speaker"]) for segment in reference
+    }
+    hypothesis_speakers = {
+        str(segment["speaker"]) for segment in hypothesis
+    }
+    backend = {
+        "package": "meeteval",
+        "version": installed_version,
+        "upstreamRevision": _MEETEVAL_REVISION,
+        "maximumSpeakerStreams": _MEETEVAL_MAX_SPEAKER_STREAMS,
+    }
+    if (
+        max(len(reference_speakers), len(hypothesis_speakers))
+        > _MEETEVAL_MAX_SPEAKER_STREAMS
+    ):
+        return {
+            "eligible": True,
+            "scored": False,
+            "reason": "meeteval-speaker-stream-limit",
+            "backend": backend,
+            "referenceSpeakerCount": len(reference_speakers),
+            "hypothesisSpeakerCount": len(hypothesis_speakers),
+            "metricEligibility": {
+                "cpWer": True,
+                "tcpWer": timing_eligible,
+                "speakerAttributedWer": attribution_eligible,
+            },
+            "cpWer": None,
+            "tcpWer": None,
+            "speakerAttributedWer": None,
+        }
+
+    cp_error = cp_word_error_rate(reference, hypothesis)
+    tcp_error = (
+        tcp_word_error_rate(
+            reference,
+            hypothesis,
+            collar=_TCPWER_COLLAR_SECONDS,
+        )
+        if timing_eligible
+        else None
+    )
+    hypothesis_turns = _acoustic_prediction_turns(
+        segments=segments,
+        speaker_timeline=speaker_timeline,
+    )
+    speaker_attributed, acoustic_mapping = (
+        _speaker_attributed_error_rate(
+            reference=reference,
+            hypothesis=hypothesis,
+            hypothesis_turns=hypothesis_turns,
+        )
+        if attribution_eligible
+        else (None, [])
+    )
+    reference_turns = case["referenceTranscriptTurns"]
+    scoring_unit = _scoring_unit(
+        [
+            str(turn["transcript"])
+            for turn in reference_turns
+            if isinstance(turn, Mapping)
+        ]
+    )
+    return {
+        "eligible": True,
+        "scored": True,
+        "backend": backend,
+        "tokenization": "mts-language-aware-nfkc-v1",
+        "scoringUnit": scoring_unit,
+        "metricLabels": _joint_metric_labels(scoring_unit),
+        "hypothesisTextAuthority": "rawText",
+        "referenceSegmentCount": len(reference),
+        "hypothesisSegmentCount": len(hypothesis),
+        "referenceSpeakerCount": len(reference_speakers),
+        "hypothesisSpeakerCount": len(hypothesis_speakers),
+        "referenceTokenCount": sum(
+            len(segment["words"]) for segment in reference
+        ),
+        "hypothesisTokenCount": sum(
+            len(segment["words"]) for segment in hypothesis
+        ),
+        "cpWer": _error_rate_payload(cp_error),
+        "tcpWer": (
+            {
+                **_error_rate_payload(tcp_error),
+                "collarSeconds": _TCPWER_COLLAR_SECONDS,
+                "referencePseudoWordTiming": "character_based",
+                "hypothesisPseudoWordTiming": "character_based_points",
+            }
+            if tcp_error is not None
+            else None
+        ),
+        "speakerAttributedWer": speaker_attributed,
+        "acousticSpeakerMapping": acoustic_mapping,
+        "metricEligibility": {
+            "cpWer": True,
+            "tcpWer": timing_eligible,
+            "speakerAttributedWer": attribution_eligible,
+        },
+    }
+
+
 def evaluate_case(
     *,
     case: dict[str, Any],
@@ -732,11 +1312,6 @@ def evaluate_case(
             duration_ms=duration_ms,
             canonical_speaker_ids=tuple(canonical_ids),
         )
-    hypothesis = " ".join(
-        str(segment.get("displayText") or segment.get("normalizedText") or "")
-        for segment in segments
-        if isinstance(segment, dict)
-    )
     resolved_count = transcript.get("speakerPolicy", {}).get("resolvedCount")
     actual_sequence = [
         str(segment.get("speakerId"))
@@ -818,6 +1393,26 @@ def evaluate_case(
         not isinstance(case.get("truthEligibility"), dict)
         or case["truthEligibility"].get("asr") is not False
     )
+    if reference.strip() and text_eligible:
+        hypothesis_parts: list[str] = []
+        for index, segment in enumerate(segments):
+            if not isinstance(segment, Mapping):
+                continue
+            raw_text = segment.get("rawText")
+            if not isinstance(raw_text, str):
+                raise ValueError(
+                    f"ASR scoring segment {index} is missing immutable rawText"
+                )
+            hypothesis_parts.append(raw_text)
+        hypothesis = " ".join(hypothesis_parts)
+        hypothesis_authority = "rawText"
+    else:
+        hypothesis = " ".join(
+            _metric_transcript_text(segment)
+            for segment in segments
+            if isinstance(segment, Mapping)
+        )
+        hypothesis_authority = "best-available-unscored"
     base["textQuality"] = {
         "referenceAvailable": bool(reference.strip()) and text_eligible,
         "werOrCer": (
@@ -827,6 +1422,12 @@ def evaluate_case(
         ),
         "referenceCharacters": len(reference),
         "hypothesisCharacters": len(hypothesis),
+        "hypothesisAuthority": hypothesis_authority,
+        "scoringUnit": (
+            _scoring_unit([reference])
+            if reference.strip() and text_eligible
+            else None
+        ),
     }
     base["languageQuality"] = _language_quality(
         expected_language=case.get("language"),
@@ -842,6 +1443,12 @@ def evaluate_case(
     base["boundaryQuality"] = boundary
     base["nativeDiarizationQuality"] = native_diarization
     base["nativeBoundaryQuality"] = native_boundary
+    base["jointTranscriptionQuality"] = _joint_transcription_quality(
+        case=case,
+        transcript=transcript,
+        segments=segments,
+        speaker_timeline=speaker_timeline,
+    )
     base["runtimeQuality"] = _runtime_quality(transcript_path)
     base["reviewQuality"] = _review_quality(transcript_path)
     base["subtitleQuality"] = _subtitle_quality(
@@ -900,6 +1507,55 @@ def _bucket_summary(
                 (int, float),
             )
         ]
+        cp_wer_values = [
+            item.get("jointTranscriptionQuality", {})
+            .get("cpWer", {})
+            .get("errorRate")
+            for item in items
+            if isinstance(item.get("jointTranscriptionQuality"), dict)
+            and isinstance(
+                item["jointTranscriptionQuality"].get("cpWer"),
+                dict,
+            )
+            and isinstance(
+                item["jointTranscriptionQuality"]["cpWer"].get("errorRate"),
+                (int, float),
+            )
+        ]
+        tcp_wer_values = [
+            item.get("jointTranscriptionQuality", {})
+            .get("tcpWer", {})
+            .get("errorRate")
+            for item in items
+            if isinstance(item.get("jointTranscriptionQuality"), dict)
+            and isinstance(
+                item["jointTranscriptionQuality"].get("tcpWer"),
+                dict,
+            )
+            and isinstance(
+                item["jointTranscriptionQuality"]["tcpWer"].get("errorRate"),
+                (int, float),
+            )
+        ]
+        sa_wer_values = [
+            item.get("jointTranscriptionQuality", {})
+            .get("speakerAttributedWer", {})
+            .get("errorRate")
+            for item in items
+            if isinstance(item.get("jointTranscriptionQuality"), dict)
+            and isinstance(
+                item["jointTranscriptionQuality"].get(
+                    "speakerAttributedWer"
+                ),
+                dict,
+            )
+            and isinstance(
+                item["jointTranscriptionQuality"][
+                    "speakerAttributedWer"
+                ].get("errorRate"),
+                (int, float),
+            )
+        ]
         speaker_matches = [
             item.get("evidence", {}).get("speakerCountMatch")
             for item in items
@@ -922,6 +1578,15 @@ def _bucket_summary(
                 statistics.fmean(language_accuracy_values)
                 if language_accuracy_values
                 else None
+            ),
+            "meanCpWer": (
+                statistics.fmean(cp_wer_values) if cp_wer_values else None
+            ),
+            "meanTcpWer": (
+                statistics.fmean(tcp_wer_values) if tcp_wer_values else None
+            ),
+            "meanSpeakerAttributedWer": (
+                statistics.fmean(sa_wer_values) if sa_wer_values else None
             ),
         }
     return output
@@ -1012,7 +1677,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     report = {
-        "schemaVersion": "1.1.0",
+        "schemaVersion": "1.2.0",
         "libraryId": resolved.get("libraryId"),
         "cases": reports,
         "summary": {
@@ -1039,6 +1704,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     (int, float),
                 )
+                for item in reports
+            ),
+            "jointTranscriptionScored": sum(
+                isinstance(item.get("jointTranscriptionQuality"), dict)
+                and item["jointTranscriptionQuality"].get("scored") is True
                 for item in reports
             ),
             "missingEvidence": sum(

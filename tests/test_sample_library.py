@@ -15,6 +15,9 @@ from tools.sample_library import (
 )
 from tools.evaluate_sample_library import (
     _bucket_summary,
+    _joint_metric_labels,
+    _joint_transcription_quality,
+    _scoring_unit,
     _subtitle_quality,
     _value_counts,
     evaluate_case,
@@ -62,6 +65,9 @@ def test_language_aware_tokenization_and_error_rate() -> None:
     assert tokenize_for_score("字幕质量") == ["字", "幕", "质", "量"]
     assert edit_distance(["a", "b"], ["a", "c", "b"]) == 1
     assert word_error_rate("字幕质量", "字幕") == 0.5
+    assert _scoring_unit(["字幕质量"]) == "character"
+    assert _joint_metric_labels("character")["cpWer"] == "cpCER"
+    assert _scoring_unit(["hello", "字幕"]) == "mixed-character-word"
 
 
 def test_subtitle_quality_accepts_standard_webvtt_timestamps(
@@ -109,6 +115,9 @@ def test_evaluator_preserves_source_and_split_buckets() -> None:
             "meanJer": None,
             "meanRtf": None,
             "meanLanguageSegmentAccuracy": None,
+            "meanCpWer": None,
+            "meanTcpWer": None,
+            "meanSpeakerAttributedWer": None,
         },
         "fleurs": {
             "total": 2,
@@ -119,6 +128,9 @@ def test_evaluator_preserves_source_and_split_buckets() -> None:
             "meanJer": None,
             "meanRtf": None,
             "meanLanguageSegmentAccuracy": None,
+            "meanCpWer": None,
+            "meanTcpWer": None,
+            "meanSpeakerAttributedWer": None,
         },
     }
     assert _bucket_summary(reports, "evaluationSplit")["held-out"][
@@ -515,3 +527,228 @@ def test_evaluator_rejects_tampered_model_native_timeline_hash(
             worker_output_root=tmp_path / "outputs",
             artifact_id="tampered-native-timeline",
         )
+
+
+def test_joint_transcription_separates_cp_tcp_and_speaker_attribution(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "outputs" / "joint-transcription"
+    artifact_root.mkdir(parents=True)
+    transcript = artifact_root / "transcript-document.v2.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "source": {"durationMs": 22_000},
+                "speakerPolicy": {"resolvedCount": 2},
+                "segments": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1000,
+                        "speakerId": "speaker-1",
+                        "rawText": "beta",
+                        "normalizedText": "mutated beta",
+                        "displayText": "mutated beta",
+                    },
+                    {
+                        "startMs": 20_000,
+                        "endMs": 21_000,
+                        "speakerId": "speaker-2",
+                        "rawText": "alpha",
+                        "normalizedText": "mutated alpha",
+                        "displayText": "mutated alpha",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "joint-transcription-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": [str(transcript)]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = evaluate_case(
+        case={
+            "id": "joint-transcription",
+            "expectedSpeakerCount": 2,
+            "speakerSet": ["truth-a", "truth-b"],
+            "scoringTranscript": "alpha beta",
+            "turns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                },
+                {
+                    "startSeconds": 20.0,
+                    "endSeconds": 21.0,
+                    "speakerId": "truth-b",
+                },
+            ],
+            "referenceTranscriptTurns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                    "transcript": "alpha",
+                },
+                {
+                    "startSeconds": 20.0,
+                    "endSeconds": 21.0,
+                    "speakerId": "truth-b",
+                    "transcript": "beta",
+                },
+            ],
+            "truthEligibility": {
+                "speakerCount": True,
+                "turnBoundaries": True,
+                "derJer": True,
+                "asr": True,
+            },
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="joint-transcription",
+    )
+
+    quality = report["jointTranscriptionQuality"]
+    assert quality["eligible"] is True
+    assert quality["backend"]["package"] == "meeteval"
+    assert quality["backend"]["version"] == "0.4.3"
+    assert quality["hypothesisTextAuthority"] == "rawText"
+    assert quality["scored"] is True
+    assert quality["scoringUnit"] == "word"
+    assert quality["metricLabels"]["cpWer"] == "cpWER"
+    assert quality["cpWer"]["errorRate"] == 0.0
+    assert quality["tcpWer"]["errorRate"] == 1.0
+    assert quality["tcpWer"]["collarSeconds"] == 5.0
+    assert quality["speakerAttributedWer"]["errorRate"] == 1.0
+    assert quality["speakerAttributedWer"]["mappingPolicy"] == (
+        "time-overlap-max-weight-hungarian-v1"
+    )
+    assert quality["acousticSpeakerMapping"] == [
+        {
+            "referenceSpeaker": "truth-a",
+            "hypothesisSpeaker": "speaker-1",
+            "overlapMs": 1000.0,
+        },
+        {
+            "referenceSpeaker": "truth-b",
+            "hypothesisSpeaker": "speaker-2",
+            "overlapMs": 1000.0,
+        },
+    ]
+    assert report["textQuality"]["werOrCer"] == 1.0
+    assert report["textQuality"]["hypothesisAuthority"] == "rawText"
+
+
+def test_joint_transcription_requires_per_turn_reference_truth(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "outputs" / "serialized-only"
+    artifact_root.mkdir(parents=True)
+    transcript = artifact_root / "transcript-document.v2.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "source": {"durationMs": 1000},
+                "speakerPolicy": {"resolvedCount": 2},
+                "segments": [
+                    {
+                        "startMs": 0,
+                        "endMs": 1000,
+                        "speakerId": "speaker-1",
+                        "rawText": "hello",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "serialized-only-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": [str(transcript)]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = evaluate_case(
+        case={
+            "id": "serialized-only",
+            "scoringTranscript": "hello",
+            "truthEligibility": {
+                "asr": True,
+                "turnBoundaries": True,
+                "derJer": True,
+            },
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="serialized-only",
+    )
+
+    assert report["textQuality"]["werOrCer"] == 0.0
+    assert report["jointTranscriptionQuality"] == {
+        "eligible": False,
+        "scored": False,
+        "reason": "reference-transcript-turns-missing",
+    }
+
+
+def test_joint_transcription_preserves_meeteval_speaker_limit() -> None:
+    reference_turns = [
+        {
+            "startSeconds": float(index),
+            "endSeconds": float(index + 1),
+            "speakerId": f"truth-{index + 1}",
+            "transcript": f"token{index + 1}",
+        }
+        for index in range(21)
+    ]
+    hypothesis = [
+        {
+            "startMs": index * 1000,
+            "endMs": (index + 1) * 1000,
+            "speakerId": f"speaker-{index + 1}",
+            "rawText": f"token{index + 1}",
+        }
+        for index in range(21)
+    ]
+
+    quality = _joint_transcription_quality(
+        case={
+            "referenceTranscriptTurns": reference_turns,
+            "truthEligibility": {
+                "asr": True,
+                "turnBoundaries": True,
+                "derJer": True,
+            },
+        },
+        transcript={"source": {"durationMs": 21_000}},
+        segments=hypothesis,
+        speaker_timeline=None,
+    )
+
+    assert quality["eligible"] is True
+    assert quality["scored"] is False
+    assert quality["reason"] == "meeteval-speaker-stream-limit"
+    assert quality["backend"]["maximumSpeakerStreams"] == 20
+    assert quality["referenceSpeakerCount"] == 21
+    assert quality["hypothesisSpeakerCount"] == 21
+    assert quality["cpWer"] is None

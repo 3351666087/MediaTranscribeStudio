@@ -14,6 +14,8 @@
 
 托管模型、开源模型和本地量化模型均须使用相同冻结音频、相同计分与失败域比较。外部模型只因公开榜单领先而进入候选池，不会自动获得生产路由权；私有媒体不得为了比较而静默上传。
 
+自托管旗舰必须先用官方原始精度 checkpoint、官方预处理和官方推理栈建立服务器参考结果，再在同一冻结输入上测量量化、蒸馏、MLX/GGUF/ONNX 转换或较小解码器的绝对质量损失。边缘派生模型即使更快，也只能获得边缘路由，不能反向代表或替换基模上限；若官方原始精度权重无法在已登记硬件上复现，则该模型尚不满足“可落地旗舰”。微调同样不能先于强基模基线：只有明确失败分桶才允许训练 adapter，并必须同时通过目标分桶、未见语言对、原单语能力和其他场景的 backward-retention 门禁。
+
 “语言覆盖数”也只表示候选适用域，不表示所有语言都达到同等质量，更不表示任意未见语言组合的代码切换已经解决。2026 年公开研究仍观察到代码切换 ASR 对未见语言对的泛化有限；本系统因此按语言、地区、语言对、同一说话人切换和跨说话人切换分别校准，支持集外输出必须允许 `und` 和人工复核。
 
 ## 结论
@@ -26,7 +28,7 @@
 4. `omniASR_LLM_Unlimited_7B_v2` 是服务端支持集外语言和长音频的旗舰兜底，覆盖 1600+ 语言。官方 checkpoint 为 7,801,041,536 参数、FP32 下载约 30 GiB、推理显存约 17 GiB，15 分钟 A100 样本 RTF 为 `0.208`；普通 CTC/LLM suite 仍只接受短于 40 秒的输入，unlimited 变体当前不提供微调 recipe。`CTC-300M/1B` 只能作为低成本召回或本机兼容候选，不能用小模型、普通 7B 或第三方转换结果代表 unlimited 7B 上限。
 5. `Whisper large-v3` 是成熟的独立第二意见。在 Apple Silicon 上优先验证 WhisperKit/Core ML 或 whisper.cpp/Metal，而不是把 CUDA 路径直接搬到 MPS。
 6. `Parakeet-TDT-0.6B-v3` 是 25 种欧洲语言的高吞吐专用挑战者；`Canary-Qwen-2.5B` 是英语专用挑战者。二者只有在本项目 held-out 分桶同时改善 WER、时间轴和效率时才能接管相应路由。
-7. `VibeVoice-ASR-7B` 是服务器级联合挑战者：公开 MIT 权重、Transformers/vLLM 部署、60 分钟单次上下文、50+ 语言/代码切换，并直接生成 who/when/what。它的公开报告同时明确 serialized 输出在 overlap 会漏掉次要说话人，SFT 主要集中英语/中文；因此用于全局一致性、长上下文和语义挑战，不能抹掉 Community-1 的多轨 overlap 真值。
+7. `VibeVoice-ASR-7B` 是服务器级联合挑战者：公开 MIT 权重、Transformers/vLLM 部署、60 分钟单次上下文、50+ 语言/代码切换，并直接生成 who/when/what。它的公开报告同时明确 serialized 输出在 overlap 会漏掉次要说话人，SFT 主要集中英语/中文；因此用于全局一致性、长上下文和语义挑战，不能抹掉 Community-1 的多轨 overlap 真值。2026-07-23 发布的 `VibeVoice-ASR-BitNet` 将原 Qwen2.5-7B 解码器替换为 1.5B，并使用 INT8/I2_S 压缩到 1.58 GB；论文报告通常增加 `1–4%` 绝对 WER，所以它只进入 CPU 边缘效率挑战，必须以同音频原始 7B 结果为质量锚点。
 8. `FireRedASR2S` 是中文和中英代码切换专用挑战者：8B+ LLM / 1B+ AED、20+ 中文方言/口音、100+ 语言 VAD/LID、singing/music 多标签门控和中英 punctuation 均有公开权重与部署代码。`FireRedASR2-LLM` 官方模型卡明确单次输入上限为 40 秒，因此只能在有界切分上评测；它可接管已验证的中文方言、歌声或人声门控分桶，但不能代表 1600+ 语言、任意长音频或任意多人 diarization。
 9. `DiariZen` 是高价值的 Dynamic-N 研究挑战者。独立 196.6 小时五语言比较报告其总体 DER `13.3%`，仅次于托管 PyannoteAI/Precision-2 的 `11.2%`，且 5+ 人分桶 DER `7.1%`；但当前最佳公开权重为 CC BY-NC 4.0，默认商业产品只能研究评测或复用 MIT 代码以许可兼容数据重训，不能打包其权重。
 10. NVIDIA 官方 Sortformer 只用于 `N <= 4` 的低延迟候选或审计证据。官方公开 checkpoint 输出维度固定为 4，且在 5 人以上数据上的 DER 明显退化。2026-03 发布的第三方 Apache-2.0 `Ultra Diar Streaming Sortformer 8spk` 由官方 4spk 基模经 2 张 H100 微调与结构修改扩到最多 8 人，可进入隔离研究挑战，但它仍是固定容量、非 NVIDIA 官方权重，且模型卡没有足够的独立跨域结果，不能成为“任意人数”权威。`TagSpeech`、`SpeakerLM`、`Speaker-Reasoner` 等 joint SDR 研究保留为研究挑战，公开权重/数据域不足时不得进入默认路由。
@@ -46,6 +48,7 @@
 | 低延迟有界人数 diarization | Community-1 仍保留最终审计 | NVIDIA Streaming Sortformer 4spk；第三方 Ultra Sortformer 8spk 仅研究 | 固定 4/8 个输出通道都不是任意人数；第三方 8spk 尚无充分独立跨域结果 |
 | 30 语言/22 中文方言 ASR | Qwen3-ASR-1.7B | Whisper large-v3、Parakeet 欧洲语种、Canary-Qwen 英语 | 路由挑战者的覆盖或硬件路径更窄 |
 | 1600+ 长尾/长音频 ASR | `omniASR_LLM_Unlimited_7B_v2` 服务端 | 普通 LLM-7B/7B-ZS、CTC 300M/1B | Unlimited 7B 下载约 30 GiB、推理约 17 GiB 且暂无微调 recipe；普通 suite 输入 `<40s`；覆盖不等于每种语言都达到发布质量 |
+| CPU 边缘联合 ASR | 原始精度服务器旗舰保留质量锚点 | VibeVoice-ASR-BitNet、whisper.cpp 量化候选 | 1.5B BitNet 是 7B 派生效率模型且公开报告有绝对 WER 损失；边缘胜出不等于基模胜出 |
 | 长上下文联合转录/说话人/时间 | MOSS-Transcribe-Diarize 0.9B 优先挑战；VibeVoice-ASR-7B 独立挑战 | MOSS Pro 仅在供应商数据策略审核并逐次授权后参加 | 生成式单模型必须单列幻觉、漏轨、人数、overlap、时间边界和远程代码供应链风险，不能覆盖声学多轨证据 |
 | 音频语言识别 | Qwen/Whisper/SpeechBrain VoxLingua107 校准共识 | 未来基于许可兼容数据训练更广 LID head | MMS-LID-4017 是 CC BY-NC 4.0，不能进入默认商业模型包 |
 | 时间对齐 | Qwen3-ForcedAligner-0.6B 的 11 语言支持集 | 每语言 CTC aligner、WhisperX/MFA 候选 | 不支持的语言不得伪造词级时间戳，只能保留段级时间和复核状态 |
@@ -150,6 +153,8 @@ flowchart TD
 - 真实 VoxConverse `N=8` 使用 `event-boundary-max-overlap-v1` 从源录音 `33.32–123.32 秒` 选取 90 秒窗口，RTTM 事先证明 8 人都发言，含 `21.32 秒` overlap；不是任取前 60 秒。auto 只生成 `5/8` 轨，模型原生整段时间线 DER/JER/confusion/overlap F1 为 `0.273713504 / 0.588543117 / 0.206596715 / 0.868788226`，最终生产段为 `0.348102190 / 0.580200114 / 0.097454380 / 0.807241415`，open review `195`。manual=8 恢复 `8/8` 轨，原生 DER/JER/confusion 为 `0.255428832 / 0.479361090 / 0.188312044`，但最终生产段反而退化为 `0.470072993 / 0.752708789 / 0.249178832`，open review `35`。auto 的流水线 RTF `0.008303897`、cache hit `0.995708155` 只能作为热缓存修复回归；manual 原生阶段 RTF `1.113355130`，harness 墙钟分别为 `34.794 / 137.257 秒`。该样本没有覆盖窗口完整逐字稿，WER/cpWER/tcpWER/SA-WER 均禁止评分。
 - 派生 `N=13` 仅是 `synthetic-mixture-of-real-recordings` 的 `development-stress`：13 条真实 MINDS 多语录音合成为 79.21 秒单声道，最高同时 13 路重叠，SHA-256 `a8d01e3cbb9e34ded9f3053a8b5f0041d3ee31776b8fabf27592a313fbf1c980`；不得称为真实 13 人会议。auto 只生成 `2/13` 轨，原生 DER/JER/overlap F1 `0.712199056 / 0.873672210 / 0.848195027`，最终生产段 `0.830970738 / 0.932436923 / 0.469812075`，open review `94`、冷路径 RTF `7.067597293`。manual=13 恢复 `13/13` 轨和 65 个原生 turns，但原生 DER/JER/confusion 仍为 `0.762341924 / 0.813559118 / 0.061860831`，最终生产段 `0.849992005 / 0.921678180 / 0.099993743`，open review `25`。给定人数只恢复容量，不能修复极端 overlap 下的身份归属；该压力样本也未取得可用于重叠逐字评分的权威转写，禁止报告 WER/cpWER/tcpWER。
 - 评估器现在把每个 segment 携带的、SHA-256 绑定且完全一致的 `fullTimelineInference` 作为 `model-native-full-timeline-unmapped` 独立计分，校验完整 segment 覆盖、媒体范围、turn 数、speaker inventory 和 `speakerTurnsSha256`；任何快照变化或哈希篡改立即失败。`nativeDiarizationQuality/nativeBoundaryQuality` 与最终生产段 `diarizationQuality/boundaryQuality` 永不互相覆盖，避免 canonical mapping 或 ASR segment 粒度掩盖基模真实上限。
+- 多人联合转录评分固定使用 `meeteval==0.4.3`、上游 revision `badcd3c7cf82f98d2ac1f292801fbe6e9093ee2f`。cpWER/cpCER 允许文本最优 speaker permutation；tcpWER/tcpCER 采用 5 秒 collar 和逐段伪词时间；本项目的 SA-WER/SA-CER 明确定义为先以纯声学时间重叠做 maximum-weight Hungarian speaker mapping，再固定该映射由 MeetEval SISO 汇总。报告同时保存 token 单位、映射、插入/删除/替换、漏轨/多轨和依赖版本；中文必须标作 CER，多语混合必须标作 mixed-token error rate。三项优先读取不可变 `rawText`，不得评分语义润色后的 `displayText`。
+- 同一冻结 AISHELL-4 19.54 秒真实五人普通话 held-out 首次完成上述联合评分。auto 输出 `11/5` 人，串行 CER `0.320388350` 但 cpCER/tcpCER/SA-CER 为 `0.796116505 / 0.796116505 / 0.825242718`，DER/JER `0.648323846 / 0.657510361`；manual=5 恢复 `5/5` 人并将三项改善到 `0.475728155 / 0.514563107 / 0.475728155`，但 DER/JER 仍为 `0.403542062 / 0.533735129`。两个任务均为 `review.required`，说明串行文本正确率和 exact-N 都明显高估最终 who-said-what 质量。
 - 不在本机运行 `omniASR_LLM_Unlimited_7B_v2` FP32；本机只允许先测 CTC 300M/1B 或量化实现，且结果不能代表旗舰 unlimited 7B。
 
 ### 旗舰服务器质量档
@@ -178,7 +183,7 @@ flowchart TD
 - 按 dataset、原始 recording、speaker identity 和派生源分组切分，禁止同录音章节或同说话人跨 development/held-out 泄漏。
 - development 用于阈值、路由和校准；regression 用于日常防回退；held-out 在一个候选版本冻结后只运行一次。
 - 全球短样本库用于广度和快速失败定位，不能单独证明远场会议、重叠、代码切换或任意人数质量。
-- 增加 AMI/CHiME-6/LibriCSS/NOTSOFAR-1、AISHELL-4/AliMeeting、DIHARD/VoxConverse、SEAME/真实代码切换、MUSAN/AudioSet 类负样本以及带字幕真值的公开视频分桶。
+- 增加 AMI/CHiME-6/LibriCSS/NOTSOFAR-1、AISHELL-4/AliMeeting、DIHARD/VoxConverse、SEAME/真实代码切换、MUSAN/AudioSet 类负样本以及带字幕真值的公开视频分桶；对 RW-Voice-EQ 等真实口音、情绪、噪声、背景说话人和对话压力样本先完成许可、同意范围与训练泄漏审计，再纳入独立分桶，不能用一个综合均分掩盖场景失败。
 
 ### 不可互相抵消的指标
 
@@ -189,7 +194,7 @@ flowchart TD
 | diarization | DER/JER（含 overlap、0 collar 与标准 collar）、speaker confusion、overlap P/R/F1 |
 | 联合说话人转录 | cpWER、tcpWER、SA-WER、漏说话人率；不能只分别报 DER 和 WER |
 | ASR | 每语言 WER/CER、数字/专名错误率、幻觉率、空转录率 |
-| 语言与切换 | macro F1、支持集内/外分开统计、切换点 MAE、`und` 与复核率 |
+| 语言与切换 | macro F1、支持集内/外分开统计、切换点 MAE、PIER/切换词错误率、`und` 与复核率 |
 | 对齐 | word/character AAS、边界 p50/p95、越过媒体时长或相互覆盖率 |
 | 重叠分离 | SI-SDRi、重叠 tcpWER、非重叠污染率 |
 | LLM 派生 | schema、数字/专名/说话人/时间不变量、COMET/MQM 或人工偏好、semantic drift |
@@ -235,6 +240,8 @@ flowchart TD
 - [MMS-LID-4017](https://huggingface.co/facebook/mms-lid-4017), CC BY-NC 4.0；仅作研究比较，不进入默认商业包。
 - [VibeVoice-ASR-7B model card](https://huggingface.co/microsoft/VibeVoice-ASR) 与 [technical report](https://arxiv.org/abs/2601.18184), MIT；公开报告明确 60 分钟/50+ 语言/代码切换和 overlap serialized-output 限制。
 - [VibeVoice-ASR-BitNet](https://huggingface.co/microsoft/VibeVoice-ASR-BitNet) 与 [technical report](https://arxiv.org/abs/2607.21075), MIT；1.58 GB CPU 边缘派生模型，适合低延迟候选，不代表 7B 质量上限。
+- [RW-Voice-EQ](https://arxiv.org/abs/2607.14846) 将真实口音、情绪、噪声、背景说话人与对话条件拆成独立 ASR 鲁棒性维度；数据进入样本库前仍需逐项核验许可、同意范围和训练泄漏。
+- [Adding Robust Code-Switching Capabilities to High Performance Multilingual ASR](https://arxiv.org/abs/2606.21990) 在 Whisper v3 turbo 的德英实验中报告普通 LoRA 可显著破坏原单语与代码切换能力，而 BLoRA 在该单一设置中改善 PIER/WER；这里只把它作为“微调必须做 backward-retention 与切换词评分”的证据，不能外推为 Qwen 或任意语言对的默认微调方案。
 - [FireRedASR2S repository](https://github.com/FireRedTeam/FireRedASR2S)、[model collection](https://huggingface.co/collections/FireRedTeam/fireredasr2s) 与 [FireRedASR2-LLM model card](https://huggingface.co/FireRedTeam/FireRedASR2-LLM), Apache-2.0；公开权重覆盖中文/方言 ASR、100+ 语言 VAD/LID 和 singing/music 门控，LLM checkpoint 单次输入上限为 40 秒。
 - [TagSpeech](https://arxiv.org/abs/2601.06896)、[SpeakerLM](https://arxiv.org/abs/2508.06372) 与 [Speaker-Reasoner](https://arxiv.org/abs/2604.03074)；joint SDR 研究挑战，需先通过开放权重、许可证和跨域 held-out 门禁。
 - [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text)，`gpt-4o-transcribe-diarize` 的 speaker/time/text 约束、30 秒以上 chunking、最多四个已知说话人参考和 prompt 限制；仅逐次授权托管挑战者。

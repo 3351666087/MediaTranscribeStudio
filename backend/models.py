@@ -10,6 +10,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .asr_evidence import (
+    ASR_CANDIDATE_SET_KEYS,
+    AsrEvidenceError,
+    validate_asr_candidate_set,
+)
 from .business_processing import BusinessProcessingConfig
 from .errors import WorkerError, invalid_request
 from .language import normalize_language_tag
@@ -419,6 +424,31 @@ class TranscriptSegment:
     language: str | None = None
 
     def __post_init__(self) -> None:
+        normalized_evidence = dict(self.evidence)
+        asr_evidence = normalized_evidence.get("asr")
+        if (
+            isinstance(asr_evidence, Mapping)
+            and "candidateSetSchemaVersion" in asr_evidence
+        ):
+            try:
+                candidate_set = validate_asr_candidate_set(
+                    asr_evidence,
+                    expected_text=self.raw_text,
+                    expected_start_ms=self.start_ms,
+                    expected_end_ms=self.end_ms,
+                )
+            except AsrEvidenceError as exc:
+                raise WorkerError(
+                    "ASR_CANDIDATE_EVIDENCE_INVALID",
+                    "segment ASR candidate evidence is not immutable or traceable",
+                    details={"segmentId": self.segment_id},
+                ) from exc
+            normalized_asr = dict(asr_evidence)
+            for key in ASR_CANDIDATE_SET_KEYS:
+                normalized_asr[key] = candidate_set[key]
+            normalized_evidence["asr"] = normalized_asr
+            object.__setattr__(self, "evidence", normalized_evidence)
+
         candidate = self.language
         if candidate is not None:
             try:
@@ -431,7 +461,7 @@ class TranscriptSegment:
             object.__setattr__(self, "language", normalized)
             return
 
-        asr_evidence = self.evidence.get("asr")
+        asr_evidence = normalized_evidence.get("asr")
         if not isinstance(asr_evidence, Mapping):
             return
         evidence_language = asr_evidence.get("language")

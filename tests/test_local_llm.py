@@ -6,6 +6,7 @@ import pytest
 
 from backend.local_llm import (
     LocalLLMConfig,
+    LocalLLMContextWindowError,
     LocalLLMError,
     OllamaLocalProvider,
     assert_loopback_provider,
@@ -111,7 +112,7 @@ def test_context_preflight_accepts_exact_boundary_and_blocks_overflow_transport(
     assert result == {"answer": "ok"}
     assert opener.calls == 1
 
-    with pytest.raises(LocalLLMError, match="context window"):
+    with pytest.raises(LocalLLMContextWindowError, match="context window"):
         provider.generate_json(
             system_prompt="",
             user_prompt="a" * 2_497,

@@ -35,6 +35,10 @@ class LocalLLMError(RuntimeError):
     """Raised when a local provider cannot produce a valid JSON response."""
 
 
+class LocalLLMContextWindowError(LocalLLMError):
+    """Raised before transport when a request cannot fit the model context."""
+
+
 class LocalLLMProvider(Protocol):
     """Minimal provider contract used by the business-processing layer."""
 
@@ -427,7 +431,7 @@ class OllamaLocalProvider:
         )
         input_token_budget = self.config.context_tokens - self.config.output_tokens
         if estimated_input_tokens > input_token_budget:
-            raise LocalLLMError(
+            raise LocalLLMContextWindowError(
                 "local LLM request exceeds the configured context window"
             )
         payload = {
@@ -539,6 +543,7 @@ class MappingLocalLLMProvider:
 
 __all__ = [
     "LocalLLMConfig",
+    "LocalLLMContextWindowError",
     "LocalLLMError",
     "LocalLLMProvider",
     "MappingLocalLLMProvider",

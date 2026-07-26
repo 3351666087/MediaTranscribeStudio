@@ -18,6 +18,7 @@ from .business_processing import (
 )
 from .local_llm import (
     LocalLLMConfig,
+    LocalLLMContextWindowError,
     LocalLLMError,
     LocalLLMProvider,
     MappingLocalLLMProvider,
@@ -105,6 +106,7 @@ __all__ = [
     "JobStatus",
     "JsonlEmitter",
     "LocalLLMConfig",
+    "LocalLLMContextWindowError",
     "LocalLLMError",
     "LocalLLMProvider",
     "MappingLocalLLMProvider",

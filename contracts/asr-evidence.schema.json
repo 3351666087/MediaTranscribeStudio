@@ -1,0 +1,491 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/asr-evidence/1.0.0",
+  "title": "Immutable ASR candidate evidence",
+  "description": "A hash-bound ASR top-1 or N-best candidate set. Schema validation covers portable structure; runtime validation recomputes every candidate ID, source-window digest, and candidate-set digest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "candidateSetSchemaVersion",
+    "candidateSetType",
+    "candidateSetSha256",
+    "modelId",
+    "modelRevision",
+    "modelManifestSha256",
+    "modelIdentityStatus",
+    "sourceAudioSha256",
+    "normalizationProfile",
+    "sourceWindowId",
+    "sourceStartMs",
+    "sourceEndMs",
+    "sourceWindowSha256",
+    "nBest"
+  ],
+  "properties": {
+    "candidateSetSchemaVersion": {
+      "const": "1.0.0"
+    },
+    "candidateSetType": {
+      "enum": [
+        "provider-top1-only",
+        "provider-nbest",
+        "projection-derived-top1"
+      ]
+    },
+    "candidateSetSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "modelRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "modelManifestSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "modelIdentityStatus": {
+      "enum": [
+        "manifest-bound",
+        "injected-fixture",
+        "unverified-local"
+      ]
+    },
+    "sourceAudioSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "normalizationProfile": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "sourceWindowId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "sourceStartMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sourceEndMs": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "sourceWindowSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "nBest": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/candidate"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "candidateSetType": {
+            "const": "provider-nbest"
+          }
+        },
+        "required": [
+          "candidateSetType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "nBest": {
+            "minItems": 2,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/candidate"
+                },
+                {
+                  "not": {
+                    "required": [
+                      "parentCandidateId"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "candidateSetType": {
+            "enum": [
+              "provider-top1-only",
+              "projection-derived-top1"
+            ]
+          }
+        },
+        "required": [
+          "candidateSetType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "nBest": {
+            "maxItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "candidateSetType": {
+            "const": "provider-top1-only"
+          }
+        },
+        "required": [
+          "candidateSetType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "nBest": {
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/candidate"
+                },
+                {
+                  "not": {
+                    "required": [
+                      "parentCandidateId"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "candidateSetType": {
+            "const": "projection-derived-top1"
+          }
+        },
+        "required": [
+          "candidateSetType"
+        ]
+      },
+      "then": {
+        "properties": {
+          "nBest": {
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/candidate"
+                },
+                {
+                  "required": [
+                    "parentCandidateId"
+                  ],
+                  "properties": {
+                    "acousticScore": {
+                      "const": null
+                    },
+                    "acousticScoreStatus": {
+                      "const": "projection-derived"
+                    },
+                    "decodeScore": {
+                      "const": null
+                    },
+                    "decodeScoreStatus": {
+                      "const": "projection-derived"
+                    },
+                    "lexicalRepairEligible": {
+                      "const": false
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "modelIdentityStatus": {
+            "enum": [
+              "injected-fixture",
+              "unverified-local"
+            ]
+          }
+        },
+        "required": [
+          "modelIdentityStatus"
+        ]
+      },
+      "then": {
+        "properties": {
+          "nBest": {
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/candidate"
+                },
+                {
+                  "properties": {
+                    "lexicalRepairEligible": {
+                      "const": false
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "languageTag": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 255,
+      "pattern": "^(?![Aa][Uu][Tt][Oo]$)(?:(?:[A-Za-z]{2,3}(?:-[A-Za-z]{3}){0,3}|[A-Za-z]{4}|[A-Za-z]{5,8})(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*(?:-[0-9A-WYZa-wy-z](?:-[A-Za-z0-9]{2,8})+)*(?:-[Xx](?:-[A-Za-z0-9]{1,8})+)?|[Xx](?:-[A-Za-z0-9]{1,8})+)$"
+    },
+    "token": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "text",
+        "startMs",
+        "endMs"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "endMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateId",
+        "rank",
+        "text",
+        "language",
+        "modelId",
+        "modelRevision",
+        "modelManifestSha256",
+        "sourceWindowId",
+        "sourceWindowSha256",
+        "tokenUnit",
+        "tokens",
+        "acousticScore",
+        "acousticScoreStatus",
+        "decodeScore",
+        "decodeScoreStatus",
+        "lexicalRepairEligible"
+      ],
+      "properties": {
+        "candidateId": {
+          "type": "string",
+          "pattern": "^asr-[0-9a-f]{24}$"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "language": {
+          "$ref": "#/$defs/languageTag"
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "modelRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "modelManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sourceWindowId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sourceWindowSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tokenUnit": {
+          "enum": [
+            "token",
+            "character"
+          ]
+        },
+        "tokens": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "acousticScore": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "acousticScoreStatus": {
+          "enum": [
+            "available",
+            "provider-unavailable",
+            "projection-derived"
+          ]
+        },
+        "decodeScore": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "decodeScoreStatus": {
+          "enum": [
+            "available",
+            "provider-unavailable",
+            "projection-derived"
+          ]
+        },
+        "lexicalRepairEligible": {
+          "type": "boolean"
+        },
+        "parentCandidateId": {
+          "type": "string",
+          "pattern": "^asr-[0-9a-f]{24}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "acousticScoreStatus": {
+                "const": "available"
+              }
+            },
+            "required": [
+              "acousticScoreStatus"
+            ]
+          },
+          "then": {
+            "properties": {
+              "acousticScore": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "acousticScore": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "decodeScoreStatus": {
+                "const": "available"
+              }
+            },
+            "required": [
+              "decodeScoreStatus"
+            ]
+          },
+          "then": {
+            "properties": {
+              "decodeScore": {
+                "type": "number"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "decodeScore": {
+                "const": null
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "lexicalRepairEligible": {
+                "const": true
+              }
+            },
+            "required": [
+              "lexicalRepairEligible"
+            ]
+          },
+          "then": {
+            "properties": {
+              "tokens": {
+                "minItems": 1
+              },
+              "acousticScoreStatus": {
+                "const": "available"
+              },
+              "decodeScoreStatus": {
+                "const": "available"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

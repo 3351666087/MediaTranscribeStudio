@@ -16,11 +16,19 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from .adapters import AdapterContext
+from .asr_evidence import (
+    ASR_CANDIDATE_SET_KEYS,
+    AsrEvidenceError,
+    build_asr_candidate_set,
+    project_asr_candidate_set,
+    validate_asr_candidate_set,
+)
 from .errors import WorkerError
 from .language import reconcile_detected_languages
 from .models import (
@@ -512,6 +520,16 @@ class AsrHypothesis:
             raise ValueError(
                 "non-lexical ASR rejection must not invent transcript text"
             )
+        if "candidateSetSchemaVersion" in evidence:
+            try:
+                validate_asr_candidate_set(
+                    evidence,
+                    expected_text=text,
+                )
+            except AsrEvidenceError as exc:
+                raise ValueError(
+                    "ASR candidate evidence is not immutable or traceable"
+                ) from exc
         return cls(
             window_id=_non_empty_text(value.get("windowId"), "asr.windowId"),
             text=text,
@@ -4899,20 +4917,27 @@ class SpeakerPipeline:
         partitioned: list[SpeechWindow] = []
         for source, partition_count in zip(prepared.windows, allocations):
             if partition_count == 1:
-                if not capacity_limited:
-                    partitioned.append(source)
-                    continue
                 metadata = dict(source.metadata)
                 metadata["speakerCountPartition"] = {
-                    "method": "auto-acoustic-contiguous-partition-v1",
+                    "method": (
+                        "auto-acoustic-contiguous-partition-v1"
+                        if constrained_minimum is None
+                        else "policy-minimum-contiguous-partition-v1"
+                    ),
                     "sourceWindowId": source.window_id,
-                    "requestedMinimum": None,
+                    "requestedMinimum": constrained_minimum,
                     "targetEvidenceWindowCount": required,
                     "achievedEvidenceWindowCount": sum(allocations),
                     "partitionCount": 1,
-                    "capacityLimited": True,
+                    "capacityLimited": capacity_limited,
                     "reviewRequired": True,
-                    "reasonCode": "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED",
+                    "reasonCode": (
+                        "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED"
+                        if capacity_limited
+                        else "AUTO_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                        if constrained_minimum is None
+                        else "SPEAKER_COUNT_REQUIRES_SUBWINDOW_EVIDENCE"
+                    ),
                 }
                 partitioned.append(replace(source, metadata=metadata))
                 continue
@@ -5081,7 +5106,25 @@ class SpeakerPipeline:
                     target.start_ms <= midpoint < target.end_ms
                     or midpoint == target.end_ms == source_window.end_ms
                 ):
-                    timestamps.append(dict(item))
+                    projected_item = dict(item)
+                    clipped_start = max(target.start_ms, item["startMs"])
+                    clipped_end = min(target.end_ms, item["endMs"])
+                    if (
+                        clipped_start != item["startMs"]
+                        or clipped_end != item["endMs"]
+                    ):
+                        projected_item.update(
+                            {
+                                "sourceStartMs": item["startMs"],
+                                "sourceEndMs": item["endMs"],
+                                "timingProjection": (
+                                    "clipped-to-target-window-v1"
+                                ),
+                            }
+                        )
+                    projected_item["startMs"] = clipped_start
+                    projected_item["endMs"] = clipped_end
+                    timestamps.append(projected_item)
             text = self._join_aligned_token_text(timestamps)
             evidence = dict(source_hypothesis.evidence)
             evidence.update(
@@ -5095,12 +5138,44 @@ class SpeakerPipeline:
                         "targetStartMs": target.start_ms,
                         "targetEndMs": target.end_ms,
                         "tokenCount": len(timestamps),
+                        "clippedTokenCount": sum(
+                            item.get("timingProjection")
+                            == "clipped-to-target-window-v1"
+                            for item in timestamps
+                        ),
                         "sourceTextSha256": hashlib.sha256(
                             source_hypothesis.text.encode("utf-8")
                         ).hexdigest(),
                     },
                 }
             )
+            if "candidateSetSchemaVersion" in evidence:
+                if text:
+                    try:
+                        evidence.update(
+                            project_asr_candidate_set(
+                                source_hypothesis.evidence,
+                                source_text=source_hypothesis.text,
+                                target_text=text,
+                                target_tokens=timestamps,
+                                target_window_id=target.window_id,
+                                target_start_ms=target.start_ms,
+                                target_end_ms=target.end_ms,
+                            )
+                        )
+                    except AsrEvidenceError as exc:
+                        raise WorkerError(
+                            "ASR_CANDIDATE_EVIDENCE_INVALID",
+                            "ASR candidate evidence could not be projected safely",
+                            details={
+                                "sourceWindowId": source_id,
+                                "targetWindowId": target.window_id,
+                                "reason": str(exc)[:240],
+                            },
+                        ) from exc
+                else:
+                    for key in ASR_CANDIDATE_SET_KEYS:
+                        evidence.pop(key, None)
             if not text:
                 evidence.update(
                     {
@@ -5592,6 +5667,268 @@ class SpeakerPipeline:
                 )
             )
         return tuple(segments)
+
+    @staticmethod
+    def _partition_source_id(segment: TranscriptSegment) -> str | None:
+        partition = segment.evidence.get("speakerCountPartition")
+        if not isinstance(partition, Mapping):
+            return None
+        source_id = partition.get("sourceWindowId")
+        if not isinstance(source_id, str) or not source_id.strip():
+            return None
+        return source_id.strip()
+
+    def _merge_partition_segment_run(
+        self,
+        run: Sequence[TranscriptSegment],
+        *,
+        run_index: int,
+    ) -> TranscriptSegment | None:
+        if len(run) < 2:
+            return None
+        first = run[0]
+        source_id = self._partition_source_id(first)
+        if source_id is None:
+            return None
+        if any(
+            segment.human_locked
+            or segment.revisions
+            or segment.normalized_text != segment.raw_text
+            or segment.display_text != segment.raw_text
+            or self._partition_source_id(segment) != source_id
+            or segment.speaker_id != first.speaker_id
+            or segment.language != first.language
+            or segment.overlapping != first.overlapping
+            or segment.turn_id != first.turn_id
+            for segment in run
+        ):
+            return None
+        if any(
+            left.end_ms != right.start_ms
+            for left, right in zip(run, run[1:])
+        ):
+            return None
+
+        validated_sets: list[dict[str, Any]] = []
+        for segment in run:
+            evidence = segment.evidence.get("asr")
+            if (
+                not isinstance(evidence, Mapping)
+                or "candidateSetSchemaVersion" not in evidence
+            ):
+                return None
+            try:
+                validated_sets.append(
+                    validate_asr_candidate_set(
+                        evidence,
+                        expected_text=segment.raw_text,
+                        expected_start_ms=segment.start_ms,
+                        expected_end_ms=segment.end_ms,
+                    )
+                )
+            except AsrEvidenceError:
+                return None
+
+        identity_keys = (
+            "modelId",
+            "modelRevision",
+            "modelManifestSha256",
+            "modelIdentityStatus",
+            "sourceAudioSha256",
+            "normalizationProfile",
+        )
+        identity = tuple(validated_sets[0][key] for key in identity_keys)
+        if any(
+            tuple(candidate_set[key] for key in identity_keys) != identity
+            for candidate_set in validated_sets[1:]
+        ):
+            return None
+        candidates = [candidate_set["nBest"][0] for candidate_set in validated_sets]
+        parent_ids = {candidate.get("parentCandidateId") for candidate in candidates}
+        if len(parent_ids) != 1 or None in parent_ids:
+            return None
+        languages = {candidate["language"] for candidate in candidates}
+        if len(languages) != 1:
+            return None
+        tokens = [
+            {
+                "text": token["text"],
+                "startMs": token["startMs"],
+                "endMs": token["endMs"],
+            }
+            for candidate in candidates
+            for token in candidate["tokens"]
+        ]
+        if not tokens:
+            return None
+        merged_text = self._join_aligned_token_text(tokens)
+        if not merged_text:
+            return None
+
+        segment_id = f"{source_id}.speaker-run-{run_index:02d}"
+        if len(segment_id) > 120:
+            segment_id = "segment-" + hashlib.sha256(
+                segment_id.encode("utf-8")
+            ).hexdigest()[:24]
+        try:
+            candidate_set = build_asr_candidate_set(
+                model_id=validated_sets[0]["modelId"],
+                model_revision=validated_sets[0]["modelRevision"],
+                model_manifest_sha256=validated_sets[0]["modelManifestSha256"],
+                model_identity_status=validated_sets[0]["modelIdentityStatus"],
+                source_audio_sha256=validated_sets[0]["sourceAudioSha256"],
+                normalization_profile=validated_sets[0]["normalizationProfile"],
+                source_window_id=segment_id,
+                start_ms=first.start_ms,
+                end_ms=run[-1].end_ms,
+                hypotheses=[
+                    {
+                        "text": merged_text,
+                        "language": candidates[0]["language"],
+                        "tokens": tokens,
+                        "acousticScore": None,
+                        "acousticScoreStatus": "projection-derived",
+                        "decodeScore": None,
+                        "decodeScoreStatus": "projection-derived",
+                        "parentCandidateId": next(iter(parent_ids)),
+                    }
+                ],
+                candidate_set_type="projection-derived-top1",
+            )
+        except AsrEvidenceError:
+            return None
+
+        durations = [segment.end_ms - segment.start_ms for segment in run]
+        total_duration = sum(durations)
+        score_ids = tuple(score.speaker_id for score in first.speaker_scores)
+        if any(
+            tuple(score.speaker_id for score in segment.speaker_scores) != score_ids
+            for segment in run[1:]
+        ):
+            return None
+        scores = tuple(
+            SpeakerScore(
+                speaker_id,
+                sum(
+                    segment.speaker_scores[index].score * duration
+                    for segment, duration in zip(run, durations)
+                )
+                / total_duration,
+            )
+            for index, speaker_id in enumerate(score_ids)
+        )
+        ranked = sorted(scores, key=lambda item: item.score, reverse=True)
+        margin = ranked[0].score - ranked[1].score if len(ranked) > 1 else 2.0
+
+        evidence = dict(first.evidence)
+        asr_evidence = dict(evidence["asr"])
+        for key in ASR_CANDIDATE_SET_KEYS:
+            asr_evidence.pop(key, None)
+        asr_evidence.update(candidate_set)
+        asr_evidence["timestamps"] = tokens
+        asr_evidence["asrProjection"] = {
+            "method": "coalesced-speaker-evidence-v1",
+            "sourceWindowId": source_id,
+            "targetWindowId": segment_id,
+            "targetStartMs": first.start_ms,
+            "targetEndMs": run[-1].end_ms,
+            "tokenCount": len(tokens),
+            "constituentCandidateSetSha256": [
+                candidate_set["candidateSetSha256"]
+                for candidate_set in validated_sets
+            ],
+        }
+        evidence["asr"] = asr_evidence
+        partition = dict(evidence["speakerCountPartition"])
+        partition.update(
+            {
+                "coalescingMethod": "same-speaker-contiguous-v1",
+                "constituentWindowIds": [segment.segment_id for segment in run],
+                "constituentWindowCount": len(run),
+            }
+        )
+        evidence["speakerCountPartition"] = partition
+        evidence["boundary"] = {
+            **dict(evidence["boundary"]),
+            "conflict": any(
+                bool(segment.evidence.get("boundary", {}).get("conflict"))
+                for segment in run
+                if isinstance(segment.evidence.get("boundary"), Mapping)
+            ),
+        }
+        evidence["speakerEvidenceCoalescing"] = {
+            "method": "same-source-speaker-run-v1",
+            "sourceWindowId": source_id,
+            "constituentSegmentIds": [segment.segment_id for segment in run],
+            "constituentSegmentCount": len(run),
+        }
+        return replace(
+            first,
+            segment_id=segment_id,
+            end_ms=run[-1].end_ms,
+            raw_text=merged_text,
+            normalized_text=merged_text,
+            display_text=merged_text,
+            confidence=min(segment.confidence for segment in run),
+            speaker_scores=scores,
+            speaker_margin=margin,
+            revisions=(),
+            evidence=evidence,
+        )
+
+    def _coalesce_speaker_evidence_segments(
+        self,
+        segments: Sequence[TranscriptSegment],
+        metrics: PipelineMetricsCollector,
+    ) -> tuple[TranscriptSegment, ...]:
+        output: list[TranscriptSegment] = []
+        run: list[TranscriptSegment] = []
+        source_run_counts: Counter[str] = Counter()
+
+        def flush() -> None:
+            if not run:
+                return
+            source_id = self._partition_source_id(run[0])
+            if source_id is None:
+                output.extend(run)
+                run.clear()
+                return
+            source_run_counts[source_id] += 1
+            merged = self._merge_partition_segment_run(
+                run,
+                run_index=source_run_counts[source_id],
+            )
+            if merged is None:
+                output.extend(run)
+            else:
+                output.append(merged)
+            run.clear()
+
+        for segment in segments:
+            source_id = self._partition_source_id(segment)
+            previous = run[-1] if run else None
+            if (
+                previous is not None
+                and source_id is not None
+                and self._partition_source_id(previous) == source_id
+                and previous.end_ms == segment.start_ms
+                and previous.speaker_id == segment.speaker_id
+                and previous.language == segment.language
+                and previous.overlapping == segment.overlapping
+                and previous.turn_id == segment.turn_id
+            ):
+                run.append(segment)
+                continue
+            flush()
+            run.append(segment)
+        flush()
+        metrics.set_policy(
+            speakerEvidenceCoalescingApplied=len(output) < len(segments),
+            speakerEvidenceInputSegments=len(segments),
+            speakerEvidenceOutputSegments=len(output),
+            speakerEvidenceMergedSegments=len(segments) - len(output),
+        )
+        return tuple(output)
 
     def _stabilize_temporal_assignments(
         self,
@@ -7590,6 +7927,11 @@ class SpeakerPipeline:
             raise
         self._release_after_success(self.embedding_adapter)
 
+        evidence_cache_identity = getattr(
+            self.asr_adapter,
+            "evidence_cache_identity",
+            None,
+        )
         try:
             asr = self._window_stage(
                 stage="asr",
@@ -7608,6 +7950,11 @@ class SpeakerPipeline:
                 metrics=metrics,
                 cache_identity_material={
                     "requestedLanguage": request.language,
+                    "evidenceIdentity": (
+                        evidence_cache_identity()
+                        if callable(evidence_cache_identity)
+                        else None
+                    ),
                 },
             )
         except Exception:
@@ -7894,6 +8241,14 @@ class SpeakerPipeline:
             clusters=clusters,
             request=request,
             stage="post-review",
+            expected_ids=baseline_speaker_ids,
+        )
+        segments = self._coalesce_speaker_evidence_segments(segments, metrics)
+        self._assert_speaker_cardinality(
+            segments=segments,
+            clusters=clusters,
+            request=request,
+            stage="post-speaker-evidence-coalescing",
             expected_ids=baseline_speaker_ids,
         )
         speaker_timeline = self._build_pyannote_speaker_timeline(

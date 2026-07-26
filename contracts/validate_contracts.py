@@ -18,6 +18,7 @@ SCHEMA_VERSION = "1.0.0"
 REQUIRED_SCHEMAS = frozenset(
     {
         "artifact-manifest.schema.json",
+        "asr-evidence.schema.json",
         "business-processing-request.schema.json",
         "job-event.schema.json",
         "pdf-quality-report.schema.json",

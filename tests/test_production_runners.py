@@ -16,6 +16,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from backend.adapters import AdapterContext
+from backend.asr_evidence import (
+    ASR_MODEL_MANIFEST_NAME,
+    validate_asr_candidate_set,
+)
 from backend.errors import WorkerError
 from backend.models import SpeakerScore, TranscriptSegment
 from backend import production_runners
@@ -247,6 +251,114 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         self.assertTrue(
             all(item.evidence["confidenceAvailable"] is False for item in results)
+        )
+        self.assertEqual(
+            [item.evidence["candidateSetType"] for item in results],
+            ["provider-top1-only", "provider-top1-only"],
+        )
+        self.assertEqual(
+            [item.evidence["modelIdentityStatus"] for item in results],
+            ["injected-fixture", "injected-fixture"],
+        )
+        self.assertEqual(
+            [item.evidence["sourceWindowId"] for item in results],
+            ["window-1", "window-2"],
+        )
+        for window, item in zip(self.prepared().windows, results):
+            candidate = item.evidence["nBest"][0]
+            self.assertEqual(candidate["text"], item.text)
+            self.assertEqual(candidate["sourceWindowId"], window.window_id)
+            self.assertIsNone(candidate["acousticScore"])
+            self.assertIsNone(candidate["decodeScore"])
+            self.assertFalse(candidate["lexicalRepairEligible"])
+            validated = validate_asr_candidate_set(
+                item.evidence,
+                expected_text=item.text,
+                expected_start_ms=window.start_ms,
+                expected_end_ms=window.end_ms,
+            )
+            self.assertEqual(
+                validated["candidateSetSha256"],
+                item.evidence["candidateSetSha256"],
+            )
+
+    def test_qwen3_candidate_evidence_binds_manifest_tokens_and_scores(self) -> None:
+        manifest = {
+            "modelId": "Qwen3-ASR-1.7B",
+            "revision": "fixture-model-revision",
+        }
+        (self.qwen_model / ASR_MODEL_MANIFEST_NAME).write_text(
+            json.dumps(manifest, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+        class ScoredTimestampModel:
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                return [
+                    SimpleNamespace(
+                        text=f"hello {index + 1}",
+                        language="English",
+                        acoustic_score=-0.1 - index,
+                        avg_logprob=-0.2 - index,
+                        time_stamps=SimpleNamespace(
+                            items=[
+                                SimpleNamespace(
+                                    text="hello",
+                                    start_time=0.1,
+                                    end_time=0.4,
+                                ),
+                                SimpleNamespace(
+                                    text=str(index + 1),
+                                    start_time=0.5,
+                                    end_time=0.8,
+                                ),
+                            ]
+                        ),
+                    )
+                    for index in range(len(audio))
+                ]
+
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: ScoredTimestampModel(),
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+        results = adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        for window, item in zip(self.prepared().windows, results):
+            candidate = item.evidence["nBest"][0]
+            self.assertEqual(item.evidence["modelIdentityStatus"], "manifest-bound")
+            self.assertEqual(
+                item.evidence["modelRevision"],
+                "fixture-model-revision",
+            )
+            self.assertEqual(candidate["acousticScoreStatus"], "available")
+            self.assertEqual(candidate["decodeScoreStatus"], "available")
+            self.assertTrue(candidate["tokens"])
+            self.assertTrue(candidate["lexicalRepairEligible"])
+            validate_asr_candidate_set(
+                item.evidence,
+                expected_text=item.text,
+                expected_start_ms=window.start_ms,
+                expected_end_ms=window.end_ms,
+            )
+        cache_identity = adapter.evidence_cache_identity()
+        self.assertEqual(cache_identity["candidateSetSchemaVersion"], "1.0.0")
+        self.assertEqual(
+            cache_identity["asrModel"]["modelRevision"],
+            "fixture-model-revision",
         )
 
     def test_qwen3_retries_an_empty_batch_result_individually(self) -> None:

@@ -79,6 +79,7 @@ JSON Schema alone:
 | File | Purpose |
 |---|---|
 | `artifact-manifest.schema.json` | Content-addressed artifact inventory and integrity metadata. |
+| `asr-evidence.schema.json` | Immutable model-, source-window-, token-, score-, candidate-ID-, and hash-bound ASR top-1/N-best evidence. |
 | `business-processing-request.schema.json` | Opt-in local translation and summary request. |
 | `job-event.schema.json` | Versioned worker event stream. |
 | `output-customization.schema.json` | Evidence-bearing canonical report, subtitle, delivery, export, and reversibility snapshot. |

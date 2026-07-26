@@ -10,6 +10,8 @@ import pytest
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+from backend.asr_evidence import build_asr_candidate_set
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACTS = ROOT / "contracts"
@@ -295,3 +297,55 @@ def test_report_locale_is_optional_and_uses_persisted_language_tags() -> None:
         document["reportLocale"] = report_locale
         with pytest.raises(ValidationError):
             validator.validate(document)
+
+
+def test_asr_evidence_schema_accepts_canonical_and_rejects_unsafe_shapes() -> None:
+    validator = _validator("asr-evidence.schema.json")
+    value = build_asr_candidate_set(
+        model_id="Qwen3-ASR-1.7B",
+        model_revision="revision-fixture",
+        model_manifest_sha256=SHA256,
+        model_identity_status="manifest-bound",
+        source_audio_sha256=SHA256,
+        normalization_profile="mono-16khz-f32-v1",
+        source_window_id="window-1",
+        start_ms=0,
+        end_ms=1_000,
+        hypotheses=[
+            {
+                "text": "Hello world",
+                "language": "en-US",
+                "tokens": [
+                    {"text": "Hello", "startMs": 0, "endMs": 400},
+                    {"text": "world", "startMs": 500, "endMs": 900},
+                ],
+                "acousticScore": -0.1,
+                "acousticScoreStatus": "available",
+                "decodeScore": -0.2,
+                "decodeScoreStatus": "available",
+            }
+        ],
+    )
+
+    validator.validate(value)
+
+    malformed_hash = copy.deepcopy(value)
+    malformed_hash["candidateSetSha256"] = "not-a-sha256"
+    with pytest.raises(ValidationError):
+        validator.validate(malformed_hash)
+
+    ineligible_scores = copy.deepcopy(value)
+    ineligible_scores["nBest"][0]["decodeScore"] = None
+    ineligible_scores["nBest"][0]["decodeScoreStatus"] = "provider-unavailable"
+    with pytest.raises(ValidationError):
+        validator.validate(ineligible_scores)
+
+    projected_without_parent = copy.deepcopy(value)
+    projected_without_parent["candidateSetType"] = "projection-derived-top1"
+    projected_without_parent["nBest"][0]["acousticScore"] = None
+    projected_without_parent["nBest"][0]["acousticScoreStatus"] = "projection-derived"
+    projected_without_parent["nBest"][0]["decodeScore"] = None
+    projected_without_parent["nBest"][0]["decodeScoreStatus"] = "projection-derived"
+    projected_without_parent["nBest"][0]["lexicalRepairEligible"] = False
+    with pytest.raises(ValidationError):
+        validator.validate(projected_without_parent)

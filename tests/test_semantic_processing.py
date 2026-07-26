@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
 from backend import (
+    LocalLLMContextWindowError,
     MappingLocalLLMProvider,
     SemanticProcessingRunner,
     WorkerError,
@@ -12,7 +14,10 @@ from backend import (
     validate_semantic_suggestions_artifact,
 )
 from backend.persistence import canonical_json_sha256
-from backend.semantic_processing import _semantic_batch_response_schema
+from backend.semantic_processing import (
+    _segment_request,
+    _semantic_batch_response_schema,
+)
 
 
 def _segment(
@@ -147,6 +152,7 @@ def test_response_schema_binds_each_segment_to_its_evidence_domain() -> None:
                     {
                         "candidateId": "nbest-2",
                         "text": "I cannot go",
+                        "lexicalRepairEligible": True,
                     }
                 ],
                 "allowedEvidenceRefs": [
@@ -176,6 +182,48 @@ def test_response_schema_binds_each_segment_to_its_evidence_domain() -> None:
         "speaker-score:segment-1:speaker-2",
         "asr-nbest:segment-1:nbest-2",
     ]
+
+
+def test_prompt_token_timestamps_are_bounded_and_hash_bound() -> None:
+    asr = {
+        "provider": "fixture-asr",
+        "timestamps": [
+            {
+                "text": f"token-{index}",
+                "startMs": index * 10,
+                "endMs": index * 10 + 5,
+            }
+            for index in range(80)
+        ],
+    }
+    document = _document(first_asr=asr)
+
+    request, refs = _segment_request(
+        document,
+        document["segments"],
+        0,
+        speaker_top_k=3,
+    )
+
+    assert len(request["tokenTimestamps"]) == 24
+    assert request["tokenTimestamps"][0]["text"] == "token-0"
+    assert request["tokenTimestamps"][-1]["text"] == "token-79"
+    assert request["tokenTimestampEvidence"] == {
+        "selectionMethod": "deterministic-even-sample-v1",
+        "originalTokenCount": 80,
+        "selectedTokenCount": 24,
+        "sourceSha256": canonical_json_sha256(
+            [
+                {
+                    "text": f"token-{index}",
+                    "startMs": index * 10,
+                    "endMs": index * 10 + 5,
+                }
+                for index in range(80)
+            ]
+        ),
+    }
+    assert "asr-tokens:segment-1" in refs
 
 
 def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> None:
@@ -217,6 +265,7 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
     assert artifact["metrics"] == {
         "segmentsEvaluated": 3,
         "providerCalls": 1,
+        "contextSplitCount": 0,
         "suggestionCount": 2,
         "speakerSuggestionCount": 1,
         "textSuggestionCount": 1,
@@ -249,6 +298,47 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
     assert document == before
 
 
+def test_context_overflow_splits_batches_without_recording_false_failure() -> None:
+    class ContextLimitedProvider:
+        provider_id = "context-limited-fixture"
+        provider_version = "1"
+        network_policy = "loopback-only"
+
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        def generate_json(self, **kwargs: object) -> dict:
+            payload = json.loads(str(kwargs["user_prompt"]).split("input=", 1)[1])
+            segments = payload["segments"]
+            self.batch_sizes.append(len(segments))
+            if len(segments) > 1:
+                raise LocalLLMContextWindowError("fixture context overflow")
+            item = segments[0]
+            return {
+                "results": [
+                    _keep(
+                        item["segmentId"],
+                        item["currentSpeakerId"],
+                        item["currentNormalizedText"],
+                    )
+                ]
+            }
+
+    provider = ContextLimitedProvider()
+    artifact = SemanticProcessingRunner(
+        provider=provider,
+        model="fixture",
+        batch_size=3,
+    ).run(_document())
+
+    assert artifact["status"] == "completed"
+    assert artifact["failures"] == []
+    assert artifact["metrics"]["providerCalls"] == 3
+    assert artifact["metrics"]["contextSplitCount"] == 2
+    assert artifact["metrics"]["acceptedResultCount"] == 3
+    assert provider.batch_sizes == [3, 2, 1, 1, 1]
+
+
 def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
     nbest = {
         "provider": "fixture-asr",
@@ -258,6 +348,7 @@ def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
                 "text": "I cannot go",
                 "language": "en",
                 "score": -0.2,
+                "lexicalRepairEligible": True,
             }
         ],
     }
@@ -294,6 +385,60 @@ def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
     assert patch["lexicalChange"] is True
     assert patch["protectedTokenChange"] is True
     assert patch["evidenceCandidateId"] == "nbest-2"
+
+
+def test_lexical_repair_rejects_ineligible_nbest_candidate() -> None:
+    document = _document(
+        first_asr={
+            "provider": "fixture-asr",
+            "nBest": [
+                {
+                    "candidateId": "nbest-2",
+                    "text": "I cannot go",
+                    "language": "en",
+                    "score": -0.2,
+                    "lexicalRepairEligible": False,
+                }
+            ],
+        }
+    )
+    provider = MappingLocalLLMProvider(
+        [
+            {
+                "results": [
+                    _result(
+                        "segment-1",
+                        ranking=["speaker-1", "speaker-2"],
+                        text="I cannot go",
+                        candidate_id="nbest-2",
+                        evidence_refs=[
+                            "segment:segment-1",
+                            "asr-nbest:segment-1:nbest-2",
+                        ],
+                    ),
+                    _keep("segment-2", "speaker-1", "Hello world"),
+                    _keep("segment-3", "speaker-2", "Acknowledged"),
+                ]
+            }
+        ]
+    )
+
+    artifact = SemanticProcessingRunner(
+        provider=provider,
+        model="fixture",
+        batch_size=3,
+    ).run(document)
+
+    assert artifact["status"] == "partial"
+    assert artifact["suggestions"] == []
+    assert artifact["rejections"][0]["code"] == "SEMANTIC_TEXT_CHANGE_UNSUPPORTED"
+    assert artifact["evidenceAvailability"] == {
+        "segmentsWithAsrNBest": 1,
+        "segmentsWithLexicalEligibleAlternatives": 0,
+        "segmentsWithTokenTimestamps": 0,
+        "segmentsWithLowSpeakerMargin": 3,
+        "nativeSpeakerTimeline": False,
+    }
 
 
 def test_unsupported_lexical_change_and_human_lock_conflict_are_rejected() -> None:

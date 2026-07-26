@@ -12,6 +12,12 @@ from typing import Mapping, Sequence
 from unittest.mock import patch
 
 from backend.adapters import AdapterContext
+from backend.asr_evidence import (
+    ASR_CANDIDATE_SET_KEYS,
+    build_asr_candidate_set,
+    project_asr_candidate_set,
+    validate_asr_candidate_set,
+)
 from backend.documents import build_review_queue
 from backend.errors import JobCancelled, WorkerError
 from backend.models import (
@@ -21,6 +27,7 @@ from backend.models import (
     TranscriptSegment,
 )
 from backend.production_runners import LocalERes2NetV2Verifier
+from backend.pipeline_metrics import PipelineMetricsCollector
 from backend.speaker_pipeline import (
     AsrHypothesis,
     EmbeddingRecord,
@@ -1978,6 +1985,263 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             result.pipeline_metrics["policy"]["speakerCountPartitionApplied"]
         )
 
+    def test_speaker_partition_projects_candidate_identity_and_drops_empty_set(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(1)
+        source_window = SpeechWindow("window-1", 0, 3_000)
+        timestamps = [
+            {"text": "词", "startMs": 100, "endMs": 400},
+            {"text": "界", "startMs": 900, "endMs": 1_100},
+        ]
+        candidate_set = build_asr_candidate_set(
+            model_id="Qwen3-ASR-1.7B",
+            model_revision="fixture-revision",
+            model_manifest_sha256="b" * 64,
+            model_identity_status="injected-fixture",
+            source_audio_sha256="a" * 64,
+            normalization_profile="mono-16khz-f32-v1",
+            source_window_id=source_window.window_id,
+            start_ms=source_window.start_ms,
+            end_ms=source_window.end_ms,
+            hypotheses=[
+                {
+                    "text": "词界",
+                    "language": "zh",
+                    "tokens": timestamps,
+                    "acousticScoreStatus": "provider-unavailable",
+                    "decodeScoreStatus": "provider-unavailable",
+                }
+            ],
+        )
+        source_hypothesis = AsrHypothesis(
+            window_id=source_window.window_id,
+            text="词界",
+            confidence=0.9,
+            evidence={"timestamps": timestamps, **candidate_set},
+        )
+        targets = (
+            SpeechWindow(
+                "window-1.cardinality-01",
+                0,
+                1_000,
+                metadata={
+                    "speakerCountPartition": {
+                        "sourceWindowId": source_window.window_id
+                    }
+                },
+            ),
+            SpeechWindow(
+                "window-1.cardinality-02",
+                1_000,
+                2_000,
+                metadata={
+                    "speakerCountPartition": {
+                        "sourceWindowId": source_window.window_id
+                    }
+                },
+            ),
+            SpeechWindow(
+                "window-1.cardinality-03",
+                2_000,
+                3_000,
+                metadata={
+                    "speakerCountPartition": {
+                        "sourceWindowId": source_window.window_id
+                    }
+                },
+            ),
+        )
+
+        projected = pipeline._project_asr_to_speaker_windows(
+            source_windows=(source_window,),
+            source_hypotheses=(source_hypothesis,),
+            target_windows=targets,
+            metrics=PipelineMetricsCollector(
+                job_id="candidate-projection",
+                duration_ms=3_000,
+            ),
+        )
+
+        first = projected[0].evidence
+        self.assertEqual(first["candidateSetType"], "projection-derived-top1")
+        self.assertEqual(first["sourceWindowId"], targets[0].window_id)
+        self.assertEqual(first["sourceStartMs"], 0)
+        self.assertEqual(first["sourceEndMs"], 1_000)
+        self.assertEqual(
+            first["nBest"][0]["parentCandidateId"],
+            candidate_set["nBest"][0]["candidateId"],
+        )
+        self.assertFalse(first["nBest"][0]["lexicalRepairEligible"])
+        validate_asr_candidate_set(
+            first,
+            expected_text="词",
+            expected_start_ms=0,
+            expected_end_ms=1_000,
+        )
+
+        second = projected[1].evidence
+        self.assertEqual(projected[1].text, "界")
+        self.assertEqual(
+            second["timestamps"],
+            [
+                {
+                    "text": "界",
+                    "startMs": 1_000,
+                    "endMs": 1_100,
+                    "sourceStartMs": 900,
+                    "sourceEndMs": 1_100,
+                    "timingProjection": "clipped-to-target-window-v1",
+                }
+            ],
+        )
+        self.assertEqual(second["asrProjection"]["clippedTokenCount"], 1)
+        self.assertEqual(
+            second["nBest"][0]["tokens"],
+            [{"index": 0, "text": "界", "startMs": 1_000, "endMs": 1_100}],
+        )
+
+        self.assertEqual(projected[2].text, "")
+        self.assertEqual(
+            projected[2].evidence["disposition"],
+            "rejected-non-lexical",
+        )
+        self.assertTrue(
+            ASR_CANDIDATE_SET_KEYS.isdisjoint(projected[2].evidence)
+        )
+
+    def test_same_speaker_partitions_coalesce_with_rehashed_asr_evidence(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(1)
+        source = build_asr_candidate_set(
+            model_id="Qwen3-ASR-1.7B",
+            model_revision="fixture-revision",
+            model_manifest_sha256="b" * 64,
+            model_identity_status="injected-fixture",
+            source_audio_sha256="a" * 64,
+            normalization_profile="mono-16khz-f32-v1",
+            source_window_id="window-1",
+            start_ms=0,
+            end_ms=2_000,
+            hypotheses=[
+                {
+                    "text": "hello world",
+                    "language": "en",
+                    "tokens": [
+                        {"text": "hello", "startMs": 100, "endMs": 800},
+                        {"text": "world", "startMs": 1_100, "endMs": 1_800},
+                    ],
+                    "acousticScoreStatus": "provider-unavailable",
+                    "decodeScoreStatus": "provider-unavailable",
+                }
+            ],
+        )
+        targets = (
+            SpeechWindow("window-1.cardinality-01", 0, 1_000),
+            SpeechWindow("window-1.cardinality-02", 1_000, 2_000),
+        )
+        hypotheses = tuple(
+            AsrHypothesis(
+                window_id=target.window_id,
+                text=text,
+                confidence=0.9,
+                evidence={
+                    "timestamps": [token],
+                    **project_asr_candidate_set(
+                        source,
+                        source_text="hello world",
+                        target_text=text,
+                        target_tokens=[token],
+                        target_window_id=target.window_id,
+                        target_start_ms=target.start_ms,
+                        target_end_ms=target.end_ms,
+                    ),
+                },
+            )
+            for target, text, token in zip(
+                targets,
+                ("hello", "world"),
+                (
+                    {"text": "hello", "startMs": 100, "endMs": 800},
+                    {"text": "world", "startMs": 1_100, "endMs": 1_800},
+                ),
+            )
+        )
+        segments = tuple(
+            TranscriptSegment(
+                segment_id=target.window_id,
+                start_ms=target.start_ms,
+                end_ms=target.end_ms,
+                speaker_id="speaker-1",
+                raw_text=hypothesis.text,
+                normalized_text=hypothesis.text,
+                display_text=hypothesis.text,
+                confidence=0.9,
+                speaker_scores=(SpeakerScore("speaker-1", 1.0),),
+                speaker_margin=2.0,
+                language="en",
+                turn_id="turn-1",
+                evidence={
+                    "preparation": {"provider": {"id": "fixture", "version": "1"}},
+                    "boundary": {
+                        "provider": {"id": "fixture", "version": "1"},
+                        "conflict": False,
+                    },
+                    "speakerCountPartition": {
+                        "method": "auto-acoustic-contiguous-partition-v1",
+                        "sourceWindowId": "window-1",
+                        "reviewRequired": True,
+                    },
+                    "asr": {
+                        "provider": {"id": "fixture", "version": "1"},
+                        **dict(hypothesis.evidence),
+                    },
+                    "voiceprint": {
+                        "provider": {"id": "fixture", "version": "1"},
+                        "confidence": 1.0,
+                    },
+                    "overlap": {
+                        "provider": {"id": "fixture", "version": "1"},
+                        "confidence": 1.0,
+                    },
+                },
+            )
+            for target, hypothesis in zip(targets, hypotheses)
+        )
+        metrics = PipelineMetricsCollector(
+            job_id="partition-coalescing",
+            duration_ms=2_000,
+        )
+
+        merged = pipeline._coalesce_speaker_evidence_segments(segments, metrics)
+
+        self.assertEqual(len(merged), 1)
+        segment = merged[0]
+        self.assertEqual(segment.segment_id, "window-1.speaker-run-01")
+        self.assertEqual((segment.start_ms, segment.end_ms), (0, 2_000))
+        self.assertEqual(segment.raw_text, "hello world")
+        candidate = validate_asr_candidate_set(
+            segment.evidence["asr"],
+            expected_text="hello world",
+            expected_start_ms=0,
+            expected_end_ms=2_000,
+        )
+        self.assertEqual(
+            candidate["nBest"][0]["parentCandidateId"],
+            source["nBest"][0]["candidateId"],
+        )
+        self.assertEqual(
+            segment.evidence["speakerEvidenceCoalescing"][
+                "constituentSegmentCount"
+            ],
+            2,
+        )
+        policy = metrics.as_dict()["policy"]
+        self.assertTrue(policy["speakerEvidenceCoalescingApplied"])
+        self.assertEqual(policy["speakerEvidenceInputSegments"], 2)
+        self.assertEqual(policy["speakerEvidenceOutputSegments"], 1)
+
     def test_auto_count_samples_long_vad_and_merges_same_voice(self) -> None:
         preparation = FakePreparationAdapter(
             1,
@@ -2068,6 +2332,47 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 == "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED"
                 for segment in result.segments
             )
+        )
+
+    def test_auto_count_marks_unsplit_residue_in_partition_lattice(self) -> None:
+        preparation = FakePreparationAdapter(
+            2,
+            window_ranges={
+                "window-1": (0, 1_100),
+                "window-2": (1_100, 5_100),
+            },
+        )
+        pipeline, _, asr, cam, _ = self.pipeline(
+            1,
+            windows=2,
+            preparation=preparation,
+            cam=FakeCamPlusAdapter(1, identical=True),
+        )
+
+        result = pipeline.transcribe(
+            self.request(1, "auto", job_id="auto-partition-residue"),
+            self.context("auto-partition-residue"),
+        )
+
+        self.assertEqual(asr.calls, [("window-1", "window-2")])
+        self.assertEqual(len(cam.calls[0]), 5)
+        self.assertIn("window-1", cam.calls[0])
+        residue = next(
+            segment for segment in result.segments if segment.segment_id == "window-1"
+        )
+        partition = residue.evidence["speakerCountPartition"]
+        self.assertEqual(partition["partitionCount"], 1)
+        self.assertEqual(
+            partition["method"],
+            "auto-acoustic-contiguous-partition-v1",
+        )
+        self.assertTrue(partition["reviewRequired"])
+        self.assertEqual(result.speaker_count_estimate.estimated_count, 1)
+        self.assertEqual(
+            result.pipeline_metrics["policy"][
+                "speakerCountPartitionTargetEvidenceWindows"
+            ],
+            6,
         )
 
     def test_auto_count_uses_audited_full_timeline_pyannote_prior(self) -> None:

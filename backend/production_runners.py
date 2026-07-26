@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .adapters import AdapterContext
+from .asr_evidence import (
+    ASR_CANDIDATE_SET_SCHEMA_VERSION,
+    build_asr_candidate_set,
+    model_identity_from_manifest,
+)
 from .errors import WorkerError
 from .language import (
     normalize_language_tag,
@@ -77,6 +82,20 @@ def _mps_is_available() -> bool:
     except ImportError:
         return False
     return bool(torch.backends.mps.is_available())
+
+
+def _optional_result_score(result: Any, names: Sequence[str]) -> float | None:
+    for name in names:
+        raw = getattr(result, name, None)
+        if (
+            raw is not None
+            and not isinstance(raw, bool)
+            and isinstance(raw, (int, float))
+        ):
+            score = float(raw)
+            if math.isfinite(score):
+                return score
+    return None
 
 
 def _prepare_eres2netv2_mps_pipeline(
@@ -1018,7 +1037,7 @@ class LocalQwen3AsrAdapter:
     """Qwen3-ASR-1.7B runner using explicit local model directories only."""
 
     adapter_id = "Qwen3-ASR-1.7B"
-    version = "1.4.0"
+    version = "1.5.0"
 
     def __init__(
         self,
@@ -1045,9 +1064,34 @@ class LocalQwen3AsrAdapter:
             raise ValueError("max_inference_batch_size must be positive")
         self.max_inference_batch_size = int(max_inference_batch_size)
         self._model_factory = model_factory
+        self._model_identity = model_identity_from_manifest(
+            self.model_path,
+            injected_fixture=model_factory is not None,
+        )
+        self._forced_aligner_identity = (
+            model_identity_from_manifest(
+                self.forced_aligner_path,
+                injected_fixture=model_factory is not None,
+            )
+            if self.forced_aligner_path is not None
+            else None
+        )
         self._model_instance: Any = None
         self._load_lock = threading.Lock()
         self._inference_lock = threading.Lock()
+
+    def evidence_cache_identity(self) -> dict[str, Any]:
+        """Invalidate ASR caches when evidence or local model identity changes."""
+
+        return {
+            "candidateSetSchemaVersion": ASR_CANDIDATE_SET_SCHEMA_VERSION,
+            "asrModel": dict(self._model_identity),
+            "forcedAlignerModel": (
+                dict(self._forced_aligner_identity)
+                if self._forced_aligner_identity is not None
+                else None
+            ),
+        }
 
     def _model(self) -> Any:
         with self._load_lock:
@@ -1363,6 +1407,58 @@ class LocalQwen3AsrAdapter:
                 ],
                 requested_language=normalized_request_language,
             )
+            acoustic_score = _optional_result_score(
+                result,
+                ("acoustic_score", "acousticScore"),
+            )
+            decode_score = _optional_result_score(
+                result,
+                (
+                    "decode_score",
+                    "decodeScore",
+                    "avg_logprob",
+                    "average_logprob",
+                    "score",
+                ),
+            )
+            candidate_set = build_asr_candidate_set(
+                model_id="Qwen3-ASR-1.7B",
+                model_revision=self._model_identity["modelRevision"],
+                model_manifest_sha256=(
+                    self._model_identity["modelManifestSha256"]
+                ),
+                model_identity_status=(
+                    self._model_identity["modelIdentityStatus"]
+                ),
+                source_audio_sha256=prepared.source_fingerprint,
+                normalization_profile=prepared.normalization_profile,
+                source_window_id=window.window_id,
+                start_ms=window.start_ms,
+                end_ms=window.end_ms,
+                hypotheses=[
+                    {
+                        "text": text,
+                        "language": window_language,
+                        "tokens": [
+                            item
+                            for item in timestamps
+                            if str(item.get("text") or "").strip()
+                        ],
+                        "acousticScore": acoustic_score,
+                        "acousticScoreStatus": (
+                            "available"
+                            if acoustic_score is not None
+                            else "provider-unavailable"
+                        ),
+                        "decodeScore": decode_score,
+                        "decodeScoreStatus": (
+                            "available"
+                            if decode_score is not None
+                            else "provider-unavailable"
+                        ),
+                    }
+                ],
+            )
             output.append(
                 AsrHypothesis(
                     window_id=window.window_id,
@@ -1385,6 +1481,7 @@ class LocalQwen3AsrAdapter:
                         "languageCandidates": list(language_candidates),
                         "language": window_language,
                         "timestamps": timestamps,
+                        **candidate_set,
                     },
                 )
             )

@@ -2,7 +2,7 @@
 
 This tool deliberately does not bypass review gates. It binds the transcript
 and review queue by hash, runs the loopback-only Ollama business pipeline, and
-records translation, polish, and summary outputs as suggestions that still
+records translation and summary outputs as suggestions that still
 require human approval.
 """
 
@@ -88,7 +88,6 @@ def validate_business_artifacts(
 
     expected_variants = {
         *(f"translation:{target}" for target in config.translation_targets),
-        *(("polish",) if config.polish else ()),
         *(("summary",) if config.summary else ()),
     }
     manifest_paths = [path for path in artifacts if path.name == "business-manifest.v1.json"]
@@ -142,12 +141,6 @@ def validate_business_artifacts(
                     "status": value.get("status"),
                     "segmentCount": len(segments) if isinstance(segments, list) else 0,
                     "targetLanguage": value.get("targetLanguage"),
-                }
-            elif variant == "polish":
-                variant_metrics[variant] = {
-                    "status": value.get("status"),
-                    "segmentCount": len(value.get("segments", [])),
-                    "diffCount": len(value.get("diff", [])),
                 }
             else:
                 evidence_ids = {
@@ -285,7 +278,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-open-review-items", type=_nonnegative_int, required=True
     )
     parser.add_argument("--translation-target", action="append", default=[])
-    parser.add_argument("--polish", action="store_true")
     parser.add_argument("--summary", action="store_true")
     parser.add_argument("--model", default="qwen3.5:9b")
     parser.add_argument("--output-locale", default="zh-CN")
@@ -304,13 +296,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("--replace and --resume are mutually exclusive")
     config = BusinessProcessingConfig(
         translation_targets=tuple(args.translation_target),
-        polish=args.polish,
         summary=args.summary,
         model=args.model,
         output_locale=args.output_locale,
     )
     if not config.enabled:
-        raise RuntimeError("at least one translation, polish, or summary task is required")
+        raise RuntimeError("at least one translation or summary task is required")
     provider = OllamaLocalProvider(
         LocalLLMConfig(
             model=args.model,

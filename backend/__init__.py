@@ -11,6 +11,7 @@ from .adapters import (
 from .errors import JobCancelled, WorkerError
 from .business_processing import (
     BUSINESS_PROMPT_VERSION,
+    BUSINESS_REQUEST_SCHEMA_VERSION,
     BUSINESS_SCHEMA_VERSION,
     BusinessProcessingConfig,
     BusinessProcessingRunner,
@@ -21,6 +22,14 @@ from .local_llm import (
     LocalLLMProvider,
     MappingLocalLLMProvider,
     OllamaLocalProvider,
+)
+from .semantic_processing import (
+    SEMANTIC_APPLICATION_POLICY,
+    SEMANTIC_PROMPT_VERSION,
+    SEMANTIC_SUGGESTIONS_SCHEMA_VERSION,
+    SemanticProcessingRunner,
+    attach_semantic_suggestions_to_review,
+    validate_semantic_suggestions_artifact,
 )
 from .models import (
     CHECKPOINT_SCHEMA_VERSION,
@@ -87,6 +96,7 @@ from .service import WorkerService
 __all__ = [
     "AdapterContext",
     "BUSINESS_PROMPT_VERSION",
+    "BUSINESS_REQUEST_SCHEMA_VERSION",
     "BUSINESS_SCHEMA_VERSION",
     "BusinessProcessingConfig",
     "BusinessProcessingRunner",
@@ -127,6 +137,10 @@ __all__ = [
     "SpeakerCountEstimate",
     "SpeakerCountMode",
     "SpeakerCountPolicy",
+    "SEMANTIC_APPLICATION_POLICY",
+    "SEMANTIC_PROMPT_VERSION",
+    "SEMANTIC_SUGGESTIONS_SCHEMA_VERSION",
+    "SemanticProcessingRunner",
     "StartJobRequest",
     "TRANSCRIPT_SCHEMA_VERSION",
     "TranscriptSegment",
@@ -142,6 +156,7 @@ __all__ = [
     "WorkerProtocol",
     "WorkerService",
     "apply_offline_environment",
+    "attach_semantic_suggestions_to_review",
     "build_production_composition",
     "compile_output_customizations",
     "canonical_speaker_ids",
@@ -152,5 +167,6 @@ __all__ = [
     "production_runtime_modules",
     "run_jsonl_loop",
     "run_production_preflight",
+    "validate_semantic_suggestions_artifact",
     "validate_job_id",
 ]

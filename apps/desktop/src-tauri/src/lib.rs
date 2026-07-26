@@ -611,7 +611,6 @@ struct CreateJobRequest {
     local_llm_endpoint_policy: String,
     local_llm_auto_apply: bool,
     translation_targets: Vec<String>,
-    polish: bool,
     summary: bool,
     output_locale: String,
     business_prompt_version: String,
@@ -771,7 +770,6 @@ struct PreparedJob {
     local_llm_endpoint_policy: String,
     local_llm_auto_apply: bool,
     translation_targets: Vec<String>,
-    polish: bool,
     summary: bool,
     output_locale: String,
     business_prompt_version: String,
@@ -1095,8 +1093,7 @@ fn validate_business_processing(request: &CreateJobRequest) -> IpcResult<()> {
         }
     }
 
-    let has_business_work =
-        !request.translation_targets.is_empty() || request.polish || request.summary;
+    let has_business_work = !request.translation_targets.is_empty() || request.summary;
     let mode_matches_work = matches!(
         (request.local_llm_mode, has_business_work),
         (LocalLlmMode::Business, true) | (LocalLlmMode::Disabled, false)
@@ -1104,7 +1101,7 @@ fn validate_business_processing(request: &CreateJobRequest) -> IpcResult<()> {
     if !mode_matches_work {
         return Err(IpcError::new(
             IpcErrorCode::InvalidRequest,
-            "localLlmMode must be business exactly when translation, polishing, or summary work is requested.",
+            "localLlmMode must be business exactly when translation or summary work is requested.",
         ));
     }
     Ok(())
@@ -1285,7 +1282,6 @@ fn prepare_job(request: CreateJobRequest) -> IpcResult<PreparedJob> {
         local_llm_endpoint_policy: request.local_llm_endpoint_policy,
         local_llm_auto_apply: request.local_llm_auto_apply,
         translation_targets: request.translation_targets,
-        polish: request.polish,
         summary: request.summary,
         output_locale: request.output_locale,
         business_prompt_version: request.business_prompt_version,
@@ -1456,7 +1452,6 @@ fn build_job_start_payload(
                 .collect(),
         ),
     );
-    payload.insert("polish".to_owned(), Value::Bool(prepared.polish));
     payload.insert("summary".to_owned(), Value::Bool(prepared.summary));
     payload.insert(
         "outputLocale".to_owned(),
@@ -7523,7 +7518,6 @@ mod tests {
             local_llm_endpoint_policy: LOCAL_LLM_ENDPOINT_POLICY.to_owned(),
             local_llm_auto_apply: false,
             translation_targets: Vec::new(),
-            polish: false,
             summary: false,
             output_locale: "en".to_owned(),
             business_prompt_version: BUSINESS_PROMPT_VERSION.to_owned(),

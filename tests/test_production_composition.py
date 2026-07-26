@@ -158,7 +158,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 "pyannoteMappingMarginThreshold": 0.07,
                 "pyannotePrimaryDominanceThreshold": 0.65,
                 "pyannoteMode": pyannote_mode,
-                "localLlmMode": "disabled",
+                "localLlmMode": "suggestion-only",
             },
             "pdf": {
                 "minimumScore": 85,

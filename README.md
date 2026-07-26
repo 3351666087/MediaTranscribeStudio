@@ -30,10 +30,10 @@ identified regression fixtures may use other languages.
   Actual transcription and derived-text coverage depends on the installed ASR
   and local-LLM model packs; the repository does not claim universal language
   support.
-- **Local business processing:** the backend and versioned contracts implement
-  opt-in translation, source-language semantic polishing, and
-  evidence-grounded summaries as separate derived artifacts produced through a
-  local LLM provider.
+- **Local semantic and business processing:** the backend runs mandatory,
+  evidence-bound semantic arbitration for transcribable speech and implements
+  opt-in translation and evidence-grounded summaries through a local LLM
+  provider.
 - **Java PDF production path:** the implemented PDF sidecar uses
   OpenHTMLtoPDF `1.0.10` and Apache PDFBox `2.0.30`. Python prepares canonical
   report data and invokes the sidecar; it is not the production PDF renderer.
@@ -57,8 +57,9 @@ Local audio or video
   -> CAM++ speaker embeddings
   -> dynamic speaker-count selection and clustering
   -> selective ERes2NetV2 or pyannote escalation
+  -> mandatory local semantic arbitration and minimal evidence-bound text repair
   -> human review and versioned transcript artifacts
-  -> optional local translation, polishing, and summaries
+  -> optional local translation and summaries
   -> canonical ReportDocument
   -> Java OpenHTMLtoPDF + PDFBox sidecar
   -> PDF artifacts and quality reports
@@ -111,18 +112,23 @@ This policy is language-neutral, but it does not imply universal model
 coverage. The selected ASR and local LLM models must support the requested
 languages, and all required model files must be available locally.
 
-## Translation, polishing, and summaries
+## Semantic arbitration, translation, and summaries
 
-The backend supports three opt-in business operations:
+Every production job with transcribable speech runs local semantic arbitration.
+It may rerank existing acoustic speaker candidates and propose minimal
+source-language text repairs, but only within immutable acoustic top-K and ASR
+N-best evidence. Suggestions require human approval and never mutate `rawText`,
+speaker timelines, timestamps, or human locks.
+
+The backend supports two opt-in business operations:
 
 - translation to one or more validated target languages;
-- semantic polishing in the source language;
 - summaries whose claims reference valid source segment IDs and time ranges.
 
 These operations produce separate, versioned artifacts. They do not mutate the
 source transcript, speaker assignments, speaker identity evidence, acoustic
 evidence, or timestamps. No local model may silently promote a translation,
-polish, summary, or semantic suggestion into source evidence. The default
+summary, or semantic suggestion into source evidence. The default
 Ollama-compatible provider is restricted to loopback endpoints, rejects
 redirects, and requires schema-valid JSON output.
 

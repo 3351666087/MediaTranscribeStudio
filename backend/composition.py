@@ -217,6 +217,14 @@ def build_production_composition(
                 endpoint=request.local_llm_endpoint,
             )
         ),
+        semantic_provider_factory=lambda request: OllamaLocalProvider(
+            LocalLLMConfig(
+                model=config.speaker.local_llm_model,
+                endpoint=request.local_llm_endpoint,
+            )
+        ),
+        semantic_required=True,
+        semantic_model=config.speaker.local_llm_model,
     )
     return ProductionComposition(service=service, preflight=preflight)
 

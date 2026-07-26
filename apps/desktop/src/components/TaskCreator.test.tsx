@@ -1136,11 +1136,6 @@ describe("TaskCreator dynamic speaker policies", () => {
     );
     await user.click(
       screen.getByRole("checkbox", {
-        name: /Source-language semantic polish/u,
-      }),
-    );
-    await user.click(
-      screen.getByRole("checkbox", {
         name: /Structured meeting intelligence/u,
       }),
     );
@@ -1212,11 +1207,6 @@ describe("TaskCreator dynamic speaker policies", () => {
     );
     expect(
       screen.getByRole("checkbox", { name: /Translation artifacts/u }),
-    ).not.toBeChecked();
-    expect(
-      screen.getByRole("checkbox", {
-        name: /Source-language semantic polish/u,
-      }),
     ).not.toBeChecked();
     expect(
       screen.getByRole("checkbox", {

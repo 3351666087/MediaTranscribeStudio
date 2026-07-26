@@ -44,7 +44,6 @@ function createRequest(index: number): CreateJobRequest {
     localLlmEndpointPolicy: "loopback-only",
     localLlmAutoApply: false,
     translationTargets: [],
-    polish: false,
     summary: false,
     outputLocale: "zh-CN",
     businessPromptVersion: "business-v1",

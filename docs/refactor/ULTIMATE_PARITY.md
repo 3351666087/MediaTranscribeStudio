@@ -33,9 +33,8 @@ Every capability is required and maps bidirectionally to exactly one release gat
 | Capability | Gate | Required result |
 | --- | --- | --- |
 | Production transcription | `ULT-TRANSCRIPTION-001` | Stable transcription, timing, language, persistence, and failure behavior |
-| Speaker diarization | `ULT-SPEAKER-001` | Accurate boundaries, identities, cardinality, sequence decoding, and semantic attribution |
+| Speaker diarization and semantic arbitration | `ULT-SPEAKER-001` | Accurate boundaries, identities, cardinality, evidence-bound speaker reranking, and minimal text-repair proposals |
 | Local translation | `ULT-TRANSLATION-001` | Requested-language output without speaker or timing mutation |
-| Local polishing | `ULT-POLISH-001` | Schema-bound semantic correction with invariant preservation |
 | Local summary | `ULT-SUMMARY-001` | Evidence-bound summary with valid segment references |
 | Export | `ULT-EXPORT-001` | Contract-valid report document, artifact manifest, and exports |
 | Dynamic-N | `ULT-DYNAMIC-N-001` | Automatic, manual, and hybrid speaker cardinality without a fixed product maximum |
@@ -302,7 +301,7 @@ unverified pages, or an unbound quality/manifest document also fails.
 - Clearly identified non-English strings may be retained only when they are
   necessary regression fixtures, rendering examples, or source-language test
   evidence.
-- Transcription, translation, polishing, summary, export, UI, and PDF behavior must not assume Chinese-only input.
+- Transcription, semantic arbitration, translation, summary, export, UI, and PDF behavior must not assume Chinese-only input.
 - The real MOV regression may use a concrete Chinese language tag, but no product API may treat that fixture as the global default.
 - Runtime language coverage depends on the installed and validated ASR,
   alignment, font, and local-LLM model packs. The project does not claim
@@ -317,9 +316,9 @@ parity policy or checker code.
 
 ## Local small-model artifact policy
 
-- Local small models may produce translation, source-language semantic-polish,
-  and evidence-grounded summary artifacts only through versioned derived
-  contracts.
+- Local small models must produce evidence-bound semantic-arbitration
+  suggestions for transcribable speech and may produce translation and
+  evidence-grounded summary artifacts only through versioned contracts.
 - Derived artifacts must retain source-document identity, language metadata,
   model provenance, validation status, and evidence references where required.
 - No model output may silently rewrite source transcript text, timestamps,
@@ -330,7 +329,7 @@ parity policy or checker code.
 
 ## Offline and security policy
 
-- Local LLM translation, polishing, and summary providers must be restricted to loopback endpoints.
+- Local LLM semantic-arbitration, translation, and summary providers must be restricted to loopback endpoints.
 - Malformed provider responses, remote endpoints, schema violations, non-finite values, and invalid evidence references must fail closed.
 - Release evidence must demonstrate that required production workflows do not depend on remote assets or unapproved network services.
 - Evidence and customer-derived artifacts remain outside the repository.
@@ -549,7 +548,7 @@ The Ultimate release is blocked.
 
 Current manifest states are:
 
-- `in_progress`: transcription, speaker diarization, translation, polishing, summary, Dynamic-N, Java PDF, desktop, and offline/security.
+- `in_progress`: transcription, speaker diarization and semantic arbitration, translation, summary, Dynamic-N, Java PDF, desktop, and offline/security.
 - `blocked`: export, Design Pack, globalization, packaging/rollback, and legacy cutover.
 - `not_started`: real MOV automatic mode and real MOV manual five-speaker mode.
 

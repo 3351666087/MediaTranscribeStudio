@@ -1,7 +1,7 @@
 # MediaTranscribeStudio 重构任务清单
 
 > 开始日期：2026-07-21
-> 当前迭代：2026-07-25
+> 当前迭代：2026-07-26
 > 分支：`codex/ts-local-llm-refactor`
 > 原则：先建立可验证替代链路，再删除旧实现；每项只有在本地证据通过后才能勾选。
 > 状态说明：`[x]` 表示审计证据已经存在，不表示整个重构、动态人数或商业发布已经完成。
@@ -170,11 +170,11 @@
 ### 7.5 本地业务模型与完整业务覆盖
 
 - [ ] 翻译执行分块、上下文重叠、术语一致性检查和完整性对账，禁止大段英文静默漏译。
-- [ ] 润色不得删除事实、数字、角色或时间边界；所有改动可追踪并可恢复原文。
+- [ ] 强制语义仲裁不得删除事实、数字、角色或时间边界；所有建议必须绑定声学/ASR 候选、可追踪并可拒绝。
 - [ ] 总结覆盖全部输入分块，并校验议题、行动项、决定和说话人引用。
 - [ ] 本地小模型失败、越界或输出不完整时 fail closed，并回退到未经修改的已验证内容。
 - [ ] 找到达到登记阈值的本地模型，或明确保持“仅建议、人工确认”的产品策略。
-- [ ] 原仓库翻译、润色、总结、字幕、报告和导出业务全部迁移后才允许删除旧实现。
+- [ ] 原仓库翻译、总结、字幕、报告和导出业务全部迁移后才允许删除旧实现。
 
 ### 7.6 原生 TypeScript UI 与 Design Pack
 
@@ -260,8 +260,8 @@
 
 - [ ] 建立可校准的 Dynamic-N 多模型级联：内容探测后先分离无声/非词汇声/可转写人声，再联合 VAD、重叠检测、turn boundary、CAM++/ERes2NetV2 声纹和隔离 Pyannote 轨道生成带置信区间的人数/身份候选；按场景与逐段语言路由 ASR，并在声学模型冲突、支持集外语言或人数后验不稳定时输出 `und`/复核而不是强行定人或猜语言。人数上限只能由可审计资源预算约束，不能把窗口数、人工期望或 LLM 文本推断当成声学人数真值。
 - [ ] 建立模型选择、微调与混合使用门禁：为 VAD/overlap、边界、声纹、diarization、language ID、ASR 和本地 LLM 分别登记版本、许可证、量化/设备、缓存身份和适用分桶；在按 dataset/recording/speaker 隔离的开发集做基线与消融，只允许以从未调参的 held-out 同时改善人数误差、DER/JER/confusion、边界、WER/CER、语言/切换、复核量、RTF 和 RAM/VRAM 后升级。微调数据、adapter 和训练配置必须可复现，任一失败域不得被平均分掩盖。
-- [ ] 充分利用本地 LLM 但保持证据边界：只对带时间戳与声学候选的 N-best 结果执行受约束的语言一致性检查、候选重排、术语/专名修正建议、翻译、保守润色和证据化摘要；说话人合并/拆分、语言切换和文本修改都必须引用原候选并保留 diff。LLM 不得凭语义创建声学不存在的说话人/片段，不得覆盖 `und` 或 review blocker，未通过真实 held-out 校准前继续 `suggestion-only` 和人工批准。
-- [x] 为正常有人声和无人声输入持久化版本化 `voice-activity.v1.json`：包含媒体时长、VAD 候选、语音总时长与占比、模型/配置/源哈希和终态；区分 `no-speech-candidates-detected`、`no-lexical-speech-detected` 与 `transcribable-speech-detected`。前两类由服务保存证据后以 `completed_no_speech` 成功终止，不进入说话人、翻译、润色、字幕或 PDF，也不伪造空 transcript；VAD 的 0 窗口属于推理正常完成而非模型故障。内部校验拒绝重叠窗口、哈希/job 不匹配、覆盖率造假和分类矛盾；契约校验器已从过时的“恰好 7 个 schema”改为检查 23 个现有 schema 及明确必需集合。聚焦回归为 `156 passed, 77 subtests passed`，契约校验通过。
+- [ ] 充分利用本地 LLM 但保持证据边界：对带时间戳与声学候选的结果强制执行语言一致性检查、候选重排和最小语法/术语/专名修复建议，并独立提供翻译与证据化摘要；说话人重排和内容词修改都必须引用原候选并保留 diff。LLM 不得凭语义创建声学不存在的说话人/片段，不得覆盖 `und` 或 review blocker，未通过真实 held-out 校准前继续 `suggestion-only` 和人工批准。
+- [x] 为正常有人声和无人声输入持久化版本化 `voice-activity.v1.json`：包含媒体时长、VAD 候选、语音总时长与占比、模型/配置/源哈希和终态；区分 `no-speech-candidates-detected`、`no-lexical-speech-detected` 与 `transcribable-speech-detected`。前两类由服务保存证据后以 `completed_no_speech` 成功终止，不进入说话人、语义仲裁、翻译、字幕或 PDF，也不伪造空 transcript；VAD 的 0 窗口属于推理正常完成而非模型故障。内部校验拒绝重叠窗口、哈希/job 不匹配、覆盖率造假和分类矛盾；契约校验器已从过时的“恰好 7 个 schema”改为检查 23 个现有 schema 及明确必需集合。聚焦回归为 `156 passed, 77 subtests passed`，契约校验通过。
 - [x] 生产 ASR 输入按声学说话人切点和独立语言时长切点共同分窗，每个语言识别窗口严格不超过 `12000 ms`；同一 speaker turn 内的多个语言窗口分别保存 Qwen 原始语言候选，文档级多语种结果汇总为 `mul`。
 - [x] 用 MPS 严格生产配置完成两个用户长媒体的 16 个全时段分层窗口：`16/16` 技术执行完成、失败 `0`、超时 `0`、强制清理进程 `0`，全部保存人声、逐字稿、流水线指标和复核队列；最长实际语言窗为 `11940 ms`，满足 `12000 ms` 上限。16 例均检测到可转写语音并输出 `zh`，自动人数分布为 `N=1:5 / N=2:3 / N=3:3 / N=6:2 / N=7:2 / N=8:1`，但 `16/16` 均为 `review.required`，合计 281 项、平均 17.5625 项，且全部缺少人数/turn/ASR 真值，因此只证明技术闭环可执行，不证明人数、DER/JER、语言或转写质量通过。无原文审计汇总位于 `.runtime_cache/sample-library/long-media-20260724/results/mps-v1/long-media-run-summary.v1.json`，可由 `tools/summarize_sample_run.py` 重新生成并校验 job/hash 关联和语言窗上限；聚焦测试 `5 passed`。
 - [x] 将长媒体审计升级到 schema `1.1.0` 的逐源终态且明确禁止以抽样冒充整段生产运行：MOV 的 1 秒声学帧覆盖率为 `0.999939144`，8 个分层窗口自动人数分布为 `1:1 / 2:3 / 3:1 / 6:1 / 7:1 / 8:1`，众数一致率仅 `0.375`，151 个 open review，RTF 中位数/范围为 `1.783071116 / 0.008561821–3.024330761`，峰值 RAM `666.484375 MB`；M4A 的全时段声学覆盖率为 `1.0`，人数分布为 `1:4 / 3:2 / 6:1 / 7:1`，众数一致率 `0.5`，130 个 open review，RTF 中位数/范围为 `1.855942458 / 0.58385773–2.278774173`，峰值 RAM `752.34375 MB`。两者五类必需分层和窗口集合均完整，但人数跨窗均不稳定、`completeSourceProductionRunObserved=false`、所有真值资格计数为 0、`manualFiveQualityEligible=false`、`releaseApproved=false`；全时段声学扫描也明确记录 `isSpeechClassification=false`，不能替代逐窗 VAD 或整段 ASR。汇总 SHA-256 为 `c6977b24f2d02ac9bd6dfacd629bd2317ff628b7696c54c4eb9cfdfc9349db02`；因此 7.8 的 M4A 整段终态和 MOV 人工确认五人验收继续保持未完成。
@@ -302,10 +302,10 @@
 - [ ] 使用有逐段语言真值的真实代码切换语料验证同一说话人在 `en/zh/es` 等语言间切换；逐段报告 language ID accuracy、切换点误差、WER/CER 和 `und`/复核率，当前仅有确定性单元回归，不得标为真实质量通过。
 - [ ] 使用有 RTTM/turn、speaker-language 和逐字稿真值的真实多人多语语料验证“不同说话人使用不同语言”与“多个说话人各自切换语言”；说话人、语言和文本必须在同一时间轴联合评分，不能用单人拼接样本冒充真实多人门禁。
 - [ ] 使用真实媒体扩大人声存在性与语言识别验证集：至少覆盖清晰语音、远场、电话、强噪声、音乐背景、纯音乐、环境声、静音、短促非词汇声、重叠说话和代码切换；当前已完成契约与确定性回归，但纯音乐/环境声等真实负样本的误报/漏报率尚未评分，支持集外语言也必须单列且禁止计入支持语言准确率。
-- [ ] 对真实完成的多语转写逐条运行本地翻译、保守润色和摘要，验证目标语言完整性、数字/专名/时间/说话人不变量、semantic drift、失败重试、断点恢复和人工批准状态；`qwen3.5:9b` 是当前高能力候选、4B 是显式回退，两者仍为 suggestion-only，未分别达到任务/语言阈值前不得自动应用。
+- [ ] 对真实完成的多语转写逐条运行强制语义仲裁、本地翻译和摘要，验证候选约束、目标语言完整性、数字/专名/时间/说话人不变量、semantic drift、失败重试、断点恢复和人工批准状态；`qwen3.5:9b` 是当前高能力候选、4B 是显式回退，两者仍为 suggestion-only，未分别达到任务/语言阈值前不得自动应用。
 - [ ] 对同一批真实视频生成 SRT、WebVTT、ASS，验证 cue 覆盖、时间单调性、换行、安全区、说话人标签和多语字体；随后真实执行 sidecar、soft-mux 与 burn-in，并用 ffprobe、解封装哈希、代表帧像素检查和视觉 QA 验证，不得只检查输出计划。
-- [ ] 对同一批闭环结果生成 Java-only PDF 和可复核报告，验证逐段语言、翻译/润色来源、说话人映射、字幕交付、质量分桶、失败域和样本许可证均真实呈现；最后运行 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
-- [ ] 建立闭环发布汇总：每个样本从探测、人声判断、VAD、语言、ASR、说话人、重叠、翻译、润色、字幕、视频交付到 PDF/报告均有哈希相连的产物链；任何一步失败都保留原始媒体和已完成证据、标记具体失败域，禁止用“部分产物存在”宣称整套闭环通过。
+- [ ] 对同一批闭环结果生成 Java-only PDF 和可复核报告，验证逐段语言、语义建议/翻译来源、说话人映射、字幕交付、质量分桶、失败域和样本许可证均真实呈现；最后运行 Design Pack 结构、色彩、动效、字体、可访问性和 PDF 视觉门禁。
+- [ ] 建立闭环发布汇总：每个样本从探测、人声判断、VAD、语言、ASR、说话人、重叠、语义仲裁、翻译、字幕、视频交付到 PDF/报告均有哈希相连的产物链；任何一步失败都保留原始媒体和已完成证据、标记具体失败域，禁止用“部分产物存在”宣称整套闭环通过。
 
 ### 7.11 世界级基模与旗舰部署架构
 
@@ -347,7 +347,10 @@
 - [x] 完成第五轮 2026-07-26 前沿核验并把“基模上限第一”固化为硬门禁。`VibeVoice-ASR-BitNet` 虽能将 CPU 模型压到 1.58 GB、少量线程达到实时，但它把原 7B 解码器换成 1.5B，论文公开承认通常增加 `1–4%` 绝对 WER，因此只登记为边缘效率候选，不能替代原始 7B 质量锚点。RW-Voice-EQ 暴露真实口音、情绪、噪声、背景说话人与对话场景的独立失败域；2026 年代码切换研究同时表明未见语言对泛化仍有限，且普通 LoRA 可能破坏强基模原能力。架构现要求官方原始精度 checkpoint/官方推理栈先行、派生模型单列质量损失、微调同时通过 backward-retention 与 PIER/切换词门禁。
 - [x] 完成本地 LLM 语义纠错方案核验并纳入旗舰主链。DiarizationLM 证明微调 LLM 在 Fisher/Callhome 英语上可将 WDER 相对降低 `55.5% / 44.9%`，但独立研究同时证明零样本 7B/8x7B 可显著恶化 diarization，针对单一 ASR 微调后在未见 ASR 上也可能回退。架构因此采用“声学候选不变量 + LLM 联合重排”：speaker 只能在 acoustic top-K/候选时间线中重排并经过 transcript-preserving transfer，语法/同音词只能引用 ASR N-best、强制对齐或术语证据，`rawText`、时间、原生轨道与 human lock 永不修改；Qwen3.5 与 DiarizationLM 均从 suggestion-only 起步。
 - [ ] 将生产 ASR 从单一最佳文本升级为不可变 N-best/token 证据契约：每个候选固定模型 revision、语言、token/character、时间、声学/解码 score 和源窗口哈希；内容词修复必须引用候选 ID，当前没有持久化 N-best 的分桶只能做标点/格式建议或人工复核，不能让 LLM 自由补词。
-- [ ] 实现生产 `suggestion-only` 语义纠错 stage：在 transcript-document 与 review queue 原子持久化前，以完整相邻 turn、acoustic top-K、regular/exclusive timeline、overlap 和人工锁为输入，调用本地 Qwen3.5 生成严格 schema 的 speaker candidate-state 重排与最小语法 patch。确定性验证器必须拒绝新 speaker、非候选 speaker、边界/词序/词集合变化、无证据内容词、受保护数字/专名/否定词变化和任何 human-lock 冲突；建议只进入 review queue，不直接应用。
+- [x] 实现生产必经的 `suggestion-only` 语义仲裁 stage：在 transcript document、review queue 和语义工件原子持久化前，以完整相邻 turn、acoustic top-K、regular/exclusive timeline、overlap、ASR N-best/token 时间和人工锁为输入，调用生产配置固定的本地 Qwen3.5 生成严格 JSON 的 speaker candidate-state 重排与最小语法 patch。确定性验证器拒绝新 speaker、非候选 speaker、边界变化、无 N-best 证据的内容词变化、受保护数字/专名/否定词变化、最后 canonical speaker 消失和任何 human-lock 冲突；建议只进入 review queue，不直接应用，provider 失败或 validator rejection 均使阶段进入 `partial/failed` 并持久化 job-level blocker，禁止空完成。
+- [x] 完成生产语义 stage 的首轮真实 `qwen3.5:9b` 约束验证：从公开 JFK 冻结转录中取 3 个确实含人声的短段，动态 JSON Schema 将每段 `segmentId`、acoustic speaker ranking、candidate ID、证据引用和候选数量绑定为精确枚举，并以最多 2 段一批适配 4K context。Ollama 共调用 2 次、墙钟 `48.569 秒`，3/3 结果通过确定性验证，`rejection/failure=0/0`、`abstention=3`、`autoApplied=0`；transcript、`rawText` 与输入哈希全部不变。该结果只证明真实 provider 闭环和 fail-closed 契约可运行，不是 speaker/文本质量晋级，仍须完成多语、多人数、重叠和真实 ASR 错误 held-out。
+- [x] 删除独立润色产品功能：业务请求 schema 升为 `1.2.0` 并删除 `polish`，Python runner、WorkerService、TypeScript/Tauri IPC、任务创建 UI、生产 smoke 与样本工具不再生成 `polished-transcript.v1.json`；语法修复全部归入强制语义仲裁。历史 `polish-output.schema.json` 与读取校验仅作只读兼容，终极验收清单删除 `ULT-POLISH-001` 并将相关安全门禁并入 `ULT-SPEAKER-001`。
+- [x] 完成语义仲裁必经化与独立润色删除后的最终回归：全仓 Python 为 `1111 passed, 21 skipped, 162 subtests passed`；前端为 `31/31` files、`375/375` tests，TypeScript、ESLint 与 Vite production build 通过；Rust 为 `84 passed`，`cargo fmt --check` 与严格 clippy 通过。因 `Documents` 下 APFS 依赖小文件读取阻塞，前端和最终 Python 分别使用 `/private/tmp` 轻量验证镜像运行，镜像由当前工作树覆盖生成，原仓库仍是唯一编辑源。
 - [ ] 建立语义 speaker/语法修复 held-out：用真实 ASR 错误而非只用人工造句，覆盖不同上游 ASR、中文/英语/代码切换、N=1/2/3/5/8、远场/电话/噪声/overlap。分别比较 Qwen3.5-9B、服务器 35B 和 DiarizationLM 8B；报告 WDER、SA-WER/tcpWER delta、speaker proposal P/R、edit-span P/R/F1、WER/CER、受保护 token 保留、semantic drift、abstention、RTF 与内存，任一分桶回退即保持 suggestion-only。
 - [ ] 为每个自托管旗舰建立 `official-reference -> quantized/converted -> edge` 三层同音频基准：先在登记的旗舰 GPU 上固定官方原始精度 checkpoint、revision、预处理和官方推理栈，再测量量化、蒸馏、MLX/GGUF/ONNX 或较小解码器的绝对质量损失。派生模型只能获得边缘路由，不能凭 RTF、内存或当前 M4 可运行性覆盖官方基模上限；官方参考无法复现的模型不得标记为可落地旗舰。
 - [ ] 微调只针对强基模已经用 held-out 证明的明确失败分桶。每个 adapter 必须登记训练数据、许可、speaker/recording 隔离、基模 revision、训练配置和可卸载产物，并同时报告目标分桶、原单语、多语、未见语言对、多人/重叠和真实噪声的 backward-retention；代码切换除 WER/CER 外增加 PIER/切换词错误率。普通 LoRA、BLoRA 或合成数据都只作为同基模挑战者，任一硬域回退即拒绝合并。
@@ -357,7 +360,7 @@
 - [ ] 对逐次授权上传的同一冻结音频运行 Universal-3.5 Pro、Scribe v2、Melia 1 与其他登记 API，锁定实际返回模型版本、区域、保留/删除、成本和请求哈希；分别比较 cpWER/tcpWER、DER/JER、人数、重叠漏说话人、词级语言/代码切换、时间边界和幻觉。供应商发布页只用于候选排序，不能作为本项目晋级证据。
 - [ ] 在同一音频切分上完成 Qwen3-ASR-1.7B 对 Whisper large-v3、Parakeet v3、Canary-Qwen 和 `omniASR_LLM_Unlimited_7B_v2` 的分桶挑战；普通 Omnilingual LLM-7B/7B-ZS 只做 `<40s` 对照。只有目标分桶 held-out 改善且其他硬域不回退时才启用路由。
 - [ ] 建立真实重叠多说话人门禁。局部分离或多说话人 ASR 必须同时改善 SI-SDRi 与 overlap tcpWER，且不得污染非重叠区；通过前不得宣称所有并发语音均能完整转录。
-- [ ] 在当前 M4 16 GB 上完整评测 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`。更大基模仍从 suggestion-only 起步，并分别通过 N-best 重排、术语、翻译、润色和摘要的多语 held-out 门禁后才获得对应权限。
+- [ ] 在当前 M4 16 GB 上完整评测 `qwen3.5:9b` Q4_K_M；服务器质量档至少评测 `Qwen3.5-35B-A3B`。更大基模仍从 suggestion-only 起步，并分别通过 speaker/N-best 重排、最小语法/术语修复、翻译和摘要的多语 held-out 门禁后才获得对应权限。
 - [ ] 在服务器质量档对 `VibeVoice-ASR-7B` 与 Community-1/NeMo 同音频比较 DER/JER、cpWER/tcpWER、overlap 漏说话人率、长上下文一致性、50+ 语言分桶和 GPU/显存预算；只允许作为联合挑战或已胜出分桶路由，不得覆盖 Community-1 overlap 真值。
 - [ ] 继续 MOSS 独立质量门禁：本机不在已观测约 `17.09 GiB` peak footprint 上盲目连续跑长任务，先接入带 token heartbeat、hard deadline、统一内存采样、输出长度/时间边界检查的有界隔离 worker；用 RTTM/逐字稿确认确实包含目标说话人的公开 N=3/5、代码切换、长音频和 overlap 样本补齐 Transformers 评测，再在旗舰 GPU 服务器以官方 SGLang/vLLM 与 Community-1 + Qwen、VibeVoice 同音频比较。必须报告 cpWER/tcpWER、DER/JER、漏说话人、人数、语言、时间、幻觉、冷/热 RTF 和峰值资源；第三方 MLX/GGUF/ONNX 量化只能单列兼容挑战，不能代表官方基模上限。
 - [ ] 在非商业研究环境将 DiariZen 与 Community-1/Precision-2/NeMo 跑同一 RTTM 盲测，验证其 5+ 人和 overlap 优势是否可复现；若要进入商业产品，只能建立许可兼容训练集与可复现重训产物，禁止把 CC BY-NC 4.0 权重复制进生产缓存或安装包。

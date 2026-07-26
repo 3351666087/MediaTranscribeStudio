@@ -64,8 +64,8 @@ JSON Schema alone:
    provenance and versioning.
 5. Local LLM output cannot override locked acoustic or human speaker
    decisions.
-6. Translation, polishing, and summary outputs remain separate from the source
-   transcript.
+6. Semantic arbitration suggestions, translation, and summary outputs remain
+   separate from the source transcript.
 7. Summary evidence references valid segment IDs and time ranges.
 8. PDF quality processing does not change transcript text, speaker IDs, or
    timestamps.
@@ -79,14 +79,14 @@ JSON Schema alone:
 | File | Purpose |
 |---|---|
 | `artifact-manifest.schema.json` | Content-addressed artifact inventory and integrity metadata. |
-| `business-processing-request.schema.json` | Opt-in local translation, source-language polishing, and summary request. |
+| `business-processing-request.schema.json` | Opt-in local translation and summary request. |
 | `job-event.schema.json` | Versioned worker event stream. |
 | `output-customization.schema.json` | Evidence-bearing canonical report, subtitle, delivery, export, and reversibility snapshot. |
 | `output-recipe.schema.json` | Compact native desktop presentation recipe compiled into canonical output customizations. |
 | `pdf-quality-report.schema.json` | PDF hard gates, quality findings, and deterministic repair queue. |
 | `pdf-render-request.schema.json` | Request sent to the Java PDF sidecar. |
 | `pdf-render-result.schema.json` | Renderer outcome and generated artifact paths. |
-| `polish-output.schema.json` | Versioned source-language semantic-polishing artifact. |
+| `polish-output.schema.json` | Legacy read-only contract for historical polishing artifacts; current producers must not generate it. |
 | `report-document.schema.json` | Canonical transcript and report document with a dynamic speaker set. |
 | `semantic-arbitration.schema.json` | Constrained semantic proposal for human or deterministic arbitration. |
 | `summary-output.schema.json` | Evidence-grounded summary artifact. |
@@ -123,8 +123,9 @@ text, speaker identity, timestamps, or language metadata.
 
 ## Business-processing boundary
 
-Translation, semantic polishing, and summaries are explicit derived operations.
-Their contracts preserve:
+Translation and summaries are explicit derived operations. Mandatory semantic
+arbitration produces constrained review suggestions before those optional
+operations. Their contracts preserve:
 
 - source document identity and version;
 - requested and produced language metadata;
@@ -133,11 +134,13 @@ Their contracts preserve:
 - source-segment evidence where required;
 - separation from source transcript and speaker evidence.
 
-Local small models operate only within these derived-artifact boundaries. They
-cannot silently rewrite the source transcript, timestamps, speaker assignments,
-voiceprint evidence, or human locks. Any source-language correction that is
-accepted into a later source revision must remain explicit, attributable, and
-auditable.
+Local small models operate only within these suggestion and derived-artifact
+boundaries. They cannot silently rewrite the source transcript, timestamps,
+speaker assignments, voiceprint evidence, or human locks. Any source-language
+correction that is accepted into a later source revision must remain explicit,
+attributable, and auditable. The former independent polishing request and
+producer have been retired; `polish-output.schema.json` remains solely for
+validating historical artifacts.
 
 The default local provider implementation is loopback-only and rejects
 redirects, but transport policy is enforced by the backend rather than by JSON

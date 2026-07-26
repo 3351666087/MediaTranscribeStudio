@@ -152,13 +152,14 @@ Repository mock data demonstrates variable participant counts only. Production
 counts must come from automatic detection, an explicit manual count, or a bounded
 hybrid policy.
 
-## Translation, polishing, and summaries
+## Semantic arbitration, translation, and summaries
 
 The versioned `CreateJobRequest` contract exposes source language, local-LLM
-mode/model/endpoint, translation targets, polishing, summary, output locale, and
-business prompt version. Translation, polishing, and summaries are explicit
-opt-in derived operations; none of them silently changes source transcript
-evidence.
+mode/model/endpoint, translation targets, summary, output locale, and business
+prompt version. Translation and summaries are explicit opt-in derived
+operations. Jobs with transcribable speech always run constrained semantic
+arbitration before those operations; its speaker and minimal text proposals are
+review items and never silently change source transcript evidence.
 
 The desktop boundary must preserve source and derived artifacts separately,
 record local-model and prompt-version provenance, validate every requested

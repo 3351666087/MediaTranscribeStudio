@@ -53,6 +53,7 @@ def _service(
     subtitle_delivery_executor: Any | None = None,
     subtitle_visual_qa_hook: Any | None = None,
     heartbeat_interval_seconds: float = 15.0,
+    semantic_required: bool = False,
 ) -> WorkerService:
     input_root = root / "input"
     output_root = root / "output"
@@ -71,6 +72,7 @@ def _service(
         max_workers=1,
         business_provider=provider,
         business_runner_factory=runner_factory,
+        semantic_required=semantic_required,
         media_probe=media_probe,
         output_publisher=(
             output_publisher
@@ -364,7 +366,6 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
                 "localLlmEndpoint": "http://127.0.0.1:11434",
                 "localLlmEndpointPolicy": "loopback-only",
                 "translationTargets": ["en"],
-                "polish": True,
                 "summary": True,
                 "outputLocale": "en-US",
             }
@@ -374,6 +375,92 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
         assert request.business_config.output_locale == "en-US"
         assert request.language == "ja-JP"
         assert request.local_llm_endpoint == "http://127.0.0.1:11434"
+        service.shutdown()
+
+
+def test_required_semantic_stage_persists_suggestion_without_mutating_transcript() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        provider = MappingLocalLLMProvider(
+            [
+                {
+                    "results": [
+                        {
+                            "segmentId": "segment-0001",
+                            "speakerRanking": ["speaker-1"],
+                            "normalizedText": "这是第1位说话人的中文原文。",
+                            "textEvidenceCandidateId": "",
+                            "confidence": 0.82,
+                            "reasonCodes": ["PUNCTUATION_BOUNDARY"],
+                            "evidenceRefs": ["segment:segment-0001"],
+                        }
+                    ]
+                }
+            ]
+        )
+        transcription = result_mapping(1)
+        transcription["segments"][0].update(
+            {
+                "rawText": "这是第1位说话人的中文原文",
+                "normalizedText": "这是第1位说话人的中文原文",
+                "displayText": "这是第1位说话人的中文原文",
+            }
+        )
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(transcription),
+            provider=provider,
+            semantic_required=True,
+        )
+        started = service.start(
+            {
+                "jobId": "semantic-required",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "localLlmMode": "disabled",
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "review_required"
+        assert final["semantic"]["required"] is True
+        assert final["semantic"]["status"] == "completed"
+        output = root / "output" / "job"
+        artifact = json.loads(
+            (
+                output
+                / "semantic"
+                / "semantic-suggestions.v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        transcript = json.loads(
+            (output / "transcript-document.v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        queue = json.loads(
+            (output / "review" / "review-queue.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert artifact["metrics"]["textSuggestionCount"] == 1
+        assert transcript["segments"][0]["rawText"] == (
+            "这是第1位说话人的中文原文"
+        )
+        assert transcript["segments"][0]["normalizedText"] == (
+            "这是第1位说话人的中文原文"
+        )
+        semantic_item = next(
+            item
+            for item in queue["items"]
+            if item["reasonCode"] == "SEMANTIC_TEXT_SUGGESTION"
+        )
+        assert semantic_item["suggestions"][0]["proposal"] == {
+            "normalizedText": "这是第1位说话人的中文原文。",
+            "displayText": "这是第1位说话人的中文原文。",
+        }
         service.shutdown()
 
 

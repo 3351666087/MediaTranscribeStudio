@@ -87,6 +87,10 @@ from .review import (
     split_speaker,
     validate_review_state,
 )
+from .semantic_processing import (
+    SemanticProcessingRunner,
+    attach_semantic_suggestions_to_review,
+)
 
 
 EventSink = Callable[[dict[str, Any]], None]
@@ -145,6 +149,10 @@ class JobRecord:
     business_artifact_paths: list[str] = field(default_factory=list)
     business_provenance: dict[str, Any] | None = None
     business_error: dict[str, Any] | None = None
+    semantic_status: str = "not-requested"
+    semantic_artifact_path: str | None = None
+    semantic_provenance: dict[str, Any] | None = None
+    semantic_error: dict[str, Any] | None = None
     capacity_released: bool = False
     followup_operation: str | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -176,6 +184,17 @@ class WorkerService:
             [StartJobRequest, AdapterContext], BusinessProcessingRunner
         ]
         | None = None,
+        semantic_provider: LocalLLMProvider | None = None,
+        semantic_provider_factory: Callable[
+            [StartJobRequest], LocalLLMProvider
+        ]
+        | None = None,
+        semantic_runner_factory: Callable[
+            [StartJobRequest, AdapterContext], SemanticProcessingRunner
+        ]
+        | None = None,
+        semantic_required: bool = False,
+        semantic_model: str | None = None,
         media_probe: Any | None = None,
         output_publisher: Callable[..., OutputPublicationManifest]
         | None = publish_output_plans,
@@ -220,6 +239,19 @@ class WorkerService:
         self.business_provider = business_provider
         self.business_provider_factory = business_provider_factory
         self.business_runner_factory = business_runner_factory
+        self.semantic_provider = semantic_provider
+        self.semantic_provider_factory = semantic_provider_factory
+        self.semantic_runner_factory = semantic_runner_factory
+        self.semantic_required = bool(semantic_required)
+        if semantic_model is not None and (
+            not isinstance(semantic_model, str) or not semantic_model.strip()
+        ):
+            raise ValueError("semantic_model must be non-empty text when provided")
+        self.semantic_model = (
+            semantic_model.strip()
+            if isinstance(semantic_model, str)
+            else None
+        )
         self.media_probe = media_probe
         self.output_publisher = output_publisher
         self.subtitle_delivery_executor = subtitle_delivery_executor
@@ -252,7 +284,6 @@ class WorkerService:
             "localLlmModel",
             "localLlmAutoApply",
             "translationTargets",
-            "polish",
             "summary",
             "outputLocale",
             "businessPromptVersion",
@@ -362,8 +393,6 @@ class WorkerService:
             raise invalid_request(
                 "translationTargets must be an array of non-empty language tags"
             )
-        if not isinstance(payload.get("polish", False), bool):
-            raise invalid_request("polish must be a boolean")
         if not isinstance(payload.get("summary", False), bool):
             raise invalid_request("summary must be a boolean")
         output_locale_raw = payload.get("outputLocale", "en")
@@ -377,7 +406,6 @@ class WorkerService:
         try:
             business_config = BusinessProcessingConfig(
                 translation_targets=tuple(raw_targets),
-                polish=payload.get("polish", False),
                 summary=payload.get("summary", False),
                 model=local_llm_model,
                 output_locale=output_locale_raw,
@@ -416,6 +444,11 @@ class WorkerService:
         record = JobRecord(request=request)
         if request.business_config.enabled:
             record.business_status = "pending"
+        if self.semantic_required or request.local_llm_mode in {
+            "suggestion-only",
+            "enabled",
+        }:
+            record.semantic_status = "pending"
         try:
             with self._lock:
                 if self._closed:
@@ -819,6 +852,7 @@ class WorkerService:
                         else None
                     ),
                 },
+                "semantic": self._semantic_event_payload(record),
             }
             if record.error:
                 value["error"] = dict(record.error)
@@ -1227,6 +1261,7 @@ class WorkerService:
                     "operation": operation,
                     "artifactPaths": list(record.artifact_paths),
                     "business": self._business_event_payload(record),
+                    "semantic": self._semantic_event_payload(record),
                     "outputPublication": (
                         self._output_publication_event_payload(record)
                     ),
@@ -2326,6 +2361,129 @@ class WorkerService:
             cancellation_check=context.raise_if_cancelled,
         )
 
+    def _semantic_runner(
+        self,
+        record: JobRecord,
+        context: AdapterContext,
+    ) -> SemanticProcessingRunner:
+        if self.semantic_runner_factory is not None:
+            return self.semantic_runner_factory(record.request, context)
+        provider = self.semantic_provider
+        if self.semantic_provider_factory is not None:
+            provider = self.semantic_provider_factory(record.request)
+        if provider is None:
+            provider = self.business_provider
+        if provider is None and self.business_provider_factory is not None:
+            provider = self.business_provider_factory(record.request)
+        model = self.semantic_model or record.request.local_llm_model
+        if provider is None:
+            provider = OllamaLocalProvider(
+                LocalLLMConfig(
+                    model=model,
+                    endpoint=record.request.local_llm_endpoint,
+                )
+            )
+        return SemanticProcessingRunner(
+            provider=provider,
+            model=model,
+            cancellation_check=context.raise_if_cancelled,
+        )
+
+    def _run_semantic_processing(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+        review_queue: Mapping[str, Any],
+        context: AdapterContext,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        if (
+            not self.semantic_required
+            and record.request.local_llm_mode
+            not in {"suggestion-only", "enabled"}
+        ):
+            record.semantic_status = "not-requested"
+            return None, dict(review_queue)
+        record.semantic_status = "running"
+        record.semantic_error = None
+        self._transition(record, JobStatus.RUNNING, "semantic_processing")
+        self._emit(
+            record,
+            "stage.started",
+            {
+                "stage": "semantic_processing",
+                "model": self.semantic_model or record.request.local_llm_model,
+                "applicationPolicy": "suggestion-only",
+                "autoApply": False,
+            },
+        )
+        try:
+            artifact_path = (
+                record.request.output_directory
+                / "semantic"
+                / "semantic-suggestions.v1.json"
+            )
+            artifact = self._semantic_runner(record, context).run(document)
+            queue = attach_semantic_suggestions_to_review(
+                document,
+                review_queue,
+                artifact,
+                artifact_path=str(artifact_path),
+            )
+            record.semantic_status = str(artifact["status"])
+            record.semantic_artifact_path = str(artifact_path)
+            provider = artifact.get("provider")
+            record.semantic_provenance = {
+                "model": artifact["model"],
+                "promptVersion": artifact["promptVersion"],
+                "provider": dict(provider) if isinstance(provider, Mapping) else {},
+                "applicationPolicy": artifact["applicationPolicy"],
+                "requiresHumanApproval": artifact["requiresHumanApproval"],
+            }
+            if artifact["status"] in {"partial", "failed"}:
+                record.semantic_error = {
+                    "code": "SEMANTIC_PROCESSING_INCOMPLETE",
+                    "message": (
+                        "local semantic processing did not complete for every segment"
+                    ),
+                    "retryable": True,
+                    "details": {
+                        "rejectionCount": artifact["metrics"]["rejectionCount"],
+                        "failureCount": artifact["metrics"]["failureCount"],
+                        "unresolvedSegmentCount": artifact["metrics"][
+                            "unresolvedSegmentCount"
+                        ],
+                    },
+                }
+            self._emit(
+                record,
+                "stage.completed",
+                {
+                    "stage": "semantic_processing",
+                    "status": artifact["status"],
+                    "suggestionCount": artifact["metrics"]["suggestionCount"],
+                    "rejectionCount": artifact["metrics"]["rejectionCount"],
+                    "failureCount": artifact["metrics"]["failureCount"],
+                    "autoAppliedCount": 0,
+                },
+            )
+            return artifact, queue
+        except JobCancelled:
+            record.semantic_status = "cancelled"
+            raise
+        except WorkerError as exc:
+            record.semantic_status = "failed"
+            record.semantic_error = exc.as_payload()
+            raise
+        except Exception as exc:
+            error = WorkerError(
+                "SEMANTIC_PROCESSING_FAILED",
+                "semantic processing failed closed",
+                details={"exceptionType": type(exc).__name__},
+            )
+            record.semantic_status = "failed"
+            record.semantic_error = error.as_payload()
+            raise error from exc
+
     def _run_business_processing(
         self,
         record: JobRecord,
@@ -2657,6 +2815,13 @@ class WorkerService:
                 speaker_margin_threshold=self.low_speaker_margin_threshold,
                 range_width_threshold=self.range_width_threshold,
             )
+            semantic_artifact, review_queue = self._run_semantic_processing(
+                record,
+                document,
+                review_queue,
+                context,
+            )
+            self._transition(record, JobStatus.RUNNING, "validation")
             review_path = (
                 record.request.output_directory / "review" / "review-queue.json"
             )
@@ -2667,11 +2832,21 @@ class WorkerService:
                 high_margin_threshold=self.high_speaker_margin_threshold,
             )
             context.raise_if_cancelled()
+            transaction_updates = {
+                transcript_path: document,
+                review_path: review_queue,
+            }
+            if semantic_artifact is not None:
+                if record.semantic_artifact_path is None:
+                    raise WorkerError(
+                        "SEMANTIC_ARTIFACT_INVALID",
+                        "semantic artifact path was not registered",
+                    )
+                transaction_updates[
+                    Path(record.semantic_artifact_path)
+                ] = semantic_artifact
             atomic_write_json_transaction(
-                {
-                    transcript_path: document,
-                    review_path: review_queue,
-                },
+                transaction_updates,
                 journal_path=(
                     record.request.output_directory
                     / ".review-transaction.v1.json"
@@ -2700,6 +2875,21 @@ class WorkerService:
                     "sha256": canonical_json_sha256(review_queue),
                 },
             )
+            if semantic_artifact is not None:
+                assert record.semantic_artifact_path is not None
+                record.artifact_paths.append(record.semantic_artifact_path)
+                self._emit(
+                    record,
+                    "artifact.created",
+                    {
+                        "artifactType": "semantic-suggestions-v1",
+                        "path": record.semantic_artifact_path,
+                        "sha256": canonical_json_sha256(
+                            semantic_artifact
+                        ),
+                        "status": semantic_artifact["status"],
+                    },
+                )
             if record.review_open_count:
                 record.quality_status = "review-required"
                 self._transition(
@@ -2743,6 +2933,7 @@ class WorkerService:
                     "status": "completed",
                     "artifactPaths": list(record.artifact_paths),
                     "business": self._business_event_payload(record),
+                    "semantic": self._semantic_event_payload(record),
                     "outputPublication": (
                         self._output_publication_event_payload(record)
                     ),
@@ -2948,6 +3139,8 @@ class WorkerService:
         with record.lock:
             if record.business_status in {"pending", "running"}:
                 record.business_status = "not-applicable-no-speech"
+            if record.semantic_status in {"pending", "running"}:
+                record.semantic_status = "not-applicable-no-speech"
             record.quality_status = "no-transcribable-speech"
             if record.request.output_recipe is not None:
                 record.output_publication_status = (
@@ -2976,6 +3169,7 @@ class WorkerService:
                 "hasTranscribableSpeech": False,
                 "artifactPaths": list(record.artifact_paths),
                 "business": self._business_event_payload(record),
+                "semantic": self._semantic_event_payload(record),
                 "outputPublication": (
                     self._output_publication_event_payload(record)
                 ),
@@ -2999,6 +3193,9 @@ class WorkerService:
             if record.business_status == "running":
                 record.business_status = "failed"
                 record.business_error = error.as_payload()
+            if record.semantic_status == "running":
+                record.semantic_status = "failed"
+                record.semantic_error = error.as_payload()
             record.quality_status = "failed"
         self._transition(record, JobStatus.FAILED, "failed")
         self._emit(
@@ -3007,6 +3204,7 @@ class WorkerService:
             {
                 **error.as_payload(),
                 "business": self._business_event_payload(record),
+                "semantic": self._semantic_event_payload(record),
                 "outputPublication": self._output_publication_event_payload(
                     record
                 ),
@@ -3024,6 +3222,8 @@ class WorkerService:
                 return
             if record.business_status == "running":
                 record.business_status = "cancelled"
+            if record.semantic_status == "running":
+                record.semantic_status = "cancelled"
             record.quality_status = "cancelled"
         self._transition(record, JobStatus.CANCELLED, "cancelled")
         self._emit(
@@ -3032,6 +3232,7 @@ class WorkerService:
             {
                 "status": "cancelled",
                 "business": self._business_event_payload(record),
+                "semantic": self._semantic_event_payload(record),
                 "outputPublication": self._output_publication_event_payload(
                     record
                 ),
@@ -3058,6 +3259,25 @@ class WorkerService:
                 if record.business_error
                 else None
             ),
+        }
+
+    @staticmethod
+    def _semantic_event_payload(record: JobRecord) -> dict[str, Any]:
+        return {
+            "required": record.semantic_status != "not-requested",
+            "status": record.semantic_status,
+            "artifactPath": record.semantic_artifact_path,
+            "provenance": (
+                dict(record.semantic_provenance)
+                if record.semantic_provenance
+                else None
+            ),
+            "error": (
+                dict(record.semantic_error)
+                if record.semantic_error
+                else None
+            ),
+            "autoApply": False,
         }
 
     @staticmethod
@@ -3145,6 +3365,7 @@ class WorkerService:
                         else None
                     ),
                 },
+                "semantic": self._semantic_event_payload(record),
                 "documentHash": record.document_hash,
                 "templateHash": record.template_hash,
                 "rendererVersion": record.renderer_version,

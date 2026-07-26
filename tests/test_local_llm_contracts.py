@@ -28,19 +28,31 @@ CONTRACTS = ROOT / "contracts"
 
 def test_business_contract_schemas_are_valid_json_and_versioned() -> None:
     expected = {
-        "business-processing-request.schema.json": "MediaTranscribeStudio Business Processing Request",
-        "translation-output.schema.json": "MediaTranscribeStudio Translation Variant",
-        "polish-output.schema.json": "MediaTranscribeStudio Polished Transcript Variant",
-        "summary-output.schema.json": "MediaTranscribeStudio Evidence-Grounded Summary Variant",
+        "business-processing-request.schema.json": (
+            "MediaTranscribeStudio Business Processing Request",
+            "1.2.0",
+        ),
+        "translation-output.schema.json": (
+            "MediaTranscribeStudio Translation Variant",
+            "1.1.0",
+        ),
+        "polish-output.schema.json": (
+            "MediaTranscribeStudio Polished Transcript Variant",
+            "1.1.0",
+        ),
+        "summary-output.schema.json": (
+            "MediaTranscribeStudio Evidence-Grounded Summary Variant",
+            "1.1.0",
+        ),
     }
 
-    for filename, title in expected.items():
+    for filename, (title, version) in expected.items():
         path = CONTRACTS / filename
         assert path.is_file(), filename
         schema = json.loads(path.read_text(encoding="utf-8"))
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["title"] == title
-        assert schema["$id"].endswith("/1.1.0")
+        assert schema["$id"].endswith(f"/{version}")
         assert schema["type"] == "object"
         assert schema["additionalProperties"] is False
 

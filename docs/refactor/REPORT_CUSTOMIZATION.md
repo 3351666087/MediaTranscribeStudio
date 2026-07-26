@@ -8,9 +8,9 @@ report appearance. Its public JSON contract is
 
 The current contract version is `1.0.0`.
 
-This layer is deliberately independent from transcription, translation,
-polishing, summarization, HTML construction, PDF rendering, and filesystem
-access. It can therefore be used by the native UI, job contract assembly,
+This layer is deliberately independent from transcription, semantic
+arbitration, translation, summarization, HTML construction, PDF rendering, and
+filesystem access. It can therefore be used by the native UI, job contract assembly,
 OpenHTMLtoPDF renderer adapter, and artifact provenance code without granting
 any of those callers authority to alter source transcript content.
 
@@ -87,9 +87,9 @@ The versioned configuration covers:
 - high-contrast mode.
 
 Section inclusion supports cover, table of contents, metadata, speaker
-directory, source transcript, translation, polish notes, summary, quality
-appendix, and provenance. At least one substantive content section must remain
-enabled.
+directory, source transcript, translation, semantic review notes, summary,
+quality appendix, and provenance. At least one substantive content section must
+remain enabled.
 
 Configuration does not contain raw CSS, raw HTML, JavaScript, renderer command
 arguments, or arbitrary template paths. This keeps the native UI controls
@@ -292,9 +292,9 @@ JavaScript, URLs, or command arguments. Header/footer text and logo alternative
 text must be escaped as document text.
 
 The renderer must continue to treat the source transcript artifact as
-immutable. Section inclusion selects which existing derived business artifacts
-are presented; it does not create, rewrite, translate, polish, or summarize
-them.
+immutable. Section inclusion selects which existing semantic suggestions and
+derived business artifacts are presented; it does not create, rewrite,
+translate, or summarize them.
 
 ## Testing
 

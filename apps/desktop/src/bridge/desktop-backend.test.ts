@@ -23,7 +23,6 @@ function createRequest(
     localLlmEndpointPolicy: "loopback-only",
     localLlmAutoApply: false,
     translationTargets: [],
-    polish: false,
     summary: false,
     outputLocale: "en-US",
     businessPromptVersion: "business-v1",

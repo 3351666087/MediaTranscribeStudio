@@ -26,7 +26,6 @@ function validCreateRequest(): CreateJobRequest {
     localLlmEndpointPolicy: "loopback-only",
     localLlmAutoApply: false,
     translationTargets: ["en-US", "de-DE"],
-    polish: true,
     summary: true,
     outputLocale: "en-US",
     businessPromptVersion: "business-v1",

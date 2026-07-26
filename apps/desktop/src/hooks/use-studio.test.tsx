@@ -74,7 +74,6 @@ const createRequest: CreateJobRequest = {
   localLlmEndpointPolicy: "loopback-only",
   localLlmAutoApply: false,
   translationTargets: [],
-  polish: false,
   summary: false,
   outputLocale: "en-US",
   businessPromptVersion: "business-v1",

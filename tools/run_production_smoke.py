@@ -296,7 +296,6 @@ def build_start_payload(
     local_llm_endpoint: str = "http://127.0.0.1:11434",
     local_llm_endpoint_policy: str = "loopback-only",
     translation_targets: Sequence[str] = (),
-    polish: bool = False,
     summary: bool = False,
     output_locale: str = "en",
     business_prompt_version: str = "business-v3",
@@ -331,7 +330,7 @@ def build_start_payload(
     prompt_version = business_prompt_version.strip()
     if not prompt_version:
         raise ValueError("business_prompt_version must not be blank")
-    business_requested = bool(requested_targets) or polish or summary
+    business_requested = bool(requested_targets) or summary
     if business_requested and llm_mode == "disabled":
         raise ValueError(
             "local_llm_mode must enable business processing when variants are requested"
@@ -351,7 +350,6 @@ def build_start_payload(
         "localLlmEndpoint": endpoint,
         "localLlmEndpointPolicy": endpoint_policy,
         "translationTargets": list(requested_targets),
-        "polish": bool(polish),
         "summary": bool(summary),
         "outputLocale": locale,
         "businessPromptVersion": prompt_version,
@@ -1659,11 +1657,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="BCP-47 translation target; repeat for multiple derived translations",
     )
     parser.add_argument(
-        "--polish",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument(
         "--summary",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1729,7 +1722,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             local_llm_endpoint=args.local_llm_endpoint,
             local_llm_endpoint_policy=args.local_llm_endpoint_policy,
             translation_targets=args.translation_target,
-            polish=args.polish,
             summary=args.summary,
             output_locale=args.output_locale,
             business_prompt_version=args.business_prompt_version,

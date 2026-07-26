@@ -1,14 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mediatranscribestudio.local/contracts/business-processing-request/1.1.0",
+  "$id": "https://mediatranscribestudio.local/contracts/business-processing-request/1.2.0",
   "title": "MediaTranscribeStudio Business Processing Request",
-  "description": "A local-only request for immutable translation, polishing, and summary variants.",
+  "description": "A local-only request for immutable translation and summary variants. Source-language repair belongs to the mandatory semantic arbitration stage.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion",
     "translationTargets",
-    "polish",
     "summary",
     "model",
     "outputLocale",
@@ -16,7 +15,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "1.1.0"
+      "const": "1.2.0"
     },
     "translationTargets": {
       "type": "array",
@@ -24,9 +23,6 @@
       "items": {
         "$ref": "#/$defs/languageTag"
       }
-    },
-    "polish": {
-      "type": "boolean"
     },
     "summary": {
       "type": "boolean"

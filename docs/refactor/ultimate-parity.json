@@ -2,7 +2,7 @@
   "schemaVersion": "1.0.0",
   "auditId": "media-transcribe-studio-ultimate-parity-v1",
   "title": "MediaTranscribeStudio Ultimate Pre-release Parity Gate",
-  "updatedAt": "2026-07-23T00:00:00+08:00",
+  "updatedAt": "2026-07-26T00:00:00+08:00",
   "policy": {
     "defaultFailClosed": true,
     "forbidEvidenceInsideRepository": true,
@@ -12,7 +12,6 @@
       "transcription",
       "speaker-diarization",
       "translation",
-      "polishing",
       "summary",
       "export",
       "dynamic-n",
@@ -30,7 +29,6 @@
       "ULT-TRANSCRIPTION-001",
       "ULT-SPEAKER-001",
       "ULT-TRANSLATION-001",
-      "ULT-POLISH-001",
       "ULT-SUMMARY-001",
       "ULT-EXPORT-001",
       "ULT-DYNAMIC-N-001",
@@ -48,7 +46,6 @@
       "ULT-TRANSCRIPTION-001",
       "ULT-SPEAKER-001",
       "ULT-TRANSLATION-001",
-      "ULT-POLISH-001",
       "ULT-SUMMARY-001",
       "ULT-EXPORT-001",
       "ULT-DYNAMIC-N-001",
@@ -65,7 +62,6 @@
       "ULT-TRANSCRIPTION-001",
       "ULT-SPEAKER-001",
       "ULT-TRANSLATION-001",
-      "ULT-POLISH-001",
       "ULT-SUMMARY-001",
       "ULT-EXPORT-001",
       "ULT-DYNAMIC-N-001",
@@ -167,12 +163,6 @@
       "name": "Local multilingual translation",
       "required": true,
       "gateIds": ["ULT-TRANSLATION-001"]
-    },
-    {
-      "id": "polishing",
-      "name": "Local semantic polishing",
-      "required": true,
-      "gateIds": ["ULT-POLISH-001"]
     },
     {
       "id": "summary",
@@ -277,8 +267,8 @@
     },
     {
       "id": "ULT-SPEAKER-001",
-      "title": "Speaker diarization parity",
-      "description": "Speaker boundaries, identities, sequence decoding, cardinality, and semantic attribution must be independently verified.",
+      "title": "Speaker diarization and semantic arbitration parity",
+      "description": "Speaker boundaries, identities, sequence decoding, cardinality, evidence-bound speaker reranking, and minimal text repair must be independently verified.",
       "required": true,
       "state": "in_progress",
       "capabilityIds": ["speaker-diarization"],
@@ -286,6 +276,7 @@
         {"id": "speaker-pipeline-present", "type": "path_exists", "path": "backend/speaker_pipeline.py"},
         {"id": "speaker-change-present", "type": "path_exists", "path": "backend/speaker_change_detection.py"},
         {"id": "speaker-decoder-present", "type": "path_exists", "path": "backend/speaker_sequence_decoder.py"},
+        {"id": "semantic-arbitration-present", "type": "path_exists", "path": "backend/semantic_processing.py"},
         {"id": "diar-fusion-present", "type": "path_exists", "path": "diar_fusion"}
       ],
       "commandChecks": [
@@ -300,6 +291,7 @@
             "tests/test_speaker_change_detection.py",
             "tests/test_speaker_pipeline_production.py",
             "tests/test_speaker_sequence_decoder.py",
+            "tests/test_semantic_processing.py",
             "tests/test_worker_speaker_cardinality.py",
             "-q"
           ],
@@ -344,39 +336,6 @@
       "evidence": {
         "attestations": [
           {"path": "capabilities/translation.json", "kind": "capability-attestation", "minimumArtifacts": 0}
-        ]
-      }
-    },
-    {
-      "id": "ULT-POLISH-001",
-      "title": "Local polishing parity",
-      "description": "Local semantic polishing must remain schema-bound, traceable, and unable to alter speaker or timing invariants.",
-      "required": true,
-      "state": "in_progress",
-      "capabilityIds": ["polishing"],
-      "repoChecks": [
-        {"id": "local-llm-present-for-polishing", "type": "path_exists", "path": "backend/local_llm.py"},
-        {"id": "polish-contract-valid", "type": "json_file_valid", "path": "contracts/polish-output.schema.json"}
-      ],
-      "commandChecks": [
-        {
-          "id": "polishing-focused-pytest",
-          "argv": [
-            "{python}",
-            "-m",
-            "pytest",
-            "tests/test_business_processing.py::test_runner_creates_translation_polish_summary_and_manifest",
-            "tests/test_local_llm_contracts.py",
-            "-q"
-          ],
-          "cwd": ".",
-          "timeoutSeconds": 600,
-          "attestationPath": "commands/polishing-focused-pytest.json"
-        }
-      ],
-      "evidence": {
-        "attestations": [
-          {"path": "capabilities/polishing.json", "kind": "capability-attestation", "minimumArtifacts": 0}
         ]
       }
     },

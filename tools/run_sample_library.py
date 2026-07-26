@@ -62,7 +62,6 @@ def _run_case(
     render_pdf: bool,
     local_llm_mode: str,
     translation_targets: Sequence[str],
-    polish: bool,
     summary: bool,
 ) -> int:
     command = [
@@ -120,8 +119,6 @@ def _run_case(
         command.append("--render-pdf")
     for target in translation_targets:
         command.extend(["--translation-target", target])
-    if polish:
-        command.append("--polish")
     if summary:
         command.append("--summary")
     completed = subprocess.run(command, cwd=ROOT)
@@ -143,7 +140,6 @@ def _batch_job(
     render_pdf: bool,
     local_llm_mode: str,
     translation_targets: Sequence[str],
-    polish: bool,
     summary: bool,
 ) -> BatchSmokeJob:
     speaker_count = None
@@ -174,7 +170,6 @@ def _batch_job(
         language=language,
         local_llm_mode=local_llm_mode,
         translation_targets=translation_targets,
-        polish=polish,
         summary=summary,
     )
     return BatchSmokeJob(
@@ -353,7 +348,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="disabled",
     )
     parser.add_argument("--translation-target", action="append", default=[])
-    parser.add_argument("--polish", action="store_true")
     parser.add_argument("--summary", action="store_true")
     parser.add_argument(
         "--reuse-worker",
@@ -490,7 +484,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     render_pdf=args.render_pdf,
                     local_llm_mode=args.local_llm_mode,
                     translation_targets=args.translation_target,
-                    polish=args.polish,
                     summary=args.summary,
                 )
             )
@@ -510,7 +503,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 render_pdf=args.render_pdf,
                 local_llm_mode=args.local_llm_mode,
                 translation_targets=args.translation_target,
-                polish=args.polish,
                 summary=args.summary,
             )
             if return_code != 0:

@@ -11,6 +11,7 @@ import pytest
 
 from backend.business_processing import (
     BUSINESS_PROMPT_VERSION,
+    BUSINESS_REQUEST_SCHEMA_VERSION,
     BUSINESS_SCHEMA_VERSION,
     BusinessProcessingConfig,
     BusinessProcessingRunner,
@@ -182,7 +183,6 @@ def _valid_translation_responses() -> list[dict[str, object]]:
 def test_business_config_normalizes_language_tags_and_is_schema_ready() -> None:
     config = BusinessProcessingConfig(
         translation_targets=("zh_CN", "en"),
-        polish=True,
         summary=True,
         model=" qwen3.5:4b ",
         output_locale="en-US",
@@ -191,7 +191,7 @@ def test_business_config_normalizes_language_tags_and_is_schema_ready() -> None:
     assert config.translation_targets == ("zh-CN", "en")
     assert config.model == "qwen3.5:4b"
     assert config.output_locale == "en-US"
-    assert config.as_dict()["schemaVersion"] == BUSINESS_SCHEMA_VERSION
+    assert config.as_dict()["schemaVersion"] == BUSINESS_REQUEST_SCHEMA_VERSION
     assert config.enabled is True
 
     with pytest.raises(ValueError, match="unique"):
@@ -247,7 +247,7 @@ def test_business_processing_rejects_request_only_auto_document_language(
     assert error.value.code == "BUSINESS_INPUT_INVALID"
 
 
-def test_runner_creates_translation_polish_summary_and_manifest(
+def test_runner_creates_translation_summary_and_manifest(
     tmp_path: Path,
 ) -> None:
     document = _document()
@@ -269,22 +269,6 @@ def test_runner_creates_translation_polish_summary_and_manifest(
                 2500,
                 "我会在周五前完成验证。",
                 "I will finish validation by Friday.",
-            ),
-            _polished_segment(
-                "segment-1",
-                "speaker-1",
-                0,
-                1200,
-                "我们今天确认发布计划。",
-                "我们今天确认发布计划。",
-            ),
-            _polished_segment(
-                "segment-2",
-                "speaker-2",
-                1300,
-                2500,
-                "我会在周五前完成验证。",
-                "我会在周五前完成验证。",
             ),
             {
                 "executiveSummary": "会议确认了发布计划，并安排了验证工作。",
@@ -321,7 +305,6 @@ def test_runner_creates_translation_polish_summary_and_manifest(
     )
     config = BusinessProcessingConfig(
         translation_targets=("en",),
-        polish=True,
         summary=True,
         output_locale="zh-CN",
     )
@@ -334,14 +317,12 @@ def test_runner_creates_translation_polish_summary_and_manifest(
 
     assert [path.name for path in artifacts] == [
         "translation-en.v1.json",
-        "polished-transcript.v1.json",
         "summary.v1.json",
         "business-manifest.v1.json",
     ]
     assert document == original
 
     translation = _read_json(tmp_path / "business" / "translation-en.v1.json")
-    polish = _read_json(tmp_path / "business" / "polished-transcript.v1.json")
     summary = _read_json(tmp_path / "business" / "summary.v1.json")
     manifest = _read_json(tmp_path / "business" / "business-manifest.v1.json")
 
@@ -351,10 +332,6 @@ def test_runner_creates_translation_polish_summary_and_manifest(
     assert translation["requiresHumanApproval"] is True
     assert translation["segments"][0]["speakerId"] == "speaker-1"
     assert translation["segments"][0]["startMs"] == 0
-    assert polish["language"] == "zh-CN"
-    assert polish["applicationPolicy"] == "suggestion-only"
-    assert polish["requiresHumanApproval"] is True
-    assert polish["diff"] == []
     assert summary["actionItems"][0]["evidenceSegmentIds"] == ["segment-2"]
     assert summary["applicationPolicy"] == "suggestion-only"
     assert summary["requiresHumanApproval"] is True
@@ -375,7 +352,10 @@ def test_runner_creates_translation_polish_summary_and_manifest(
     assert manifest["sourceDocumentHash"] == canonical_json_sha256(original)
     assert manifest["applicationPolicy"] == "suggestion-only"
     assert manifest["requiresHumanApproval"] is True
-    assert len(manifest["artifacts"]) == 3
+    assert [Path(path).name for path in manifest["artifacts"]] == [
+        "translation-en.v1.json",
+        "summary.v1.json",
+    ]
 
 
 def test_same_language_translation_skips_model_without_changing_source(
@@ -519,13 +499,13 @@ def test_variant_input_hash_separates_derived_artifact_types() -> None:
         segments=segments,
         variant="translation:en",
     )
-    polish_hash = _variant_input_hash(
+    summary_hash = _variant_input_hash(
         document=document,
         segments=segments,
-        variant="polish:source",
+        variant="summary",
     )
 
-    assert translation_hash != polish_hash
+    assert translation_hash != summary_hash
 
 
 def test_translation_cannot_change_speaker_or_timing(tmp_path: Path) -> None:
@@ -573,31 +553,18 @@ def test_translation_must_return_the_requested_language(tmp_path: Path) -> None:
     assert error.value.code == "BUSINESS_OUTPUT_INVALID"
 
 
-@pytest.mark.parametrize("task", ["translation", "polish"])
 def test_model_outputs_reject_malformed_or_request_only_language_tags(
     tmp_path: Path,
-    task: str,
 ) -> None:
-    if task == "translation":
-        response = _translated_segment(
-            "segment-1",
-            "speaker-1",
-            0,
-            1200,
-            "我们今天确认发布计划。",
-            "Today we confirmed the release plan.",
-        )
-        config = BusinessProcessingConfig(translation_targets=("en",))
-    else:
-        response = _polished_segment(
-            "segment-1",
-            "speaker-1",
-            0,
-            1200,
-            "我们今天确认发布计划。",
-            "我们今天确认发布计划。",
-        )
-        config = BusinessProcessingConfig(polish=True)
+    response = _translated_segment(
+        "segment-1",
+        "speaker-1",
+        0,
+        1200,
+        "我们今天确认发布计划。",
+        "Today we confirmed the release plan.",
+    )
+    config = BusinessProcessingConfig(translation_targets=("en",))
 
     for invalid_language in ("auto", "en-a"):
         invalid_response = dict(response)
@@ -1082,128 +1049,6 @@ def test_summary_rejects_items_outside_the_public_contract(
     assert not (tmp_path / "business" / "summary.v1.json").exists()
 
 
-def test_polish_rejects_empty_diff_reason_before_persistence(
-    tmp_path: Path,
-) -> None:
-    document = _document()
-    segments = document["segments"]
-    assert isinstance(segments, list)
-    first = segments[0]
-    assert isinstance(first, dict)
-    source_text = str(first["normalizedText"])
-    response = _polished_segment(
-        "segment-1",
-        "speaker-1",
-        0,
-        1200,
-        source_text,
-        source_text,
-    )
-    response["diffReason"] = ""
-
-    with pytest.raises(WorkerError) as error:
-        BusinessProcessingRunner(
-            provider=MappingLocalLLMProvider([response])
-        ).run(
-            document,
-            output_directory=tmp_path,
-            config=BusinessProcessingConfig(polish=True),
-        )
-
-    assert error.value.code == "BUSINESS_OUTPUT_INVALID"
-    assert not (
-        tmp_path / "business" / "polished-transcript.v1.json"
-    ).exists()
-
-
-@pytest.mark.parametrize(
-    ("source_text", "polished_text", "guard"),
-    [
-        (
-            "The desktop app should accept 3 PDF files.",
-            "The desktop app must accept 3 PDF files.",
-            "modality",
-        ),
-        (
-            "The desktop app should accept 3 PDF files.",
-            "The desktop app should accept 4 PDF files.",
-            "protected-literals",
-        ),
-        (
-            "The desktop app should not overwrite report.pdf.",
-            "The desktop app should overwrite report.pdf.",
-            "negation",
-        ),
-        (
-            "Should the desktop app accept 3 PDF files?",
-            "The desktop app should accept 3 PDF files.",
-            "question-intent",
-        ),
-        (
-            "The desktop app should accept 3 PDF files.",
-            "桌面应用应该接受 3 个 PDF 文件。",
-            "source-script",
-        ),
-    ],
-)
-def test_polish_rejects_high_confidence_semantic_drift(
-    tmp_path: Path,
-    source_text: str,
-    polished_text: str,
-    guard: str,
-) -> None:
-    document = _single_segment_document(source_text)
-    response = _polished_segment_for_language(
-        source_text,
-        polished_text,
-        language="en",
-    )
-
-    with pytest.raises(WorkerError) as error:
-        BusinessProcessingRunner(
-            provider=MappingLocalLLMProvider([response])
-        ).run(
-            document,
-            output_directory=tmp_path,
-            config=BusinessProcessingConfig(polish=True),
-        )
-
-    assert error.value.code == "BUSINESS_OUTPUT_INVALID"
-    assert error.value.details["guard"] == guard
-    assert not (
-        tmp_path / "business" / "polished-transcript.v1.json"
-    ).exists()
-
-
-def test_polish_accepts_conservative_rewrite_and_marks_it_suggestion_only(
-    tmp_path: Path,
-) -> None:
-    source_text = "Should the desktop app accept 3 PDF files by drag and drop?"
-    polished_text = "Should the desktop app accept 3 PDF files via drag-and-drop?"
-    response = _polished_segment_for_language(
-        source_text,
-        polished_text,
-        language="en",
-    )
-
-    BusinessProcessingRunner(
-        provider=MappingLocalLLMProvider([response])
-    ).run(
-        _single_segment_document(source_text),
-        output_directory=tmp_path,
-        config=BusinessProcessingConfig(polish=True),
-    )
-
-    artifact = _read_json(
-        tmp_path / "business" / "polished-transcript.v1.json"
-    )
-    assert artifact["applicationPolicy"] == "suggestion-only"
-    assert artifact["requiresHumanApproval"] is True
-    assert artifact["segments"][0]["text"] == polished_text
-    assert artifact["diff"][0]["before"] == source_text
-    assert artifact["diff"][0]["after"] == polished_text
-
-
 def test_job_cancellation_is_not_wrapped_as_a_business_provider_failure(
     tmp_path: Path,
 ) -> None:
@@ -1511,7 +1356,7 @@ def test_business_character_boundary_accepts_exact_segment_and_rejects_overflow(
     ).exists()
 
 
-def test_translation_and_polish_preserve_human_lock_and_raw_document(
+def test_translation_preserves_human_lock_and_raw_document(
     tmp_path: Path,
 ) -> None:
     source = "The desktop app should accept 3 PDF files."
@@ -1530,32 +1375,21 @@ def test_translation_and_polish_preserve_human_lock_and_raw_document(
         " 3 \u4e2a PDF \u6587\u4ef6\u3002",
         "language": "zh-CN",
     }
-    polish = _polished_segment_for_language(
-        source,
-        "The desktop app should accept 3 PDF files.",
-        language="en",
-    )
-
     BusinessProcessingRunner(
-        provider=MappingLocalLLMProvider([translation, polish])
+        provider=MappingLocalLLMProvider([translation])
     ).run(
         document,
         output_directory=tmp_path,
         config=BusinessProcessingConfig(
             translation_targets=("zh-CN",),
-            polish=True,
         ),
     )
 
     translated = _read_json(
         tmp_path / "business" / "translation-zh-CN.v1.json"
     )
-    polished = _read_json(
-        tmp_path / "business" / "polished-transcript.v1.json"
-    )
     assert document == original
     assert translated["segments"][0]["humanLocked"] is True
-    assert polished["segments"][0]["humanLocked"] is True
 
 
 def test_model_cannot_change_the_immutable_human_lock(

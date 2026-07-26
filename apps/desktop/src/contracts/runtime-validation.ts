@@ -1827,7 +1827,6 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     "localLlmEndpointPolicy",
     "localLlmAutoApply",
     "translationTargets",
-    "polish",
     "summary",
     "outputLocale",
     "businessPromptVersion",
@@ -1921,7 +1920,6 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     }
     seenTargets.add(comparisonKey);
   });
-  const polish = boolean(request.polish, "createJobRequest.polish");
   const summary = boolean(request.summary, "createJobRequest.summary");
   languageTag(request.outputLocale, "createJobRequest.outputLocale");
   if (request.businessPromptVersion !== "business-v1") {
@@ -1930,8 +1928,7 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
       'must be exactly "business-v1".',
     );
   }
-  const hasBusinessTask =
-    translationTargets.length > 0 || polish || summary;
+  const hasBusinessTask = translationTargets.length > 0 || summary;
   if (
     (localLlmMode === "business" && !hasBusinessTask) ||
     (localLlmMode === "disabled" && hasBusinessTask)
@@ -1939,7 +1936,7 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     fail(
       "createJobRequest.localLlmMode",
       hasBusinessTask
-        ? 'must be "business" when translation, polishing, or summary output is selected.'
+        ? 'must be "business" when translation or summary output is selected.'
         : 'must be "disabled" when no business-processing output is selected.',
     );
   }

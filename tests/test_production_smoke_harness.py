@@ -561,7 +561,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
         self.assertEqual(auto["language"], "auto")
         self.assertEqual(auto["localLlmMode"], "disabled")
         self.assertEqual(auto["translationTargets"], [])
-        self.assertFalse(auto["polish"])
+        self.assertNotIn("polish", auto)
         self.assertFalse(auto["summary"])
         self.assertFalse(auto["localLlmAutoApply"])
         self.assertEqual(
@@ -585,7 +585,6 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             local_llm_endpoint="http://127.0.0.1:11434",
             local_llm_endpoint_policy="loopback-only",
             translation_targets=("en-US", "ja-JP"),
-            polish=True,
             summary=True,
             output_locale="zh-Hans",
             business_prompt_version="business-v2",
@@ -599,7 +598,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             payload["translationTargets"],
             ["en-US", "ja-JP"],
         )
-        self.assertTrue(payload["polish"])
+        self.assertNotIn("polish", payload)
         self.assertTrue(payload["summary"])
         self.assertEqual(payload["outputLocale"], "zh-Hans")
         self.assertEqual(payload["businessPromptVersion"], "business-v2")
@@ -625,7 +624,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             {
                 "local_llm_endpoint_policy": "allow-remote",
                 "local_llm_mode": "business",
-                "polish": True,
+                "summary": True,
             },
             {
                 "local_llm_model": " ",

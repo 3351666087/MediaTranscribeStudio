@@ -336,7 +336,6 @@ export function TaskCreator({
   const [selectedTranslationTargets, setSelectedTranslationTargets] = useState<
     string[]
   >([]);
-  const [polishEnabled, setPolishEnabled] = useState(false);
   const [summaryEnabled, setSummaryEnabled] = useState(false);
   const [outputLocaleChoice, setOutputLocaleChoice] = useState(
     DEFAULT_OUTPUT_LOCALE,
@@ -463,7 +462,6 @@ export function TaskCreator({
     setBusinessEnabled(false);
     setTranslationEnabled(false);
     setSelectedTranslationTargets([]);
-    setPolishEnabled(false);
     setSummaryEnabled(false);
     setOutputLocaleChoice(DEFAULT_OUTPUT_LOCALE);
     setLocalLlmModel(DEFAULT_LOCAL_MODEL);
@@ -1021,7 +1019,7 @@ export function TaskCreator({
         language,
         localLlmMode:
           businessEnabled &&
-          (translationTargets.length > 0 || polishEnabled || summaryEnabled)
+          (translationTargets.length > 0 || summaryEnabled)
             ? "business"
             : "disabled",
         localLlmModel: localLlmModel.trim(),
@@ -1029,7 +1027,6 @@ export function TaskCreator({
         localLlmEndpointPolicy: "loopback-only",
         localLlmAutoApply: false,
         translationTargets,
-        polish: businessEnabled && polishEnabled,
         summary: businessEnabled && summaryEnabled,
         outputLocale,
         businessPromptVersion: "business-v1",
@@ -1923,23 +1920,6 @@ export function TaskCreator({
                     </strong>
                     <small>
                       {taskT("creator.business.translationDescription")}
-                    </small>
-                  </span>
-                  <Icon name="check" size={16} />
-                </label>
-                <label className="business-option">
-                  <input
-                    type="checkbox"
-                    checked={polishEnabled}
-                    disabled={!businessEnabled}
-                    onChange={(event) =>
-                      setPolishEnabled(event.target.checked)
-                    }
-                  />
-                  <span>
-                    <strong>{taskT("creator.business.polishTitle")}</strong>
-                    <small>
-                      {taskT("creator.business.polishDescription")}
                     </small>
                   </span>
                   <Icon name="check" size={16} />

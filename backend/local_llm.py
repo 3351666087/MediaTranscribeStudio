@@ -1,7 +1,8 @@
 """Strict, offline-first local language-model boundary.
 
 The production worker deliberately treats a local model as an untrusted
-business-output provider.  It may translate, polish, or summarize text, but
+semantic or business-output provider. It may propose evidence-bound transcript
+repairs, translate, or summarize text, but
 it cannot mutate acoustic evidence, timestamps, speaker identities, review
 locks, or the immutable raw transcript.
 

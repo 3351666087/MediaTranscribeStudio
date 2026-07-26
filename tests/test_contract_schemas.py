@@ -145,9 +145,8 @@ def _semantic_arbitration(language: str) -> dict[str, Any]:
 
 def _business_request(language: str) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.1.0",
+        "schemaVersion": "1.2.0",
         "translationTargets": [language],
-        "polish": True,
         "summary": True,
         "model": "qwen3.5:4b",
         "outputLocale": language,

@@ -377,7 +377,6 @@ export interface CreateJobRequest {
   localLlmEndpointPolicy: "loopback-only";
   localLlmAutoApply: false;
   translationTargets: string[];
-  polish: boolean;
   summary: boolean;
   outputLocale: string;
   businessPromptVersion: "business-v1";

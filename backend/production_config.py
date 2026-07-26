@@ -261,7 +261,7 @@ class ProductionSpeakerPolicy:
     pyannote_mapping_margin_threshold: float = 0.05
     pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
-    local_llm_mode: str = "disabled"
+    local_llm_mode: str = "suggestion-only"
     local_llm_model: str = "qwen3.5:9b"
 
 
@@ -772,9 +772,9 @@ class ProductionConfig:
                 choices={"disabled", "fallback"},
             ),
             local_llm_mode=_choice(
-                raw_speaker.get("localLlmMode", "disabled"),
+                raw_speaker.get("localLlmMode", "suggestion-only"),
                 field="speaker.localLlmMode",
-                choices={"disabled", "suggestion-only"},
+                choices={"suggestion-only"},
             ),
             local_llm_model=_choice(
                 raw_speaker.get("localLlmModel", "qwen3.5:9b"),

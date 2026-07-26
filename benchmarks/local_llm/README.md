@@ -6,19 +6,21 @@ contract.
 
 The checked-in benchmark profile uses a held-out Chinese-language corpus. That
 is a property of this evaluation dataset, not a language restriction in the
-MediaTranscribeStudio product contracts. Translation, polishing, and summary
-artifacts use validated language metadata and can be evaluated with additional
-language-specific corpora. Coverage depends on the installed local model pack
-and a task-specific evaluation; no result in this directory establishes
-universal language support.
+MediaTranscribeStudio product contracts. Semantic-arbitration suggestions,
+translation, and summary artifacts use validated language metadata and can be
+evaluated with additional language-specific corpora. Coverage depends on the
+installed local model pack and a task-specific evaluation; no result in this
+directory establishes universal language support.
 
 ## Product artifact boundary
 
-In the product architecture, local small models may produce translation,
-source-language semantic-polishing, and evidence-grounded summary artifacts.
-Those outputs are separate, versioned derivatives. They do not replace or
-silently rewrite the source transcript, timestamps, speaker assignments,
-voiceprint evidence, or human locks.
+In the product architecture, local small models produce constrained semantic
+arbitration suggestions and may produce translation and evidence-grounded
+summary artifacts. Those outputs are separate and versioned. They do not replace
+or silently rewrite the source transcript, timestamps, speaker assignments,
+voiceprint evidence, or human locks. Independent polishing is a retired product
+operation; this historical benchmark remains useful for semantic-repair safety
+evaluation.
 
 This benchmark evaluates a narrower correction-proposal contract. It must not
 be interpreted as authorization for automatic source-transcript mutation or
@@ -139,12 +141,12 @@ or speaker-attribution quality.
 
 ## Product relationship
 
-MediaTranscribeStudio's backend supports separate, versioned local artifacts
-for translation, source-language semantic polishing, and evidence-grounded
-summaries. This cleanup benchmark is narrower: it evaluates whether a small
-model can safely propose constrained corrections to transcript text. Speaker
-evidence and the immutable source transcript remain outside the model's
-writable output contract.
+MediaTranscribeStudio's backend supports versioned semantic-arbitration
+suggestions plus separate translation and evidence-grounded summary artifacts.
+This cleanup benchmark is narrower: it evaluates whether a small model can
+safely propose constrained corrections to transcript text. Speaker evidence and
+the immutable source transcript remain outside the model's writable output
+contract.
 
 Before enabling any model for another language or business operation, create an
 appropriate held-out corpus, preserve the same privacy boundary, define

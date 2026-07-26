@@ -4941,11 +4941,12 @@ class SpeakerPipeline:
                 }
                 partitioned.append(replace(source, metadata=metadata))
                 continue
-            duration = source.end_ms - source.start_ms
-            boundaries = tuple(
-                source.start_ms + duration * index // partition_count
-                for index in range(partition_count)
-            ) + (source.end_ms,)
+            boundaries, boundary_selection = (
+                self._speaker_count_partition_boundaries(
+                    source,
+                    partition_count=partition_count,
+                )
+            )
             source_turn_id = (
                 str(source.metadata["turnId"]).strip()
                 if isinstance(source.metadata.get("turnId"), str)
@@ -4976,6 +4977,17 @@ class SpeakerPipeline:
                             "achievedEvidenceWindowCount": sum(allocations),
                             "partitionCount": partition_count,
                             "capacityLimited": capacity_limited,
+                            "boundarySelectionMethod": boundary_selection[
+                                "method"
+                            ],
+                            "selectedAcousticBoundaryCount": (
+                                boundary_selection[
+                                    "selectedAcousticBoundaryCount"
+                                ]
+                            ),
+                            "selectedProposalIds": boundary_selection[
+                                "selectedProposalIds"
+                            ],
                             "reviewRequired": True,
                             "reasonCode": (
                                 "AUTO_COUNT_EVIDENCE_CAPACITY_LIMITED"
@@ -5018,6 +5030,146 @@ class SpeakerPipeline:
             speakerCountPartitionCapacityLimited=capacity_limited,
         )
         return replace(prepared, windows=tuple(partitioned))
+
+    @staticmethod
+    def _speaker_count_partition_boundaries(
+        source: SpeechWindow,
+        *,
+        partition_count: int,
+    ) -> tuple[tuple[int, ...], dict[str, Any]]:
+        """Prefer reviewable acoustic change points over arbitrary equal cuts.
+
+        These boundaries only define independent embedding samples. They keep
+        the source turn ID and remain review-required, so a change proposal is
+        never promoted to a confirmed speaker turn by this sampling step.
+        """
+
+        duration = source.end_ms - source.start_ms
+        uniform = [
+            source.start_ms + duration * index // partition_count
+            for index in range(partition_count + 1)
+        ]
+        refinement = source.metadata.get("speakerChangeRefinement")
+        candidates: list[dict[str, Any]] = []
+        if isinstance(refinement, Mapping):
+            plans = refinement.get("plans")
+            if isinstance(plans, Mapping):
+                for resolution, raw_plan in sorted(plans.items()):
+                    if not isinstance(raw_plan, Mapping):
+                        continue
+                    proposals = raw_plan.get("proposals")
+                    if not isinstance(proposals, Sequence) or isinstance(
+                        proposals,
+                        (str, bytes, bytearray),
+                    ):
+                        continue
+                    for proposal in proposals:
+                        if not isinstance(proposal, Mapping):
+                            continue
+                        split_ms = proposal.get("splitMs")
+                        if (
+                            isinstance(split_ms, bool)
+                            or not isinstance(split_ms, int)
+                            or not source.start_ms < split_ms < source.end_ms
+                            or proposal.get("overlapRisk") is True
+                        ):
+                            continue
+
+                        def score(name: str) -> float:
+                            value = proposal.get(name)
+                            if (
+                                isinstance(value, bool)
+                                or not isinstance(value, (int, float))
+                                or not math.isfinite(float(value))
+                            ):
+                                return 0.0
+                            return float(value)
+
+                        candidates.append(
+                            {
+                                "splitMs": split_ms,
+                                "proposalId": str(
+                                    proposal.get("proposalId") or ""
+                                ),
+                                "resolution": str(resolution),
+                                "automatic": (
+                                    proposal.get("applyAutomatically") is True
+                                ),
+                                "changeScore": score("changeScore"),
+                                "acousticConfidence": score(
+                                    "acousticConfidence"
+                                ),
+                                "boundaryMarkerConfidence": score(
+                                    "boundaryMarkerConfidence"
+                                ),
+                            }
+                        )
+
+        selected_ids: list[str] = []
+        selected_acoustic = 0
+        boundaries = [source.start_ms]
+        used: set[tuple[str, str]] = set()
+        for index in range(1, partition_count):
+            ideal = uniform[index]
+            cell_start = (uniform[index - 1] + ideal) // 2
+            cell_end = (ideal + uniform[index + 1]) // 2
+            minimum = max(
+                boundaries[-1] + _MIN_SPEAKER_COUNT_PARTITION_MS,
+                cell_start,
+            )
+            maximum = min(
+                source.end_ms
+                - (partition_count - index)
+                * _MIN_SPEAKER_COUNT_PARTITION_MS,
+                cell_end,
+            )
+            eligible = [
+                candidate
+                for candidate in candidates
+                if (
+                    minimum <= candidate["splitMs"] <= maximum
+                    and (
+                        candidate["resolution"],
+                        candidate["proposalId"],
+                    )
+                    not in used
+                )
+            ]
+            if eligible:
+                selected = max(
+                    eligible,
+                    key=lambda candidate: (
+                        candidate["automatic"],
+                        candidate["acousticConfidence"],
+                        candidate["changeScore"],
+                        candidate["boundaryMarkerConfidence"],
+                        -abs(candidate["splitMs"] - ideal),
+                        candidate["resolution"] == "context",
+                        candidate["proposalId"],
+                    ),
+                )
+                boundary = int(selected["splitMs"])
+                used.add(
+                    (selected["resolution"], selected["proposalId"])
+                )
+                if selected["proposalId"]:
+                    selected_ids.append(selected["proposalId"])
+                selected_acoustic += 1
+            else:
+                boundary = max(minimum, min(ideal, maximum))
+            boundaries.append(boundary)
+        boundaries.append(source.end_ms)
+        if selected_acoustic == partition_count - 1:
+            method = "speaker-change-proposal-guided-v1"
+        elif selected_acoustic:
+            method = "speaker-change-proposal-mixed-v1"
+        else:
+            method = "uniform-duration-fallback-v1"
+        return tuple(boundaries), {
+            "method": method,
+            "selectedAcousticBoundaryCount": selected_acoustic,
+            "selectedProposalIds": selected_ids,
+        }
 
     @staticmethod
     def _join_aligned_token_text(tokens: Sequence[Mapping[str, Any]]) -> str:

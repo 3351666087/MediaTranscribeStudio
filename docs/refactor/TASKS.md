@@ -41,15 +41,15 @@
 - [ ] 让新 `backend/**` 成为真实生产入口并完全替代旧 `pipeline.py`。
 - [ ] 固化旗舰模型 provider 边界：Community-1/VBx Dynamic-N 主说话人时间线、Qwen3-ASR-1.7B 支持集内主 ASR、`omniASR_LLM_Unlimited_7B_v2` 长尾/长音频后端，以及 Whisper/Parakeet/Canary/CAM++/ERes2NetV2 的挑战者或审计角色；任何分桶接管必须由 held-out 晋级。
 - [ ] 增加 overlap/串话候选和局部音频复核任务。
-- [ ] 实现 Dynamic-N 全局约束解码，保证 speaker set、score vector、profile 与 segment 映射基数一致。
-- [ ] 完成自动检测、手动指定、混合上下界和人数不确定时 fail-closed 的端到端流程。
-- [ ] 实现问答关系、轮次一致性、称谓、议题和相邻声纹的语义仲裁。
-- [ ] 保存机器原文、语义优化文、变更原因、置信度和审计轨迹。
-- [ ] 保留确定性回退路径：小 LLM 不可用时不破坏 ASR 与声纹结果。
+- [x] 实现 Dynamic-N 全局约束解码，保证 speaker set、score vector、profile 与 segment 映射基数一致。
+- [x] 完成自动检测、手动指定、混合上下界和人数不确定时 fail-closed 的端到端流程。
+- [x] 实现问答关系、轮次一致性、称谓、议题和相邻声纹的语义仲裁。
+- [x] 保存机器原文、语义优化文、变更原因、置信度和审计轨迹。
+- [x] 保留确定性回退路径：小 LLM 不可用时不破坏 ASR 与声纹结果。
 - [ ] 实现效率级联：一次性预处理/缓存、全量基础通道、不确定性路由、局部重算、仅建议语义层、最小人工复核和增量报告。
-- [ ] 为每一级记录触发原因、输入范围、缓存键、耗时、峰值资源、输出置信度和退出原因，并实现有界队列、背压、取消与恢复。
-- [ ] 将人数估计、DER/JER/speaker confusion、时间边界、`rawText` CER、语义建议安全性、系统效率和 PDF 质量拆成不可互相抵消的指标域。
-- [ ] 消除桌面端、Rust mock、Java validator/renderer/metadata 和测试中的固定五人约束。
+- [x] 为每一级记录触发原因、输入范围、缓存键、耗时、峰值资源、输出置信度和退出原因，并实现有界队列、背压、取消与恢复。
+- [x] 将人数估计、DER/JER/speaker confusion、时间边界、`rawText` CER、语义建议安全性、系统效率和 PDF 质量拆成不可互相抵消的指标域。
+- [x] 消除桌面端、Rust mock、Java validator/renderer/metadata 和测试中的固定五人约束。
 - [ ] 通过至少 `N=1/2/5/8/13` 的回归矩阵，并对更大 `N` 做资源压力测试；五人仅作为 `N=5` fixture，任何资源失败都不得静默改变 `N`。
 
 ## 3. TypeScript 桌面端
@@ -103,7 +103,7 @@
 - [ ] Rust fmt、clippy 和 tests 全部通过。
 - [ ] Maven tests 与动态人数 Java PDF 金样测试全部通过。
 - [ ] 用真实动态人数会议进行端到端回归，不提交会议原文。
-- [ ] 使用真实五人会议作为 `N=5` 回归样例，而不是系统人数上限。
+- [x] 使用真实五人会议作为 `N=5` 回归样例，而不是系统人数上限。
 - [ ] 为人数估计、说话人分离、边界、ASR、语义建议、效率和 PDF 分别登记生产阈值并生成分桶报告；禁止只给综合分。
 - [ ] 证明效率级联只升级不确定片段，并报告 RTF、阶段 p50/p95、峰值 VRAM/RAM、缓存命中率、升级率和重算比例。
 - [ ] 对每页 PDF 做结构、文本、字体、裁切、空白、对比度和视觉证据检查。
@@ -132,14 +132,14 @@
 
 - [x] 完成未知人数真实长音频 r10 诊断；明确拒绝“96 个粗窗口覆盖约 61.5 分钟”的结果进入成品链路。
 - [x] 定位当前主要问题：长 VAD/ASR 窗口包含多轮说话、单窗口单角色赋值、全段零置信度、复核项过多、逐片 ERes2NetV2 延迟过高。
-- [ ] 在最终聚类前加入基于 FunASR 字词/句子时间、停顿、标点和多尺度声学子窗的细粒度 turn candidate。
-- [ ] 在长窗口内部检测说话人变化点，禁止把明显混合说话窗口直接绑定为单一角色。
-- [ ] 对短 turn candidate 执行 CAM++ 嵌入、Dynamic-N 聚类、时间平滑、邻接合并和过分裂/欠分裂校正。
+- [x] 在最终聚类前加入基于 FunASR 字词/句子时间、停顿、标点和多尺度声学子窗的细粒度 turn candidate。
+- [x] 在长窗口内部检测说话人变化点，禁止把明显混合说话窗口直接绑定为单一角色。
+- [x] 对短 turn candidate 执行 CAM++ 嵌入、Dynamic-N 聚类、时间平滑、邻接合并和过分裂/欠分裂校正。
 - [ ] 将 ERes2NetV2 改为模型常驻、批量推理和仅难例升级，消除逐片约 40 秒级开销。
-- [ ] 增强 overlap/change detector；本地可用时提供受控 pyannote 回退，并保留离线和许可证证据。
-- [ ] 声学候选稳定后再执行问答关系、称谓、轮次和上下文语义仲裁。
-- [ ] 为原文语义修正保存 evidence、理由、置信度和 human lock；禁止静默覆盖不可变 raw ASR。
-- [ ] 自动人数不确定时 fail closed；支持手动人数、混合上下界和任意正整数人数。
+- [x] 增强 overlap/change detector；本地可用时提供受控 pyannote 回退，并保留离线和许可证证据。
+- [x] 声学候选稳定后再执行问答关系、称谓、轮次和上下文语义仲裁。
+- [x] 为原文语义修正保存 evidence、理由、置信度和 human lock；禁止静默覆盖不可变 raw ASR。
+- [x] 自动人数不确定时 fail closed；支持手动人数、混合上下界和任意正整数人数。
 - [ ] 重跑未知人数真实 M4A；长媒体必须使用覆盖开头、中段、结尾、随机有声段和声学变化点的分层窗口，整段终态与窗口结果共同按人数稳定性、turn 粒度、speaker confusion、审查量和 RTF 分域验收。
 - [ ] 重跑真实 MOV 的 auto 与 manual=5；只有人工确认包含五位不同说话人的窗口或整段真值才能用于 `manual=5` 质量验收，固定取前 60 秒仅可作为媒体接入/执行烟雾测试，不能证明五人分离质量。
 
@@ -260,7 +260,7 @@
 
 - [ ] 建立可校准的 Dynamic-N 多模型级联：内容探测后先分离无声/非词汇声/可转写人声，再联合 VAD、重叠检测、turn boundary、CAM++/ERes2NetV2 声纹和隔离 Pyannote 轨道生成带置信区间的人数/身份候选；按场景与逐段语言路由 ASR，并在声学模型冲突、支持集外语言或人数后验不稳定时输出 `und`/复核而不是强行定人或猜语言。人数上限只能由可审计资源预算约束，不能把窗口数、人工期望或 LLM 文本推断当成声学人数真值。
 - [ ] 建立模型选择、微调与混合使用门禁：为 VAD/overlap、边界、声纹、diarization、language ID、ASR 和本地 LLM 分别登记版本、许可证、量化/设备、缓存身份和适用分桶；在按 dataset/recording/speaker 隔离的开发集做基线与消融，只允许以从未调参的 held-out 同时改善人数误差、DER/JER/confusion、边界、WER/CER、语言/切换、复核量、RTF 和 RAM/VRAM 后升级。微调数据、adapter 和训练配置必须可复现，任一失败域不得被平均分掩盖。
-- [ ] 充分利用本地 LLM 但保持证据边界：对带时间戳与声学候选的结果强制执行语言一致性检查、候选重排和最小语法/术语/专名修复建议，并独立提供翻译与证据化摘要；说话人重排和内容词修改都必须引用原候选并保留 diff。LLM 不得凭语义创建声学不存在的说话人/片段，不得覆盖 `und` 或 review blocker，未通过真实 held-out 校准前继续 `suggestion-only` 和人工批准。
+- [x] 充分利用本地 LLM 但保持证据边界：对带时间戳与声学候选的结果强制执行语言一致性检查、候选重排和最小语法/术语/专名修复建议，并独立提供翻译与证据化摘要；说话人重排和内容词修改都必须引用原候选并保留 diff。LLM 不得凭语义创建声学不存在的说话人/片段，不得覆盖 `und` 或 review blocker，未通过真实 held-out 校准前继续 `suggestion-only` 和人工批准。
 - [x] 为正常有人声和无人声输入持久化版本化 `voice-activity.v1.json`：包含媒体时长、VAD 候选、语音总时长与占比、模型/配置/源哈希和终态；区分 `no-speech-candidates-detected`、`no-lexical-speech-detected` 与 `transcribable-speech-detected`。前两类由服务保存证据后以 `completed_no_speech` 成功终止，不进入说话人、语义仲裁、翻译、字幕或 PDF，也不伪造空 transcript；VAD 的 0 窗口属于推理正常完成而非模型故障。内部校验拒绝重叠窗口、哈希/job 不匹配、覆盖率造假和分类矛盾；契约校验器已从过时的“恰好 7 个 schema”改为检查 23 个现有 schema 及明确必需集合。聚焦回归为 `156 passed, 77 subtests passed`，契约校验通过。
 - [x] 生产 ASR 输入按声学说话人切点和独立语言时长切点共同分窗，每个语言识别窗口严格不超过 `12000 ms`；同一 speaker turn 内的多个语言窗口分别保存 Qwen 原始语言候选，文档级多语种结果汇总为 `mul`。
 - [x] 用 MPS 严格生产配置完成两个用户长媒体的 16 个全时段分层窗口：`16/16` 技术执行完成、失败 `0`、超时 `0`、强制清理进程 `0`，全部保存人声、逐字稿、流水线指标和复核队列；最长实际语言窗为 `11940 ms`，满足 `12000 ms` 上限。16 例均检测到可转写语音并输出 `zh`，自动人数分布为 `N=1:5 / N=2:3 / N=3:3 / N=6:2 / N=7:2 / N=8:1`，但 `16/16` 均为 `review.required`，合计 281 项、平均 17.5625 项，且全部缺少人数/turn/ASR 真值，因此只证明技术闭环可执行，不证明人数、DER/JER、语言或转写质量通过。无原文审计汇总位于 `.runtime_cache/sample-library/long-media-20260724/results/mps-v1/long-media-run-summary.v1.json`，可由 `tools/summarize_sample_run.py` 重新生成并校验 job/hash 关联和语言窗上限；聚焦测试 `5 passed`。
@@ -356,6 +356,10 @@
 - [x] 语义仲裁 runner 增加 context-window 自适应拆批：在调用 Ollama 前识别专用 `LocalLLMContextWindowError`，对超限批次按原顺序二分重试，中间 overflow 不写最终 failure 且不计 `providerCalls`；新增 `contextSplitCount`，单段仍超限则保存 `SEMANTIC_CONTEXT_WINDOW_EXCEEDED` 并 fail closed。真实 M4A auto v6 在 3 次拆分后完成 7 次 provider 调用，7/7 结果通过验证且全部 abstain，suggestion/rejection/failure 和 auto-applied 均为 0。
 - [x] 2026-07-26 完成独立润色删除的第二轮收口：删除历史 `polish-output.schema.json`、运行时兼容映射、业务验证分支和无消费者的报告 `polishNotes`；report-style 契约升为 `1.1.0`，23 个 schema 校验通过。新增删除回归后聚焦业务/契约/报告测试 `133 passed`，非 Windows 全量 Python 门禁 `1087 passed, 1 skipped, 145 subtests passed`，TypeScript/ESLint/Vite 与前端 `31 files / 375 tests` 全部通过；完整 Python 运行的 20 个失败均是本机缺少 Windows PowerShell 或受保护 graft 历史对象，不属于本改动回归。
 - [x] 修复自动人数证据网格的全单例退化：所有窗口（包括未再切分的残余窗）都保存 `speakerCountPartition`，使真实 62 个 CAM++ 缓存证据从错误 `N=62` 回退为 `N=1`，记录 `OVER_SPLIT_CORRECTION:62->1` 与 `ALL_SINGLETON_PARTITION_DEGENERACY`。同时新增严格逐字稿合并层，只在同源窗口、连续、同 speaker/语言/overlap/turn、无人工锁和既有 revision 时合并细声纹证据段，并重建哈希绑定的 `projection-derived-top1`；真实 M4A auto v6 从 62 个证据段合并为 7 个逐字稿段。该运行仍为 `review.required`，人数候选区间 `1–62`、confidence `0.6`，只能证明退化保护和链路完整，不能宣称人数质量通过。
+- [x] 2026-07-26 对核心分角色转录校验做实现层收口：在由当前工作树覆盖生成的 `/private/tmp` Git 轻量镜像中，以仓库内受控 `TMPDIR` 运行 Dynamic-N、生产说话人流水线、全局序列解码、多尺度 change detection、Pyannote 证据映射、worker 动态人数和 speaker timeline 聚焦门禁，结果为 `169 passed, 53 subtests passed`。这证明 auto/manual/hybrid 基数契约、score/profile/segment 映射、时间线哈希、human lock、任意正整数 fixture、fail-closed 和复核链路没有代码回归；不改变真实质量结论：AISHELL-4 auto 仍为 `11/5`，manual=5 的 DER/JER 与 turn 粒度仍未过门禁，Liva N=3/N=5、VoxConverse N=8 和派生 N=13 的失败域继续保持未完成。
+- [x] 2026-07-26 完成 AISHELL-4 `N=5` held-out 的约束人数边界消融并只保留非回退方案。旧 manual=5 对连续 VAD 作任意等分，最终仅有 `5/11` turns；新实现保持 manual/hybrid 原证据窗数量与 exact-N 约束不变，只在每个物理可行 cell 内优先采用非 overlap-risk 的可复核 CAM++ change proposal，并保存 selection method、声学边界数和 proposal IDs，未选中时仍确定性等分。被拒绝的 1 秒/2 秒按时长扩窗分别产生 `18/8` 段，DER/JER 退化到 `0.509635252/0.666727537` 与 `0.524773350/0.649780313`，open review 增至 `37/16`，没有进入源码。最终 v7 保持 `5/5` 人、`5` 段和 open review `10`，相对旧版 DER `0.403542062 -> 0.390554501`、JER `0.533735129 -> 0.504293093`、speaker confusion `0.186843770 -> 0.173856209`、cpCER/tcpCER/SA-CER `0.475728155/0.514563107/0.475728155 -> 0.398058252/0.436893204/0.398058252`，边界 mean/p50 `968.954545/863 -> 923.045455/736.5 ms`，p95/max `2861.85/3191 ms` 持平。热缓存声学流水线 `0.537754 秒`、全闭环墙钟 `303.289 秒`；强制 `qwen3.5:9b` 语义仲裁 2 次调用、`5/5` 验证通过并 abstain，suggestion/rejection/failure/auto-apply 均为 `0`。质量报告 SHA-256 `0eb998f22b4e3d3a5b980180783cb8d8e329e63f9b3c76450864a13f34292587`，位于 `.runtime_cache/sample-library/global/results/aishell4-n5-manual5-pyannote-meeteval-v7-final/`；当前源码核心门禁为 `238 passed, 55 subtests passed`。这是一项多域非回退改善，但 `5/11` turn 欠分裂、DER/JER、overlap 与 10 项人工复核仍未过 `ULT-SPEAKER-001`，不得宣称核心质量完成。
+- [x] 强化翻译和摘要的证据闭环：翻译逐段保存并校验版本号、日期、数字、URL、邮箱和专名等受保护 literal 的多重集合，缺失时以固定错误反馈有界重试；摘要与层级汇总必须覆盖每个输入 segment ID，遗漏即 `summary-evidence-coverage` fail closed，不能用概括性文本掩盖未处理片段。当前业务/本地 LLM/语义聚焦回归 `86 passed`。
+- [ ] 继续解决 AISHELL-4 final `5/11` turn 欠分裂：将身份聚类证据窗与输出 turn 边界解耦，使用足够上下文的声纹表示、显式 secondary-overlap speaker 和可校准的 Pyannote/CAM++ 候选融合；只允许在新的 held-out 同时降低 DER/JER/confusion、cpCER/tcpCER/SA-CER、边界和复核量且不增加端到端延迟失败后晋级。
 - [ ] 建立语义 speaker/语法修复 held-out：用真实 ASR 错误而非只用人工造句，覆盖不同上游 ASR、中文/英语/代码切换、N=1/2/3/5/8、远场/电话/噪声/overlap。分别比较 Qwen3.5-9B、服务器 35B 和 DiarizationLM 8B；报告 WDER、SA-WER/tcpWER delta、speaker proposal P/R、edit-span P/R/F1、WER/CER、受保护 token 保留、semantic drift、abstention、RTF 与内存，任一分桶回退即保持 suggestion-only。
 - [ ] 为每个自托管旗舰建立 `official-reference -> quantized/converted -> edge` 三层同音频基准：先在登记的旗舰 GPU 上固定官方原始精度 checkpoint、revision、预处理和官方推理栈，再测量量化、蒸馏、MLX/GGUF/ONNX 或较小解码器的绝对质量损失。派生模型只能获得边缘路由，不能凭 RTF、内存或当前 M4 可运行性覆盖官方基模上限；官方参考无法复现的模型不得标记为可落地旗舰。
 - [ ] 微调只针对强基模已经用 held-out 证明的明确失败分桶。每个 adapter 必须登记训练数据、许可、speaker/recording 隔离、基模 revision、训练配置和可卸载产物，并同时报告目标分桶、原单语、多语、未见语言对、多人/重叠和真实噪声的 backward-retention；代码切换除 WER/CER 外增加 PIER/切换词错误率。普通 LoRA、BLoRA 或合成数据都只作为同基模挑战者，任一硬域回退即拒绝合并。

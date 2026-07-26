@@ -1985,6 +1985,118 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             result.pipeline_metrics["policy"]["speakerCountPartitionApplied"]
         )
 
+    def test_constrained_count_uses_acoustic_boundaries_without_extra_windows(
+        self,
+    ) -> None:
+        pipeline, _, _, _, _ = self.pipeline(2)
+        proposals = [
+            {
+                "proposalId": f"change-{index}",
+                "splitMs": split_ms,
+                "changeScore": 0.40 + index * 0.01,
+                "acousticConfidence": 0.50 + index * 0.01,
+                "boundaryMarkerConfidence": 0.30,
+                "applyAutomatically": False,
+                "overlapRisk": False,
+            }
+            for index, split_ms in enumerate(
+                (1_050, 1_950, 3_100, 4_050),
+                start=1,
+            )
+        ]
+        proposals.append(
+            {
+                "proposalId": "overlap-risk",
+                "splitMs": 1_000,
+                "changeScore": 1.0,
+                "acousticConfidence": 1.0,
+                "boundaryMarkerConfidence": 1.0,
+                "applyAutomatically": True,
+                "overlapRisk": True,
+            }
+        )
+        prepared = PreparedAudio(
+            duration_ms=5_000,
+            source_fingerprint="a" * 64,
+            normalization_profile="mono-16khz-f32-v1",
+            windows=(
+                SpeechWindow(
+                    "window-1",
+                    0,
+                    5_000,
+                    metadata={
+                        "turnId": "turn-1",
+                        "speakerChangeRefinement": {
+                            "plans": {
+                                "fine": {"proposals": proposals},
+                                "context": {"proposals": []},
+                            }
+                        },
+                    },
+                ),
+            ),
+            stage_durations_ms={
+                "decode": 0.0,
+                "normalize": 0.0,
+                "vad": 0.0,
+                "boundary": 0.0,
+            },
+        )
+        for mode in ("manual", "hybrid"):
+            with self.subTest(mode=mode):
+                metrics = PipelineMetricsCollector(
+                    job_id=f"{mode}-duration-sampling",
+                    duration_ms=5_000,
+                )
+
+                partitioned = pipeline._partition_for_speaker_count_policy(
+                    prepared,
+                    self.request(
+                        5,
+                        mode,
+                        job_id=f"{mode}-duration-sampling",
+                    ),
+                    metrics,
+                )
+
+                self.assertEqual(
+                    [
+                        (window.start_ms, window.end_ms)
+                        for window in partitioned.windows
+                    ],
+                    [
+                        (0, 1_050),
+                        (1_050, 1_950),
+                        (1_950, 3_100),
+                        (3_100, 4_050),
+                        (4_050, 5_000),
+                    ],
+                )
+                self.assertTrue(
+                    all(
+                        window.metadata["speakerCountPartition"][
+                            "boundarySelectionMethod"
+                        ]
+                        == "speaker-change-proposal-guided-v1"
+                        for window in partitioned.windows
+                    )
+                )
+                self.assertEqual(
+                    partitioned.windows[0].metadata[
+                        "speakerCountPartition"
+                    ]["selectedProposalIds"],
+                    ["change-1", "change-2", "change-3", "change-4"],
+                )
+                policy = metrics.as_dict()["policy"]
+                self.assertEqual(
+                    policy["speakerCountPartitionTargetEvidenceWindows"],
+                    5,
+                )
+                self.assertEqual(
+                    policy["speakerCountPartitionEvidenceWindows"],
+                    5,
+                )
+
     def test_speaker_partition_projects_candidate_identity_and_drops_empty_set(
         self,
     ) -> None:

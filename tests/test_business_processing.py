@@ -648,7 +648,12 @@ def test_summary_retries_when_prose_does_not_match_requested_script(
     }
     valid = {
         "executiveSummary": "会议摘要使用请求的中文输出。",
-        "keyPoints": [_summary_item("确认发布计划。", "segment-1", 0, 1200)],
+        "keyPoints": [
+            {
+                **_summary_item("确认发布计划和验证工作。", "segment-1", 0, 1200),
+                "evidenceSegmentIds": ["segment-1", "segment-2"],
+            }
+        ],
         "topics": [],
         "actionItems": [],
     }
@@ -675,6 +680,29 @@ def test_summary_retries_when_prose_does_not_match_requested_script(
     assert output["executiveSummary"] == "会议摘要使用请求的中文输出。"
     assert "retryCorrection=" not in provider.prompts[0]
     assert "retryAttempt=2" in provider.prompts[1]
+    assert "segment-2" in provider.prompts[1]
+
+
+def test_summary_requires_coverage_of_every_input_segment(tmp_path: Path) -> None:
+    incomplete = {
+        "executiveSummary": "会议摘要。",
+        "keyPoints": [_summary_item("只覆盖第一段。", "segment-1", 0, 1200)],
+        "topics": [],
+        "actionItems": [],
+    }
+
+    with pytest.raises(WorkerError) as error:
+        BusinessProcessingRunner(
+            provider=MappingLocalLLMProvider([incomplete])
+        ).run(
+            _document(),
+            output_directory=tmp_path,
+            config=BusinessProcessingConfig(summary=True, output_locale="zh-CN"),
+        )
+
+    assert error.value.code == "BUSINESS_OUTPUT_INVALID"
+    assert error.value.details["guard"] == "summary-evidence-coverage"
+    assert error.value.details["missingEvidenceSegmentIds"] == ["segment-2"]
 
 
 def test_translation_rejects_short_untranslated_source_copy(tmp_path: Path) -> None:
@@ -737,6 +765,51 @@ def test_translation_retry_adds_fixed_validation_feedback(tmp_path: Path) -> Non
     assert "retryAttempt=2" in prompts[1]
     output = _read_json(tmp_path / "business" / "translation-zh-CN.v1.json")
     assert output["segments"][0]["text"] == "因为"
+
+
+def test_translation_retries_when_protected_literals_are_dropped(
+    tmp_path: Path,
+) -> None:
+    source = "Ship API v2 on 2026-07-31."
+    prompts: list[str] = []
+
+    class LiteralRetryProvider:
+        provider_id = "literal-retry-fixture"
+        provider_version = "1"
+        network_policy = "loopback-only"
+        business_batch_size = 1
+        business_translation_segment_attempts = 2
+
+        def generate_json(self, **kwargs: object) -> dict[str, object]:
+            prompt = str(kwargs["user_prompt"])
+            prompts.append(prompt)
+            text = (
+                "在 2026-07-31 部署 API v2。"
+                if "retryCorrection=" in prompt
+                else "在当天部署。"
+            )
+            return {
+                "id": "segment-1",
+                "speakerId": "speaker-1",
+                "startMs": 0,
+                "endMs": 1200,
+                "sourceTextHash": _source_hash(source),
+                "text": text,
+                "language": "zh-CN",
+            }
+
+    BusinessProcessingRunner(provider=LiteralRetryProvider()).run(
+        _single_segment_document(source, language="en"),
+        output_directory=tmp_path,
+        config=BusinessProcessingConfig(translation_targets=("zh-CN",)),
+    )
+
+    assert len(prompts) == 2
+    assert "missingProtectedLiterals" not in prompts[0]
+    assert "retryAttempt=2" in prompts[1]
+    assert "api" in prompts[1]
+    output = _read_json(tmp_path / "business" / "translation-zh-CN.v1.json")
+    assert output["segments"][0]["text"] == "在 2026-07-31 部署 API v2。"
 
 
 def test_translation_rejects_punctuation_only_output_for_lexical_source(
@@ -813,7 +886,7 @@ def test_prompt_registry_drives_executed_prompt_and_provenance(
                 "keyPoints": [
                     {
                         "text": "Grounded point.",
-                        "evidenceSegmentIds": ["segment-1"],
+                        "evidenceSegmentIds": ["segment-1", "segment-2"],
                     }
                 ],
                 "topics": [],
@@ -932,19 +1005,28 @@ def test_hierarchical_summary_is_bounded_and_retains_source_evidence(
                     "keyPoints": [
                         {
                             "text": "Both bounded chunks contributed evidence.",
-                            "evidenceSegmentIds": ["segment-1", "segment-3"],
+                            "evidenceSegmentIds": [
+                                "segment-1",
+                                "segment-2",
+                                "segment-3",
+                                "segment-4",
+                            ],
                         }
                     ],
                     "topics": [],
                     "actionItems": [],
                 }
-            segment_id = "segment-1" if "segment-1" in prompt else "segment-3"
+            segment_ids = (
+                ["segment-1", "segment-2"]
+                if "segment-1" in prompt
+                else ["segment-3", "segment-4"]
+            )
             return {
-                "executiveSummary": f"Partial for {segment_id}.",
+                "executiveSummary": f"Partial for {segment_ids[0]}.",
                 "keyPoints": [
                     {
-                        "text": f"Grounded point for {segment_id}.",
-                        "evidenceSegmentIds": [segment_id],
+                        "text": f"Grounded point for {segment_ids[0]}.",
+                        "evidenceSegmentIds": segment_ids,
                     }
                 ],
                 "topics": [],
@@ -962,11 +1044,13 @@ def test_hierarchical_summary_is_bounded_and_retains_source_evidence(
     output = _read_json(tmp_path / "business" / "summary.v1.json")
     assert output["keyPoints"][0]["evidenceSegmentIds"] == [
         "segment-1",
+        "segment-2",
         "segment-3",
+        "segment-4",
     ]
     assert output["keyPoints"][0]["timeRange"] == {
         "startMs": 0,
-        "endMs": 3800,
+        "endMs": 5100,
     }
 
 

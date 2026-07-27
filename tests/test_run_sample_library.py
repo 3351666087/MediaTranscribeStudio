@@ -63,6 +63,59 @@ def test_auto_mode_accepts_case_without_reference_speaker_count(
     assert captured["hard_timeout_seconds"] == 550.0
 
 
+def test_nested_audio_duration_drives_hard_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    manifest = _manifest(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    case = value["cases"][0]
+    del case["durationSeconds"]
+    case["audio"] = {"durationSeconds": 60.0}
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+
+    def fake_run_case(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(run_sample_library, "_run_case", fake_run_case)
+    exit_code = run_sample_library.main(
+        [
+            "--manifest",
+            str(manifest),
+            "--results-root",
+            str(tmp_path / "results"),
+            "--worker-output-root",
+            str(tmp_path / "outputs"),
+            "--no-reuse-worker",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["hard_timeout_seconds"] == 1800.0
+
+
+def test_conflicting_duration_shapes_fail_closed(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["cases"][0]["audio"] = {"durationSeconds": 60.0}
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="inconsistent durationSeconds"):
+        run_sample_library.main(
+            [
+                "--manifest",
+                str(manifest),
+                "--results-root",
+                str(tmp_path / "results"),
+                "--worker-output-root",
+                str(tmp_path / "outputs"),
+                "--no-reuse-worker",
+            ]
+        )
+
+
 def test_auto_language_mode_does_not_pass_reference_language(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

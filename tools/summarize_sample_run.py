@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import stat
 import statistics
 import sys
 from collections import Counter
@@ -17,13 +18,40 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _path_is_dataless(path: Path) -> bool:
+    """Detect a macOS cloud placeholder without triggering a download."""
+
+    try:
+        flags = path.stat(follow_symlinks=False).st_flags
+    except (AttributeError, OSError):
+        return False
+    return bool(flags & getattr(stat, "SF_DATALESS", 0))
+
+
 def _read_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        metadata = path.stat(follow_symlinks=False)
     except FileNotFoundError as exc:
         raise ValueError(f"required artifact is missing: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"required artifact is unavailable: {path}") from exc
+    if _path_is_dataless(path):
+        raise ValueError(
+            f"required artifact is a dataless cloud placeholder: {path}"
+        )
+    try:
+        payload = path.read_bytes()
+        if len(payload) != metadata.st_size:
+            raise ValueError(
+                f"required artifact byte count changed during read: {path}"
+            )
+        value = json.loads(payload.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"artifact is not valid UTF-8: {path}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON artifact: {path}: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"required artifact became unavailable: {path}") from exc
     if not isinstance(value, dict):
         raise ValueError(f"artifact must contain a JSON object: {path}")
     return value

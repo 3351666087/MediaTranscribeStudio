@@ -4,10 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from tools import long_media_samples
 from tools.long_media_samples import (
     AudioFrameFeature,
     LongMediaSampleError,
     ReferenceTurn,
+    build_long_media_matrix,
     mark_activity_and_changes,
     parse_rttm,
     select_reference_speaker_window,
@@ -56,6 +58,25 @@ def test_stratified_selection_is_deterministic_and_spans_timeline() -> None:
     assert first[2]["endMs"] == 600_000
     assert all(item["selectionUsesModelScores"] is False for item in first)
     assert len(first) == 8
+
+
+def test_builder_rejects_dataless_source_before_decoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mov"
+    source.write_bytes(b"placeholder")
+    monkeypatch.setattr(
+        long_media_samples,
+        "_path_is_dataless",
+        lambda path: path == source,
+    )
+
+    with pytest.raises(LongMediaSampleError, match="dataless cloud placeholder"):
+        build_long_media_matrix(
+            (source,),
+            output_root=tmp_path / "output",
+        )
 
 
 def test_activity_threshold_retains_loud_frames_and_change_scores() -> None:

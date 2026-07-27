@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tools import summarize_sample_run
 from tools.summarize_sample_run import summarize_run
 
 
@@ -142,6 +143,25 @@ def _fixture(root: Path) -> tuple[Path, Path, Path]:
         },
     )
     return manifest, results, outputs
+
+
+def test_rejects_dataless_manifest_before_json_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, results, outputs = _fixture(tmp_path)
+    monkeypatch.setattr(
+        summarize_sample_run,
+        "_path_is_dataless",
+        lambda path: path == manifest,
+    )
+
+    with pytest.raises(ValueError, match="dataless cloud placeholder"):
+        summarize_run(
+            manifest_path=manifest,
+            results_root=results,
+            outputs_root=outputs,
+        )
 
 
 def test_summarizes_content_free_audit_and_separate_gates(

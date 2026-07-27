@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+import stat
 import subprocess
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -46,6 +47,30 @@ class ReferenceTurn:
     speaker_id: str
     start_ms: int
     end_ms: int
+
+
+def _path_is_dataless(path: Path) -> bool:
+    """Detect a macOS cloud placeholder without materializing it."""
+
+    try:
+        flags = path.stat(follow_symlinks=False).st_flags
+    except (AttributeError, OSError):
+        return False
+    return bool(flags & getattr(stat, "SF_DATALESS", 0))
+
+
+def _materialized_file(path: Path, *, label: str) -> Path:
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise LongMediaSampleError(f"{label} is unavailable: {path}") from exc
+    if not resolved.is_file():
+        raise LongMediaSampleError(f"{label} is not a file: {resolved}")
+    if _path_is_dataless(resolved):
+        raise LongMediaSampleError(
+            f"{label} is a dataless cloud placeholder: {resolved}"
+        )
+    return resolved
 
 
 def _sha256(path: Path) -> str:
@@ -698,9 +723,7 @@ def build_long_media_matrix(
     source_rows: list[dict[str, Any]] = []
     case_rows: list[dict[str, Any]] = []
     for raw_source in sources:
-        source = raw_source.expanduser().resolve(strict=True)
-        if not source.is_file():
-            raise LongMediaSampleError(f"source is not a file: {source}")
+        source = _materialized_file(raw_source, label="source")
         source_hash = _sha256(source)
         source_id = _safe_source_id(source, source_hash)
         probe = probe_media(source, ffprobe=ffprobe)
@@ -716,7 +739,7 @@ def build_long_media_matrix(
         )
         if reference_rttm is not None:
             turns = parse_rttm(
-                reference_rttm.expanduser().resolve(strict=True),
+                _materialized_file(reference_rttm, label="reference RTTM"),
                 recording_id=reference_recording_id,
             )
             windows.append(

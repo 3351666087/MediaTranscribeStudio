@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 import uuid
@@ -44,6 +45,54 @@ _RECOVERABLE_SESSION_FAILURES = frozenset(
         "PIPE_INITIALIZATION_FAILED",
     }
 )
+
+
+def _case_duration_seconds(row: Mapping[str, object], *, case_id: str) -> float:
+    """Read either supported manifest duration shape without losing budgets."""
+
+    top_level = row.get("durationSeconds")
+    raw_audio = row.get("audio")
+    nested = (
+        raw_audio.get("durationSeconds")
+        if isinstance(raw_audio, Mapping)
+        else None
+    )
+    values = [
+        (field, value)
+        for field, value in (
+            ("durationSeconds", top_level),
+            ("audio.durationSeconds", nested),
+        )
+        if value is not None
+    ]
+    if not values:
+        return 0.0
+    normalized: list[tuple[str, float]] = []
+    for field, value in values:
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise ValueError(
+                f"{case_id} has invalid {field} for timeout budgeting"
+            )
+        normalized.append((field, float(value)))
+    if (
+        len(normalized) == 2
+        and not math.isclose(
+            normalized[0][1],
+            normalized[1][1],
+            rel_tol=0.0,
+            abs_tol=0.001,
+        )
+    ):
+        raise ValueError(
+            f"{case_id} has inconsistent durationSeconds and "
+            "audio.durationSeconds"
+        )
+    return normalized[0][1]
 
 
 def _run_case(
@@ -431,20 +480,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             and raw_expected > 0
             else None
         )
-        raw_duration = row.get("durationSeconds", 0.0)
-        if (
-            not isinstance(raw_duration, (int, float))
-            or isinstance(raw_duration, bool)
-        ):
-            raise SystemExit(
-                f"{case_id} has invalid durationSeconds for timeout budgeting"
-            )
         try:
+            duration_seconds = _case_duration_seconds(row, case_id=case_id)
             hard_timeout_seconds = (
                 args.timeout_seconds
                 if args.timeout_seconds is not None
                 else calculate_job_hard_timeout_seconds(
-                    duration_seconds=float(raw_duration),
+                    duration_seconds=duration_seconds,
                     cold_start_p95_seconds=args.cold_start_p95_seconds,
                     rtf_p95=args.rtf_p95,
                     safety_margin_seconds=args.deadline_safety_seconds,

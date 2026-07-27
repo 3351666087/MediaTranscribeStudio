@@ -260,6 +260,42 @@ def test_summarizes_content_free_audit_and_separate_gates(
     assert "displayText" not in serialized
 
 
+def test_allows_overlap_recovery_segment_without_refinement(
+    tmp_path: Path,
+) -> None:
+    manifest, results, outputs = _fixture(tmp_path)
+    transcript_path = outputs / "sample-a" / "transcript-document.v2.json"
+    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    transcript["segments"].append(
+        {
+            "startMs": 12_000,
+            "endMs": 13_000,
+            "speakerId": "speaker-1",
+            "evidence": {
+                "asr": {"language": "en"},
+                "overlapRecovery": {"reviewStatus": "REVIEW_REQUIRED"},
+            },
+        }
+    )
+    _write(transcript_path, transcript)
+
+    summary = summarize_run(
+        manifest_path=manifest,
+        results_root=results,
+        outputs_root=outputs,
+    )
+
+    assert summary["aggregate"]["segmentLanguageCounts"] == {
+        "en": 2,
+        "zh": 1,
+    }
+    assert (
+        summary["cases"][0]["transcription"]["maxConfiguredLanguageWindowMs"]
+        == 12_000
+    )
+    assert summary["aggregate"]["maxObservedLanguageWindowMs"] == 6_000
+
+
 def test_summarizes_long_media_source_terminal_without_overclaiming(
     tmp_path: Path,
 ) -> None:

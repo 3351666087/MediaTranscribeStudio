@@ -188,8 +188,13 @@ def _language_window_summary(
             language if isinstance(language, str) and language else "und"
         ] += 1
 
+        raw_refinement = evidence.get("speakerChangeRefinement")
+        if raw_refinement is None:
+            # Review-only overlap recovery segments inherit the source ASR
+            # evidence but are not produced by speaker-change refinement.
+            continue
         refinement = _mapping(
-            evidence.get("speakerChangeRefinement"),
+            raw_refinement,
             field=(
                 f"{case_id}.segments[{index}]"
                 ".evidence.speakerChangeRefinement"

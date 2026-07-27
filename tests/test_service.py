@@ -501,7 +501,72 @@ def test_required_semantic_stage_persists_suggestion_without_mutating_transcript
             "normalizedText": "这是第1位说话人的中文原文。",
             "displayText": "这是第1位说话人的中文原文。",
         }
+        assert not (
+            output / "final-adjudicated-transcript.v1.json"
+        ).exists()
         assert release_calls == 1
+        service.shutdown()
+
+
+def test_completed_semantic_job_persists_final_adjudicated_transcript() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        events: list[dict[str, Any]] = []
+        provider = MappingLocalLLMProvider(
+            [
+                {
+                    "results": [
+                        {
+                            "segmentId": "segment-0001",
+                            "decision": "abstain",
+                            "confidence": 0.9,
+                        }
+                    ]
+                }
+            ]
+        )
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            provider=provider,
+            semantic_required=True,
+            event_sink=events.append,
+        )
+
+        started = service.start(
+            {
+                "jobId": "semantic-final",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "localLlmMode": "disabled",
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "completed"
+        output = root / "output" / "job"
+        final_path = output / "final-adjudicated-transcript.v1.json"
+        artifact = json.loads(final_path.read_text(encoding="utf-8"))
+        assert artifact["status"] == "adjudication-complete"
+        assert artifact["review"]["openCount"] == 0
+        assert artifact["semantic"]["status"] == "completed"
+        assert artifact["segments"][0]["finalText"] == (
+            "这是第1位说话人的中文原文。"
+        )
+        assert str(final_path) in final["artifactPaths"]
+        created = [
+            event
+            for event in events
+            if event["type"] == "artifact.created"
+            and event["payload"]["artifactType"]
+            == "final-adjudicated-transcript-v1"
+        ]
+        assert len(created) == 1
+        assert created[0]["payload"]["sha256"] == canonical_json_sha256(
+            artifact
+        )
         service.shutdown()
 
 

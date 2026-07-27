@@ -10,6 +10,7 @@ import json
 import re
 import statistics
 import sys
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.language import normalize_language_tag
+from backend.errors import WorkerError
+from backend.final_adjudication import (
+    validate_final_adjudicated_transcript,
+)
 from backend.pipeline_metrics import (
     ReferenceTurn,
     evaluate_reference_quality,
@@ -146,6 +151,24 @@ def _review_quality(transcript_path: Path) -> dict[str, Any] | None:
     }
 
 
+def _final_adjudication_path(
+    result: Mapping[str, Any],
+    transcript_path: Path,
+) -> Path:
+    terminal = result.get("terminal_event")
+    payload = terminal.get("payload") if isinstance(terminal, Mapping) else None
+    paths = payload.get("artifactPaths") if isinstance(payload, Mapping) else None
+    if isinstance(paths, list):
+        for value in paths:
+            if (
+                isinstance(value, str)
+                and Path(value).name
+                == "final-adjudicated-transcript.v1.json"
+            ):
+                return Path(value)
+    return transcript_path.parent / "final-adjudicated-transcript.v1.json"
+
+
 def _language_root(value: object) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -222,6 +245,46 @@ def _language_quality(
             detected.count("und") / len(detected) if detected else None
         ),
         "automaticDetectionEligible": automatic_eligible,
+    }
+
+
+def _final_language_quality(
+    *,
+    expected_language: object,
+    segments: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    expected_root = _language_root(expected_language)
+    detected = [
+        root
+        for segment in segments
+        if (root := _language_root(segment.get("language"))) is not None
+    ]
+    detected_counts = {
+        language: detected.count(language) for language in sorted(set(detected))
+    }
+    eligible = expected_root not in {None, "auto", "mul", "und"}
+    correct = (
+        sum(language == expected_root for language in detected)
+        if eligible
+        else None
+    )
+    return {
+        "authority": "final-adjudicated-language-span",
+        "expectedLanguage": expected_language,
+        "expectedLanguageRoot": expected_root,
+        "detectedLanguageCounts": detected_counts,
+        "segmentCount": len(segments),
+        "scoredSegmentCount": len(detected) if eligible else 0,
+        "correctSegmentCount": correct,
+        "segmentAccuracy": (
+            correct / len(detected)
+            if eligible and correct is not None and detected
+            else None
+        ),
+        "undeterminedRate": (
+            detected.count("und") / len(detected) if detected else None
+        ),
+        "eligible": eligible,
     }
 
 
@@ -679,6 +742,66 @@ def _metric_transcript_text(segment: Mapping[str, Any]) -> str:
     return ""
 
 
+def _normalized_literal(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def _factual_integrity_quality(
+    *,
+    case: Mapping[str, Any],
+    final_text: str,
+) -> dict[str, Any]:
+    truth = case.get("factualTruth")
+    if not isinstance(truth, Mapping):
+        return {
+            "eligible": False,
+            "scored": False,
+            "reason": "annotated-factual-truth-missing",
+        }
+    required = truth.get("requiredLiterals")
+    forbidden = truth.get("forbiddenLiterals", [])
+    if (
+        not isinstance(required, list)
+        or not required
+        or not all(isinstance(value, str) and value for value in required)
+        or not isinstance(forbidden, list)
+        or not all(isinstance(value, str) and value for value in forbidden)
+    ):
+        raise ValueError(
+            "factualTruth requires non-empty requiredLiterals and an optional "
+            "forbiddenLiterals string array"
+        )
+    normalized = _normalized_literal(final_text)
+    required_results = [
+        {
+            "literal": value,
+            "preserved": _normalized_literal(value) in normalized,
+        }
+        for value in required
+    ]
+    forbidden_results = [
+        {
+            "literal": value,
+            "hallucinated": _normalized_literal(value) in normalized,
+        }
+        for value in forbidden
+    ]
+    preserved = sum(item["preserved"] for item in required_results)
+    hallucinated = sum(item["hallucinated"] for item in forbidden_results)
+    return {
+        "eligible": True,
+        "scored": True,
+        "requiredLiteralCount": len(required_results),
+        "preservedRequiredLiteralCount": preserved,
+        "requiredLiteralRecall": preserved / len(required_results),
+        "forbiddenLiteralCount": len(forbidden_results),
+        "hallucinatedForbiddenLiteralCount": hallucinated,
+        "passed": preserved == len(required_results) and hallucinated == 0,
+        "requiredLiterals": required_results,
+        "forbiddenLiterals": forbidden_results,
+    }
+
+
 def _scoring_unit(texts: Sequence[str]) -> str:
     uses_character_tokens = [
         any("\u3400" <= char <= "\u9fff" for char in text)
@@ -806,6 +929,8 @@ def _reference_transcript_segments(
 
 def _hypothesis_transcript_segments(
     segments: Sequence[Mapping[str, Any]],
+    *,
+    text_field: str = "rawText",
 ) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for index, segment in enumerate(segments):
@@ -825,25 +950,18 @@ def _hypothesis_transcript_segments(
             raise ValueError(
                 f"hypothesis transcript segment {index} has invalid attribution"
             )
-        raw_text = segment.get("rawText")
-        derived_text_available = any(
-            isinstance(segment.get(field), str)
-            and bool(str(segment[field]).strip())
-            for field in ("normalizedText", "displayText")
-        )
-        if not isinstance(raw_text, str):
-            if derived_text_available:
-                raise ValueError(
-                    "joint transcription scoring requires immutable rawText"
+        text = segment.get(text_field)
+        if not isinstance(text, str) or not text.strip():
+            if text_field == "rawText":
+                derived_text_available = any(
+                    isinstance(segment.get(field), str)
+                    and bool(str(segment[field]).strip())
+                    for field in ("normalizedText", "displayText")
                 )
-            continue
-        text = raw_text
-        if not text.strip():
-            if derived_text_available:
-                raise ValueError(
-                    "joint transcription scoring rejects empty rawText with "
-                    "non-empty derived text"
-                )
+                if derived_text_available:
+                    raise ValueError(
+                        "joint transcription scoring requires immutable rawText"
+                    )
             continue
         scoring = _scoring_segment(
             speaker=speaker.strip(),
@@ -1085,6 +1203,7 @@ def _joint_transcription_quality(
     transcript: Mapping[str, Any],
     segments: Sequence[Mapping[str, Any]],
     speaker_timeline: Mapping[str, Any] | None,
+    text_field: str = "rawText",
 ) -> dict[str, Any]:
     eligibility = case.get("truthEligibility")
     if (
@@ -1118,7 +1237,10 @@ def _joint_transcription_quality(
             "scored": False,
             "reason": unavailable_reason,
         }
-    hypothesis = _hypothesis_transcript_segments(segments)
+    hypothesis = _hypothesis_transcript_segments(
+        segments,
+        text_field=text_field,
+    )
     if not hypothesis:
         return {
             "eligible": False,
@@ -1208,7 +1330,7 @@ def _joint_transcription_quality(
         "tokenization": "mts-language-aware-nfkc-v1",
         "scoringUnit": scoring_unit,
         "metricLabels": _joint_metric_labels(scoring_unit),
-        "hypothesisTextAuthority": "rawText",
+        "hypothesisTextAuthority": text_field,
         "referenceSegmentCount": len(reference),
         "hypothesisSegmentCount": len(hypothesis),
         "referenceSpeakerCount": len(reference_speakers),
@@ -1240,6 +1362,266 @@ def _joint_transcription_quality(
     }
 
 
+def _blocked_post_semantic_acceptance(
+    *,
+    final_path: Path,
+    reasons: Sequence[str],
+    error: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    output: dict[str, Any] = {
+        "authority": "final-adjudicated-transcript.v1",
+        "status": "blocked",
+        "releaseApproved": False,
+        "artifactPath": str(final_path),
+        "blockingReasons": list(dict.fromkeys(reasons)),
+        "metrics": None,
+    }
+    if error is not None:
+        output["error"] = dict(error)
+    return output
+
+
+def _post_semantic_acceptance(
+    *,
+    case: Mapping[str, Any],
+    result: Mapping[str, Any],
+    transcript_path: Path,
+    transcript: Mapping[str, Any],
+) -> dict[str, Any]:
+    final_path = _final_adjudication_path(result, transcript_path)
+    review_path = transcript_path.parent / "review" / "review-queue.json"
+    semantic_path = (
+        transcript_path.parent / "semantic" / "semantic-suggestions.v1.json"
+    )
+    if not final_path.is_file():
+        reasons = ["final-adjudicated-transcript-missing"]
+        review = _read_json(review_path)
+        if (
+            isinstance(review, Mapping)
+            and isinstance(review.get("openCount"), int)
+            and review.get("openCount") != 0
+        ):
+            reasons.append("open-review-items")
+        semantic = _read_json(semantic_path)
+        if (
+            not isinstance(semantic, Mapping)
+            or semantic.get("status") != "completed"
+        ):
+            reasons.append("semantic-processing-incomplete")
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=reasons,
+        )
+
+    final = _read_json(final_path)
+    review = _read_json(review_path)
+    semantic = _read_json(semantic_path)
+    missing_dependencies = [
+        label
+        for label, value in (
+            ("final-adjudicated-transcript-invalid-json", final),
+            ("review-queue-missing-or-invalid", review),
+            ("semantic-artifact-missing-or-invalid", semantic),
+        )
+        if value is None
+    ]
+    if missing_dependencies:
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=missing_dependencies,
+        )
+    assert final is not None
+    assert review is not None
+    assert semantic is not None
+    try:
+        validated = validate_final_adjudicated_transcript(
+            final,
+            expected_document=transcript,
+            expected_review_queue=review,
+            expected_semantic_artifact=semantic,
+        )
+    except WorkerError as exc:
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=["final-artifact-binding-invalid"],
+            error=exc.as_payload(),
+        )
+
+    raw_segments = validated.get("segments")
+    if not isinstance(raw_segments, list):
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=["final-artifact-segments-invalid"],
+        )
+    segments = [
+        segment for segment in raw_segments if isinstance(segment, Mapping)
+    ]
+    if len(segments) != len(raw_segments):
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=["final-artifact-segments-invalid"],
+        )
+    reference = str(
+        case.get("scoringTranscript")
+        or case.get("expectedTranscript")
+        or ""
+    )
+    truth_eligibility = case.get("truthEligibility")
+    text_eligible = (
+        reference.strip() != ""
+        and (
+            not isinstance(truth_eligibility, Mapping)
+            or truth_eligibility.get("asr") is not False
+        )
+    )
+    final_text = " ".join(
+        str(segment["finalText"]).strip() for segment in segments
+    )
+    final_text_quality = {
+        "referenceAvailable": text_eligible,
+        "werOrCer": (
+            word_error_rate(reference, final_text)
+            if text_eligible
+            else None
+        ),
+        "referenceCharacters": len(reference),
+        "hypothesisCharacters": len(final_text),
+        "hypothesisAuthority": "finalText",
+        "scoringUnit": (
+            _scoring_unit([reference]) if text_eligible else None
+        ),
+    }
+    expected_count = case.get("expectedSpeakerCount")
+    speaker_count_eligible = (
+        isinstance(expected_count, int)
+        and not isinstance(expected_count, bool)
+        and expected_count > 0
+        and (
+            not isinstance(truth_eligibility, Mapping)
+            or truth_eligibility.get("speakerCount") is not False
+        )
+    )
+    policy = validated["speakerPolicy"]
+    resolved_count = policy["resolvedCount"]
+    distinct_speakers = sorted(
+        {str(segment["speakerId"]) for segment in segments}
+    )
+    speaker_count_quality = {
+        "authority": "final-adjudicated-speaker-namespace",
+        "eligible": speaker_count_eligible,
+        "expectedSpeakerCount": expected_count,
+        "resolvedSpeakerCount": resolved_count,
+        "distinctAssignedSpeakerCount": len(distinct_speakers),
+        "speakerCountAbsoluteError": (
+            abs(resolved_count - expected_count)
+            if speaker_count_eligible
+            else None
+        ),
+        "speakerCountMatch": (
+            resolved_count == expected_count
+            and len(distinct_speakers) == expected_count
+            if speaker_count_eligible
+            else None
+        ),
+    }
+    diarization, boundary = _diarization_quality(
+        dict(case),
+        [dict(segment) for segment in segments],
+        speaker_timeline=None,
+    )
+    joint = _joint_transcription_quality(
+        case=case,
+        transcript={
+            "source": validated["source"],
+        },
+        segments=segments,
+        speaker_timeline=None,
+        text_field="finalText",
+    )
+    language = _final_language_quality(
+        expected_language=case.get("language"),
+        segments=segments,
+    )
+    code_switch = _code_switch_language_quality(
+        case=case,
+        transcript={},
+        segments=[dict(segment) for segment in segments],
+    )
+    factual = _factual_integrity_quality(
+        case=case,
+        final_text=final_text,
+    )
+    missing_truth: list[str] = []
+    if not speaker_count_eligible:
+        missing_truth.append("speaker-count-truth")
+    if diarization is None:
+        missing_truth.append("speaker-turn-truth")
+    if not text_eligible:
+        missing_truth.append("serialized-text-truth")
+    if joint.get("scored") is not True:
+        missing_truth.append("speaker-attributed-text-truth")
+    language_truth_available = (
+        language.get("eligible") is True
+        or (
+            isinstance(case.get("languageTruth"), Mapping)
+            and isinstance(code_switch, Mapping)
+        )
+    )
+    if not language_truth_available:
+        missing_truth.append("language-truth")
+    if (
+        isinstance(case.get("languageTruth"), Mapping)
+        and code_switch is None
+    ):
+        missing_truth.append("code-switch-truth")
+    if factual.get("scored") is not True:
+        missing_truth.append("annotated-factual-truth")
+    runtime = _runtime_quality(transcript_path)
+    metrics = {
+        "speakerCount": speaker_count_quality,
+        "diarization": diarization,
+        "boundary": boundary,
+        "finalText": final_text_quality,
+        "jointTranscription": joint,
+        "language": language,
+        "codeSwitch": code_switch,
+        "factualIntegrity": factual,
+        "overlap": (
+            {
+                "f1": diarization.get("overlapF1"),
+                "authority": "final-adjudicated-segment-overlap",
+            }
+            if isinstance(diarization, Mapping)
+            else None
+        ),
+        "review": validated["review"],
+        "runtimeResources": runtime,
+    }
+    status = (
+        "not-scored-missing-reference-truth"
+        if missing_truth
+        else "not-approved-threshold-profile-missing"
+    )
+    return {
+        "authority": "final-adjudicated-transcript.v1",
+        "status": status,
+        "releaseApproved": False,
+        "artifactPath": str(final_path),
+        "artifactValid": True,
+        "acceptanceSubject": validated["acceptanceSubject"],
+        "finalTextAuthority": validated["finalTextAuthority"],
+        "semanticStatus": validated["semantic"]["status"],
+        "openReviewCount": validated["review"]["openCount"],
+        "missingReferenceTruth": missing_truth,
+        "blockingReasons": (
+            ["missing-reference-truth"]
+            if missing_truth
+            else ["acceptance-threshold-profile-missing"]
+        ),
+        "metrics": metrics,
+    }
+
+
 def evaluate_case(
     *,
     case: dict[str, Any],
@@ -1258,6 +1640,19 @@ def evaluate_case(
         "scenario": case.get("scenario"),
         "resultPath": str(result_path),
         "status": "missing-result",
+        "qualityPolicy": {
+            "formalAuthority": "postSemanticAcceptance",
+            "frontModelMetricsRole": "diagnostic-only",
+            "nonCompensatingDomains": True,
+        },
+        "postSemanticAcceptance": _blocked_post_semantic_acceptance(
+            final_path=(
+                worker_output_root
+                / artifact_id
+                / "final-adjudicated-transcript.v1.json"
+            ),
+            reasons=["result-or-final-adjudication-missing"],
+        ),
     }
     if result is None:
         return base
@@ -1454,7 +1849,25 @@ def evaluate_case(
     base["subtitleQuality"] = _subtitle_quality(
         worker_output_root / artifact_id
     )
+    base["postSemanticAcceptance"] = _post_semantic_acceptance(
+        case=case,
+        result=result,
+        transcript_path=transcript_path,
+        transcript=transcript,
+    )
     return base
+
+
+def _post_metric(
+    report: Mapping[str, Any],
+    *path: str,
+) -> Any:
+    value: Any = report.get("postSemanticAcceptance")
+    for field in ("metrics", *path):
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(field)
+    return value
 
 
 def _bucket_summary(
@@ -1475,92 +1888,103 @@ def _bucket_summary(
     output: dict[str, Any] = {}
     for key, items in sorted(grouped.items()):
         text_values = [
-            item.get("textQuality", {}).get("werOrCer")
+            value
             for item in items
-            if isinstance(item.get("textQuality"), dict)
-            and isinstance(item["textQuality"].get("werOrCer"), (int, float))
+            if isinstance(
+                (value := _post_metric(item, "finalText", "werOrCer")),
+                (int, float),
+            )
         ]
         der_values = [
-            item.get("diarizationQuality", {}).get("der")
+            value
             for item in items
-            if isinstance(item.get("diarizationQuality"), dict)
-            and isinstance(item["diarizationQuality"].get("der"), (int, float))
+            if isinstance(
+                (value := _post_metric(item, "diarization", "der")),
+                (int, float),
+            )
         ]
         jer_values = [
-            item.get("diarizationQuality", {}).get("jer")
+            value
             for item in items
-            if isinstance(item.get("diarizationQuality"), dict)
-            and isinstance(item["diarizationQuality"].get("jer"), (int, float))
+            if isinstance(
+                (value := _post_metric(item, "diarization", "jer")),
+                (int, float),
+            )
         ]
         rtf_values = [
-            item.get("runtimeQuality", {}).get("rtf")
+            value
             for item in items
-            if isinstance(item.get("runtimeQuality"), dict)
-            and isinstance(item["runtimeQuality"].get("rtf"), (int, float))
+            if isinstance(
+                (value := _post_metric(item, "runtimeResources", "rtf")),
+                (int, float),
+            )
         ]
         language_accuracy_values = [
-            item.get("languageQuality", {}).get("segmentAccuracy")
+            value
             for item in items
-            if isinstance(item.get("languageQuality"), dict)
-            and isinstance(
-                item["languageQuality"].get("segmentAccuracy"),
+            if isinstance(
+                (value := _post_metric(item, "language", "segmentAccuracy")),
                 (int, float),
             )
         ]
         cp_wer_values = [
-            item.get("jointTranscriptionQuality", {})
-            .get("cpWer", {})
-            .get("errorRate")
+            value
             for item in items
-            if isinstance(item.get("jointTranscriptionQuality"), dict)
-            and isinstance(
-                item["jointTranscriptionQuality"].get("cpWer"),
-                dict,
-            )
-            and isinstance(
-                item["jointTranscriptionQuality"]["cpWer"].get("errorRate"),
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "jointTranscription",
+                        "cpWer",
+                        "errorRate",
+                    )
+                ),
                 (int, float),
             )
         ]
         tcp_wer_values = [
-            item.get("jointTranscriptionQuality", {})
-            .get("tcpWer", {})
-            .get("errorRate")
+            value
             for item in items
-            if isinstance(item.get("jointTranscriptionQuality"), dict)
-            and isinstance(
-                item["jointTranscriptionQuality"].get("tcpWer"),
-                dict,
-            )
-            and isinstance(
-                item["jointTranscriptionQuality"]["tcpWer"].get("errorRate"),
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "jointTranscription",
+                        "tcpWer",
+                        "errorRate",
+                    )
+                ),
                 (int, float),
             )
         ]
         sa_wer_values = [
-            item.get("jointTranscriptionQuality", {})
-            .get("speakerAttributedWer", {})
-            .get("errorRate")
+            value
             for item in items
-            if isinstance(item.get("jointTranscriptionQuality"), dict)
-            and isinstance(
-                item["jointTranscriptionQuality"].get(
-                    "speakerAttributedWer"
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "jointTranscription",
+                        "speakerAttributedWer",
+                        "errorRate",
+                    )
                 ),
-                dict,
-            )
-            and isinstance(
-                item["jointTranscriptionQuality"][
-                    "speakerAttributedWer"
-                ].get("errorRate"),
                 (int, float),
             )
         ]
         speaker_matches = [
-            item.get("evidence", {}).get("speakerCountMatch")
+            value
             for item in items
-            if isinstance(item.get("evidence"), dict)
-            and isinstance(item["evidence"].get("speakerCountMatch"), bool)
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "speakerCount",
+                        "speakerCountMatch",
+                    )
+                ),
+                bool,
+            )
         ]
         output[key] = {
             "total": len(items),
@@ -1677,7 +2101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     report = {
-        "schemaVersion": "1.2.0",
+        "schemaVersion": "1.3.0",
         "libraryId": resolved.get("libraryId"),
         "cases": reports,
         "summary": {
@@ -1687,29 +2111,92 @@ def main(argv: Sequence[str] | None = None) -> int:
             "terminalTypes": _value_counts(reports, "terminalType"),
             "errorCodes": _value_counts(reports, "errorCode"),
             "languageScored": sum(
-                isinstance(item.get("languageQuality"), dict)
-                and item["languageQuality"].get("automaticDetectionEligible") is True
+                _post_metric(item, "language", "eligible") is True
                 for item in reports
             ),
             "codeSwitchDocumentScored": sum(
-                isinstance(item.get("codeSwitchLanguageQuality"), dict)
+                isinstance(_post_metric(item, "codeSwitch"), Mapping)
                 for item in reports
             ),
             "codeSwitchTimingScored": sum(
-                isinstance(item.get("codeSwitchLanguageQuality"), dict)
-                and item["codeSwitchLanguageQuality"].get("timeScoringEligible") is True
+                _post_metric(item, "codeSwitch", "timeScoringEligible") is True
                 and isinstance(
-                    item["codeSwitchLanguageQuality"].get(
-                        "durationWeightedAccuracy"
+                    _post_metric(
+                        item,
+                        "codeSwitch",
+                        "durationWeightedAccuracy",
                     ),
                     (int, float),
                 )
                 for item in reports
             ),
             "jointTranscriptionScored": sum(
-                isinstance(item.get("jointTranscriptionQuality"), dict)
-                and item["jointTranscriptionQuality"].get("scored") is True
+                _post_metric(item, "jointTranscription", "scored") is True
                 for item in reports
+            ),
+            "postSemanticAcceptanceStatuses": {
+                status: sum(
+                    item.get("postSemanticAcceptance", {}).get("status")
+                    == status
+                    for item in reports
+                    if isinstance(
+                        item.get("postSemanticAcceptance"),
+                        Mapping,
+                    )
+                )
+                for status in sorted(
+                    {
+                        str(item["postSemanticAcceptance"]["status"])
+                        for item in reports
+                        if isinstance(
+                            item.get("postSemanticAcceptance"),
+                            Mapping,
+                        )
+                        and item["postSemanticAcceptance"].get("status")
+                        is not None
+                    }
+                )
+            },
+            "validFinalAdjudicatedArtifacts": sum(
+                item.get("postSemanticAcceptance", {}).get("artifactValid")
+                is True
+                for item in reports
+                if isinstance(
+                    item.get("postSemanticAcceptance"),
+                    Mapping,
+                )
+            ),
+            "blockedBeforeFormalScoring": sum(
+                item.get("postSemanticAcceptance", {}).get("status")
+                == "blocked"
+                for item in reports
+                if isinstance(
+                    item.get("postSemanticAcceptance"),
+                    Mapping,
+                )
+            ),
+            "releaseApproved": bool(reports)
+            and all(
+                item.get("postSemanticAcceptance", {}).get(
+                    "releaseApproved"
+                )
+                is True
+                for item in reports
+                if isinstance(
+                    item.get("postSemanticAcceptance"),
+                    Mapping,
+                )
+            ),
+            "releaseApprovedCases": sum(
+                item.get("postSemanticAcceptance", {}).get(
+                    "releaseApproved"
+                )
+                is True
+                for item in reports
+                if isinstance(
+                    item.get("postSemanticAcceptance"),
+                    Mapping,
+                )
             ),
             "missingEvidence": sum(
                 item.get("evidence", {}).get("transcript")

@@ -34,6 +34,10 @@ from .documents import (
     validate_segments,
 )
 from .errors import JobCancelled, WorkerError, invalid_request
+from .final_adjudication import (
+    build_final_adjudicated_transcript,
+    validate_final_adjudicated_transcript,
+)
 from .local_llm import LocalLLMConfig, LocalLLMProvider, OllamaLocalProvider
 from .language import normalize_language_tag
 from .media_probe import MediaProbeResult
@@ -70,6 +74,7 @@ from .paths import PathPolicy
 from .persistence import (
     atomic_publish_json_evidence,
     atomic_write_json,
+    atomic_write_json_no_replace,
     atomic_write_json_transaction,
     canonical_json_sha256,
     read_json_strict,
@@ -1229,6 +1234,11 @@ class WorkerService:
                     details={"openCount": open_count(queue)},
                 )
             self._sync_record_from_review_state(record, document, queue)
+            self._persist_final_adjudicated_transcript(
+                record,
+                document,
+                queue,
+            )
             self._run_business_processing(record, document, context)
             self._ensure_output_execution_plans(record, document)
             self._execute_transcript_exports(record, document, context)
@@ -2670,6 +2680,61 @@ class WorkerService:
             record.business_error = error.as_payload()
             raise error from exc
 
+    def _persist_final_adjudicated_transcript(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+        review_queue: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if record.semantic_status == "not-requested":
+            return None
+        if (
+            record.semantic_status != "completed"
+            or record.semantic_artifact_path is None
+        ):
+            raise WorkerError(
+                "FINAL_ADJUDICATION_SEMANTIC_INCOMPLETE",
+                "final adjudication requires completed semantic processing",
+                details={"semanticStatus": record.semantic_status},
+            )
+        semantic_path = Path(record.semantic_artifact_path)
+        semantic_artifact = read_json_strict(semantic_path)
+        final_path = (
+            record.request.output_directory
+            / "final-adjudicated-transcript.v1.json"
+        )
+        created = False
+        if final_path.exists():
+            artifact = validate_final_adjudicated_transcript(
+                read_json_strict(final_path),
+                expected_document=document,
+                expected_review_queue=review_queue,
+                expected_semantic_artifact=semantic_artifact,
+            )
+        else:
+            artifact = build_final_adjudicated_transcript(
+                document,
+                review_queue,
+                semantic_artifact,
+            )
+            atomic_write_json_no_replace(final_path, artifact)
+            created = True
+        final_text = str(final_path)
+        if final_text not in record.artifact_paths:
+            record.artifact_paths.append(final_text)
+        if created:
+            self._emit(
+                record,
+                "artifact.created",
+                {
+                    "artifactType": "final-adjudicated-transcript-v1",
+                    "path": final_text,
+                    "sha256": canonical_json_sha256(artifact),
+                    "acceptanceSubject": artifact["acceptanceSubject"],
+                },
+            )
+        return artifact
+
     def _heartbeat_loop(
         self,
         record: JobRecord,
@@ -2960,6 +3025,11 @@ class WorkerService:
                 )
                 return
 
+            self._persist_final_adjudicated_transcript(
+                record,
+                document,
+                review_queue,
+            )
             self._run_business_processing(record, document, context)
             self._ensure_output_execution_plans(record, document)
             self._execute_transcript_exports(record, document, context)

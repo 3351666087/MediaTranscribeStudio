@@ -145,6 +145,62 @@ def _semantic_arbitration(language: str) -> dict[str, Any]:
     }
 
 
+def _final_adjudicated_transcript(language: str) -> dict[str, Any]:
+    return {
+        "schemaVersion": "1.0.0",
+        "artifactType": "final-adjudicated-transcript",
+        "artifactId": "final-contract-report-001",
+        "jobId": "contract-final-001",
+        "documentId": "contract-report-001",
+        "generatedAt": "2026-07-28T00:00:00Z",
+        "status": "adjudication-complete",
+        "acceptanceSubject": "speaker-language-time-final-text",
+        "input": {
+            "sourceMediaSha256": SHA256,
+            "transcriptDocumentSha256": SHA256,
+            "semanticInputTranscriptSha256": SHA256,
+            "semanticArtifactSha256": SHA256,
+            "reviewQueueSha256": SHA256,
+        },
+        "semantic": {
+            "status": "completed",
+            "model": "qwen3.5:9b",
+            "promptVersion": "semantic-candidate-state-v8",
+            "applicationPolicy": "suggestion-only",
+            "requiresHumanApproval": True,
+            "suggestionCount": 0,
+            "autoAppliedCount": 0,
+        },
+        "review": {
+            "openCount": 0,
+            "itemCount": 0,
+            "acceptedCount": 0,
+            "rejectedCount": 0,
+            "decisionCount": 0,
+        },
+        "source": {"durationMs": 1_000},
+        "speakerPolicy": {
+            "resolvedCount": 1,
+            "speakerIds": ["speaker-1"],
+        },
+        "finalTextAuthority": "normalizedText",
+        "segments": [
+            {
+                "id": "segment-001",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-1",
+                "language": language,
+                "finalText": "Reviewed final text.",
+                "rawTextSha256": SHA256,
+                "overlapping": False,
+                "humanLocked": False,
+                "revisionCount": 0,
+            }
+        ],
+    }
+
+
 def _business_request(language: str) -> dict[str, Any]:
     return {
         "schemaVersion": "1.2.0",
@@ -217,6 +273,10 @@ SCHEMA_FIXTURES: tuple[
 ] = (
     ("report-document.schema.json", _report_document),
     ("semantic-arbitration.schema.json", _semantic_arbitration),
+    (
+        "final-adjudicated-transcript.schema.json",
+        _final_adjudicated_transcript,
+    ),
     ("business-processing-request.schema.json", _business_request),
     ("translation-output.schema.json", _translation_output),
     ("summary-output.schema.json", _summary_output),
@@ -319,3 +379,24 @@ def test_asr_evidence_schema_accepts_canonical_and_rejects_unsafe_shapes() -> No
     projected_without_parent["nBest"][0]["lexicalRepairEligible"] = False
     with pytest.raises(ValidationError):
         validator.validate(projected_without_parent)
+
+
+def test_final_adjudicated_schema_rejects_unresolved_or_raw_text_shapes() -> None:
+    validator = _validator("final-adjudicated-transcript.schema.json")
+    value = _final_adjudicated_transcript("en")
+    validator.validate(value)
+
+    open_review = copy.deepcopy(value)
+    open_review["review"]["openCount"] = 1
+    with pytest.raises(ValidationError):
+        validator.validate(open_review)
+
+    auto_applied = copy.deepcopy(value)
+    auto_applied["semantic"]["autoAppliedCount"] = 1
+    with pytest.raises(ValidationError):
+        validator.validate(auto_applied)
+
+    leaked_raw_text = copy.deepcopy(value)
+    leaked_raw_text["segments"][0]["rawText"] = "Unreviewed source text."
+    with pytest.raises(ValidationError):
+        validator.validate(leaked_raw_text)

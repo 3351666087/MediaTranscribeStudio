@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/final-adjudicated-transcript/1.0.0",
+  "title": "Final adjudicated transcript",
+  "description": "The only transcript representation eligible for post-semantic quality scoring. Runtime validation additionally recomputes all source bindings and reconstructs every segment from the reviewed transcript.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactType",
+    "artifactId",
+    "jobId",
+    "documentId",
+    "generatedAt",
+    "status",
+    "acceptanceSubject",
+    "input",
+    "semantic",
+    "review",
+    "source",
+    "speakerPolicy",
+    "finalTextAuthority",
+    "segments"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "artifactType": {"const": "final-adjudicated-transcript"},
+    "artifactId": {"type": "string", "minLength": 1, "maxLength": 240},
+    "jobId": {"type": "string", "minLength": 1, "maxLength": 160},
+    "documentId": {"type": "string", "minLength": 1, "maxLength": 240},
+    "generatedAt": {"type": "string", "minLength": 1, "maxLength": 64},
+    "status": {"const": "adjudication-complete"},
+    "acceptanceSubject": {"const": "speaker-language-time-final-text"},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceMediaSha256",
+        "transcriptDocumentSha256",
+        "semanticInputTranscriptSha256",
+        "semanticArtifactSha256",
+        "reviewQueueSha256"
+      ],
+      "properties": {
+        "sourceMediaSha256": {"$ref": "#/$defs/sha256"},
+        "transcriptDocumentSha256": {"$ref": "#/$defs/sha256"},
+        "semanticInputTranscriptSha256": {"$ref": "#/$defs/sha256"},
+        "semanticArtifactSha256": {"$ref": "#/$defs/sha256"},
+        "reviewQueueSha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "model",
+        "promptVersion",
+        "applicationPolicy",
+        "requiresHumanApproval",
+        "suggestionCount",
+        "autoAppliedCount"
+      ],
+      "properties": {
+        "status": {"const": "completed"},
+        "model": {"type": "string", "minLength": 1, "maxLength": 240},
+        "promptVersion": {"type": "string", "minLength": 1, "maxLength": 240},
+        "applicationPolicy": {"const": "suggestion-only"},
+        "requiresHumanApproval": {"const": true},
+        "suggestionCount": {"type": "integer", "minimum": 0},
+        "autoAppliedCount": {"const": 0}
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openCount",
+        "itemCount",
+        "acceptedCount",
+        "rejectedCount",
+        "decisionCount"
+      ],
+      "properties": {
+        "openCount": {"const": 0},
+        "itemCount": {"type": "integer", "minimum": 0},
+        "acceptedCount": {"type": "integer", "minimum": 0},
+        "rejectedCount": {"type": "integer", "minimum": 0},
+        "decisionCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["durationMs"],
+      "properties": {
+        "durationMs": {"type": "integer", "minimum": 1}
+      }
+    },
+    "speakerPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolvedCount", "speakerIds"],
+      "properties": {
+        "resolvedCount": {"type": "integer", "minimum": 1},
+        "speakerIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/speakerId"}
+        }
+      }
+    },
+    "finalTextAuthority": {"const": "normalizedText"},
+    "segments": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/segment"}
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "speakerId": {
+      "type": "string",
+      "pattern": "^speaker-[1-9][0-9]*$"
+    },
+    "languageTag": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 255,
+      "pattern": "^(?![Aa][Uu][Tt][Oo]$)(?:(?:[A-Za-z]{2,3}(?:-[A-Za-z]{3}){0,3}|[A-Za-z]{4}|[A-Za-z]{5,8})(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*(?:-[0-9A-WYZa-wy-z](?:-[A-Za-z0-9]{2,8})+)*(?:-[Xx](?:-[A-Za-z0-9]{1,8})+)?|[Xx](?:-[A-Za-z0-9]{1,8})+)$"
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "startMs",
+        "endMs",
+        "speakerId",
+        "language",
+        "finalText",
+        "rawTextSha256",
+        "overlapping",
+        "humanLocked",
+        "revisionCount"
+      ],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "startMs": {"type": "integer", "minimum": 0},
+        "endMs": {"type": "integer", "minimum": 1},
+        "speakerId": {"$ref": "#/$defs/speakerId"},
+        "language": {"$ref": "#/$defs/languageTag"},
+        "finalText": {"type": "string", "minLength": 1},
+        "rawTextSha256": {"$ref": "#/$defs/sha256"},
+        "overlapping": {"type": "boolean"},
+        "humanLocked": {"type": "boolean"},
+        "revisionCount": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

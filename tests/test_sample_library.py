@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from backend import (
+    MappingLocalLLMProvider,
+    SemanticProcessingRunner,
+    build_final_adjudicated_transcript,
+)
 from tools.sample_library import (
     SampleLibraryError,
     edit_distance,
@@ -26,6 +31,166 @@ from tools.evaluate_sample_library import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "sample_library" / "manifest.v1.json"
+
+
+def _write_adjudicated_fixture(
+    tmp_path: Path,
+    *,
+    tamper_final_text: bool = False,
+    include_final: bool = True,
+    open_review: bool = False,
+    single_speaker_multilingual: bool = False,
+) -> tuple[Path, Path]:
+    output = tmp_path / "outputs" / "adjudicated"
+    (output / "review").mkdir(parents=True)
+    (output / "semantic").mkdir()
+    speaker_ids = (
+        ["speaker-1"]
+        if single_speaker_multilingual
+        else ["speaker-1", "speaker-2"]
+    )
+    second_speaker = (
+        "speaker-1" if single_speaker_multilingual else "speaker-2"
+    )
+    document = {
+        "schemaVersion": "2.0.0",
+        "documentId": "doc-adjudicated",
+        "jobId": "adjudicated",
+        "generatedAt": "2026-07-28T00:00:00Z",
+        "language": "mul",
+        "source": {
+            "fileName": "fixture.wav",
+            "sha256": "a" * 64,
+            "durationMs": 2_000,
+        },
+        "speakerPolicy": {
+            "mode": "manual",
+            "resolvedCount": len(speaker_ids),
+            "speakerIds": speaker_ids,
+        },
+        "speakers": [{"id": speaker_id} for speaker_id in speaker_ids],
+        "segments": [
+            {
+                "id": "segment-1",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-1",
+                "rawText": "wrong one",
+                "normalizedText": "alpha",
+                "displayText": "alpha",
+                "confidence": 0.9,
+                "speakerScores": [
+                    {"speakerId": "speaker-1", "score": 0.9},
+                    *(
+                        []
+                        if single_speaker_multilingual
+                        else [{"speakerId": "speaker-2", "score": 0.1}]
+                    ),
+                ],
+                "speakerMargin": 0.8,
+                "overlapping": False,
+                "humanLocked": False,
+                "revisions": [],
+                "language": "en",
+                "evidence": {"asr": {"provider": "fixture-asr"}},
+            },
+            {
+                "id": "segment-2",
+                "startMs": 1_000,
+                "endMs": 2_000,
+                "speakerId": second_speaker,
+                "rawText": "wrong two",
+                "normalizedText": "beta",
+                "displayText": "beta",
+                "confidence": 0.9,
+                "speakerScores": [
+                    {
+                        "speakerId": "speaker-1",
+                        "score": (
+                            0.9 if single_speaker_multilingual else 0.1
+                        ),
+                    },
+                    *(
+                        []
+                        if single_speaker_multilingual
+                        else [{"speakerId": "speaker-2", "score": 0.9}]
+                    ),
+                ],
+                "speakerMargin": 0.8,
+                "overlapping": False,
+                "humanLocked": False,
+                "revisions": [],
+                "language": "es",
+                "evidence": {"asr": {"provider": "fixture-asr"}},
+            },
+        ],
+        "provenance": {"offline": True, "models": []},
+    }
+    semantic = SemanticProcessingRunner(
+        provider=MappingLocalLLMProvider(
+            [
+                {
+                    "results": [
+                        {
+                            "segmentId": "segment-1",
+                            "decision": "abstain",
+                            "confidence": 0.9,
+                        },
+                        {
+                            "segmentId": "segment-2",
+                            "decision": "abstain",
+                            "confidence": 0.9,
+                        },
+                    ]
+                }
+            ]
+        ),
+        model="qwen3.5:9b",
+    ).run(document)
+    review = {
+        "schemaVersion": "2.0.0",
+        "jobId": "adjudicated",
+        "openCount": 1 if open_review else 0,
+        "items": (
+            [{"id": "review-1", "status": "open"}] if open_review else []
+        ),
+        "decisions": [],
+    }
+    transcript_path = output / "transcript-document.v2.json"
+    transcript_path.write_text(json.dumps(document), encoding="utf-8")
+    (output / "review" / "review-queue.json").write_text(
+        json.dumps(review),
+        encoding="utf-8",
+    )
+    (output / "semantic" / "semantic-suggestions.v1.json").write_text(
+        json.dumps(semantic),
+        encoding="utf-8",
+    )
+    artifact_paths = [str(transcript_path)]
+    if include_final:
+        final = build_final_adjudicated_transcript(
+            document,
+            review,
+            semantic,
+        )
+        if tamper_final_text:
+            final["segments"][0]["finalText"] = "tampered"
+        final_path = output / "final-adjudicated-transcript.v1.json"
+        final_path.write_text(json.dumps(final), encoding="utf-8")
+        artifact_paths.append(str(final_path))
+    result_path = tmp_path / "adjudicated-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_event": {
+                    "payload": {"artifactPaths": artifact_paths}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return result_path, output
 
 
 def test_manifest_covers_languages_and_scenarios() -> None:
@@ -82,6 +247,257 @@ def test_subtitle_quality_accepts_standard_webvtt_timestamps(
     )
     quality = _subtitle_quality(tmp_path)
     assert quality["vtt"] == {"files": 1, "valid": 1}
+
+
+def test_formal_acceptance_scores_only_hash_bound_final_segments(
+    tmp_path: Path,
+) -> None:
+    result_path, output = _write_adjudicated_fixture(tmp_path)
+    report = evaluate_case(
+        case={
+            "id": "adjudicated",
+            "language": "mul",
+            "expectedSpeakerCount": 2,
+            "speakerSet": ["truth-a", "truth-b"],
+            "scoringTranscript": "alpha beta",
+            "turns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                },
+                {
+                    "startSeconds": 1.0,
+                    "endSeconds": 2.0,
+                    "speakerId": "truth-b",
+                },
+            ],
+            "referenceTranscriptTurns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                    "transcript": "alpha",
+                },
+                {
+                    "startSeconds": 1.0,
+                    "endSeconds": 2.0,
+                    "speakerId": "truth-b",
+                    "transcript": "beta",
+                },
+            ],
+            "languageTruth": {
+                "qualification": "exact-fixture",
+                "expectedLanguages": ["en", "es"],
+                "timeScoringEligible": True,
+                "intervals": [
+                    {
+                        "language": "en",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.0,
+                    },
+                    {
+                        "language": "es",
+                        "startSeconds": 1.0,
+                        "endSeconds": 2.0,
+                    },
+                ],
+                "switchPointsSeconds": [1.0],
+            },
+            "factualTruth": {
+                "requiredLiterals": ["alpha", "beta"],
+                "forbiddenLiterals": ["gamma"],
+            },
+            "truthEligibility": {
+                "speakerCount": True,
+                "turnBoundaries": True,
+                "derJer": True,
+                "asr": True,
+            },
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+    )
+
+    assert report["qualityPolicy"]["frontModelMetricsRole"] == (
+        "diagnostic-only"
+    )
+    assert report["textQuality"]["hypothesisAuthority"] == "rawText"
+    assert report["textQuality"]["werOrCer"] > 0.0
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["artifactValid"] is True
+    assert acceptance["status"] == "not-approved-threshold-profile-missing"
+    assert acceptance["releaseApproved"] is False
+    metrics = acceptance["metrics"]
+    assert metrics["finalText"]["hypothesisAuthority"] == "finalText"
+    assert metrics["finalText"]["werOrCer"] == 0.0
+    assert metrics["jointTranscription"]["hypothesisTextAuthority"] == (
+        "finalText"
+    )
+    assert metrics["jointTranscription"]["cpWer"]["errorRate"] == 0.0
+    assert metrics["jointTranscription"]["tcpWer"]["errorRate"] == 0.0
+    assert metrics["jointTranscription"]["speakerAttributedWer"][
+        "errorRate"
+    ] == 0.0
+    assert metrics["speakerCount"]["speakerCountMatch"] is True
+    assert metrics["diarization"]["der"] == 0.0
+    assert metrics["language"]["detectedLanguageCounts"] == {
+        "en": 1,
+        "es": 1,
+    }
+    assert metrics["codeSwitch"]["durationWeightedAccuracy"] == 1.0
+    assert metrics["factualIntegrity"]["passed"] is True
+    assert acceptance["artifactPath"] == str(
+        output / "final-adjudicated-transcript.v1.json"
+    )
+
+
+def test_formal_acceptance_preserves_one_speaker_across_language_spans(
+    tmp_path: Path,
+) -> None:
+    result_path, output = _write_adjudicated_fixture(
+        tmp_path,
+        single_speaker_multilingual=True,
+    )
+    report = evaluate_case(
+        case={
+            "id": "adjudicated",
+            "language": "mul",
+            "expectedSpeakerCount": 1,
+            "speakerSet": ["truth-a"],
+            "scoringTranscript": "alpha beta",
+            "turns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                },
+                {
+                    "startSeconds": 1.0,
+                    "endSeconds": 2.0,
+                    "speakerId": "truth-a",
+                },
+            ],
+            "referenceTranscriptTurns": [
+                {
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                    "transcript": "alpha",
+                },
+                {
+                    "startSeconds": 1.0,
+                    "endSeconds": 2.0,
+                    "speakerId": "truth-a",
+                    "transcript": "beta",
+                },
+            ],
+            "languageTruth": {
+                "qualification": "single-speaker-code-switch-fixture",
+                "expectedLanguages": ["en", "es"],
+                "timeScoringEligible": True,
+                "intervals": [
+                    {
+                        "language": "en",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.0,
+                    },
+                    {
+                        "language": "es",
+                        "startSeconds": 1.0,
+                        "endSeconds": 2.0,
+                    },
+                ],
+                "switchPointsSeconds": [1.0],
+            },
+            "factualTruth": {
+                "requiredLiterals": ["alpha", "beta"],
+                "forbiddenLiterals": ["gamma"],
+            },
+            "truthEligibility": {
+                "speakerCount": True,
+                "turnBoundaries": True,
+                "derJer": True,
+                "asr": True,
+            },
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["artifactValid"] is True
+    assert acceptance["metrics"]["speakerCount"]["speakerCountMatch"] is True
+    assert acceptance["metrics"]["codeSwitch"][
+        "durationWeightedAccuracy"
+    ] == 1.0
+    final = json.loads(
+        (
+            output / "final-adjudicated-transcript.v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert [segment["speakerId"] for segment in final["segments"]] == [
+        "speaker-1",
+        "speaker-1",
+    ]
+    assert [segment["language"] for segment in final["segments"]] == [
+        "en",
+        "es",
+    ]
+
+
+def test_formal_acceptance_blocks_open_review_without_final_artifact(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(
+        tmp_path,
+        include_final=False,
+        open_review=True,
+    )
+    report = evaluate_case(
+        case={"id": "adjudicated"},
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["status"] == "blocked"
+    assert acceptance["releaseApproved"] is False
+    assert acceptance["blockingReasons"] == [
+        "final-adjudicated-transcript-missing",
+        "open-review-items",
+    ]
+
+
+def test_formal_acceptance_blocks_final_artifact_hash_tampering(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(
+        tmp_path,
+        tamper_final_text=True,
+    )
+    report = evaluate_case(
+        case={"id": "adjudicated"},
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["status"] == "blocked"
+    assert acceptance["blockingReasons"] == [
+        "final-artifact-binding-invalid"
+    ]
+    assert acceptance["error"]["code"] == (
+        "FINAL_ADJUDICATION_BINDING_INVALID"
+    )
 
 
 def test_evaluator_preserves_source_and_split_buckets() -> None:

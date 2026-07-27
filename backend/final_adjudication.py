@@ -1,0 +1,495 @@
+"""Versioned scoring subject after semantic processing and human review."""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping
+from typing import Any
+
+from .documents import utc_now
+from .errors import WorkerError
+from .language import normalize_language_tag
+from .persistence import canonical_json_sha256, validate_strict_json
+from .semantic_processing import (
+    SEMANTIC_APPLICATION_POLICY,
+    validate_semantic_suggestions_artifact,
+)
+
+
+FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION = "1.0.0"
+FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE = "final-adjudicated-transcript"
+
+
+def _fail(code: str, message: str, **details: Any) -> WorkerError:
+    return WorkerError(code, message, details=details or None)
+
+
+def _resolved_review_counts(queue: Mapping[str, Any]) -> tuple[int, int, int]:
+    items = queue.get("items")
+    decisions = queue.get("decisions", [])
+    if not isinstance(items, list) or not isinstance(decisions, list):
+        raise _fail(
+            "FINAL_ADJUDICATION_REVIEW_INVALID",
+            "final adjudication requires review items and decisions arrays",
+        )
+    accepted = 0
+    rejected = 0
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise _fail(
+                "FINAL_ADJUDICATION_REVIEW_INVALID",
+                "review items must be objects",
+                itemIndex=index,
+            )
+        status = item.get("status")
+        if status == "accepted":
+            accepted += 1
+        elif status == "rejected":
+            rejected += 1
+        elif status == "open":
+            raise _fail(
+                "FINAL_ADJUDICATION_REVIEW_INCOMPLETE",
+                "final adjudication refuses open review items",
+                itemId=item.get("id"),
+            )
+        else:
+            raise _fail(
+                "FINAL_ADJUDICATION_REVIEW_INVALID",
+                "review item status is invalid",
+                itemId=item.get("id"),
+            )
+    open_count = queue.get("openCount")
+    if (
+        isinstance(open_count, bool)
+        or not isinstance(open_count, int)
+        or open_count != 0
+        or accepted + rejected != len(items)
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_REVIEW_INCOMPLETE",
+            "review queue must have zero open items",
+            openCount=open_count,
+        )
+    return accepted, rejected, len(decisions)
+
+
+def _semantic_input(
+    semantic_artifact: Mapping[str, Any],
+    *,
+    job_id: str,
+) -> tuple[dict[str, Any], str]:
+    raw_input = semantic_artifact.get("input")
+    semantic_input_hash = (
+        raw_input.get("transcriptSha256")
+        if isinstance(raw_input, Mapping)
+        else None
+    )
+    if not isinstance(semantic_input_hash, str):
+        raise _fail(
+            "FINAL_ADJUDICATION_SEMANTIC_INVALID",
+            "semantic artifact is missing its transcript hash",
+        )
+    validated = validate_semantic_suggestions_artifact(
+        semantic_artifact,
+        expected_job_id=job_id,
+        expected_transcript_sha256=semantic_input_hash,
+    )
+    metrics = validated.get("metrics")
+    if not isinstance(metrics, Mapping):
+        raise _fail(
+            "FINAL_ADJUDICATION_SEMANTIC_INVALID",
+            "semantic artifact metrics are missing",
+        )
+    blockers = {
+        field: metrics.get(field)
+        for field in (
+            "rejectionCount",
+            "failureCount",
+            "unresolvedSegmentCount",
+            "autoAppliedCount",
+        )
+    }
+    if (
+        validated.get("status") != "completed"
+        or validated.get("applicationPolicy")
+        != SEMANTIC_APPLICATION_POLICY
+        or validated.get("requiresHumanApproval") is not True
+        or any(value != 0 for value in blockers.values())
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_SEMANTIC_INCOMPLETE",
+            "semantic processing is not complete and approval-safe",
+            status=validated.get("status"),
+            **blockers,
+        )
+    return validated, semantic_input_hash
+
+
+def _final_segments(
+    document: Mapping[str, Any],
+    *,
+    speaker_ids: list[str],
+    duration_ms: int,
+) -> list[dict[str, Any]]:
+    raw_segments = document.get("segments")
+    if not isinstance(raw_segments, list) or not raw_segments:
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "final transcript must contain segments",
+        )
+    allowed_speakers = set(speaker_ids)
+    output: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    previous_start = -1
+    for index, segment in enumerate(raw_segments):
+        if not isinstance(segment, Mapping):
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "transcript segments must be objects",
+                segmentIndex=index,
+            )
+        segment_id = segment.get("id")
+        start_ms = segment.get("startMs")
+        end_ms = segment.get("endMs")
+        speaker_id = segment.get("speakerId")
+        raw_text = segment.get("rawText")
+        final_text = segment.get("normalizedText")
+        if (
+            not isinstance(segment_id, str)
+            or not segment_id
+            or segment_id in seen_ids
+            or isinstance(start_ms, bool)
+            or not isinstance(start_ms, int)
+            or isinstance(end_ms, bool)
+            or not isinstance(end_ms, int)
+            or start_ms < previous_start
+            or start_ms < 0
+            or end_ms <= start_ms
+            or end_ms > duration_ms
+            or speaker_id not in allowed_speakers
+            or not isinstance(raw_text, str)
+            or not raw_text.strip()
+            or not isinstance(final_text, str)
+            or not final_text.strip()
+        ):
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "final transcript segment identity, timing, speaker, or text is invalid",
+                segmentIndex=index,
+            )
+        language = segment.get("language")
+        try:
+            language = normalize_language_tag(language, allow_auto=False)
+        except ValueError as exc:
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "final transcript segment language is invalid",
+                segmentId=segment_id,
+            ) from exc
+        revisions = segment.get("revisions", [])
+        if not isinstance(revisions, list):
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "final transcript segment revisions must be an array",
+                segmentId=segment_id,
+            )
+        overlapping = segment.get("overlapping", False)
+        human_locked = segment.get("humanLocked", False)
+        if not isinstance(overlapping, bool) or not isinstance(human_locked, bool):
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "final transcript segment flags must be booleans",
+                segmentId=segment_id,
+            )
+        seen_ids.add(segment_id)
+        previous_start = start_ms
+        output.append(
+            {
+                "id": segment_id,
+                "startMs": start_ms,
+                "endMs": end_ms,
+                "speakerId": speaker_id,
+                "language": language,
+                "finalText": final_text.strip(),
+                "rawTextSha256": hashlib.sha256(
+                    raw_text.encode("utf-8")
+                ).hexdigest(),
+                "overlapping": overlapping,
+                "humanLocked": human_locked,
+                "revisionCount": len(revisions),
+            }
+        )
+    return output
+
+
+def build_final_adjudicated_transcript(
+    document: Mapping[str, Any],
+    review_queue: Mapping[str, Any],
+    semantic_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the only transcript representation eligible for final scoring."""
+
+    for value, label in (
+        (document, "transcript"),
+        (review_queue, "review queue"),
+        (semantic_artifact, "semantic artifact"),
+    ):
+        try:
+            validate_strict_json(dict(value))
+        except ValueError as exc:
+            raise _fail(
+                "FINAL_ADJUDICATION_INPUT_INVALID",
+                f"{label} must contain strict finite JSON",
+                reason=str(exc),
+            ) from exc
+    job_id = document.get("jobId")
+    document_id = document.get("documentId")
+    if (
+        document.get("schemaVersion") != "2.0.0"
+        or not isinstance(job_id, str)
+        or not job_id
+        or not isinstance(document_id, str)
+        or not document_id
+        or review_queue.get("jobId") != job_id
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_INPUT_INVALID",
+            "transcript and review queue identity is invalid",
+        )
+    accepted, rejected, decision_count = _resolved_review_counts(review_queue)
+    semantic, semantic_input_hash = _semantic_input(
+        semantic_artifact,
+        job_id=job_id,
+    )
+
+    source = document.get("source")
+    policy = document.get("speakerPolicy")
+    if not isinstance(source, Mapping) or not isinstance(policy, Mapping):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "transcript source and speaker policy are required",
+        )
+    source_sha256 = source.get("sha256")
+    duration_ms = source.get("durationMs")
+    speaker_ids = policy.get("speakerIds")
+    resolved_count = policy.get("resolvedCount")
+    if (
+        not isinstance(source_sha256, str)
+        or len(source_sha256) != 64
+        or isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 1
+        or not isinstance(speaker_ids, list)
+        or any(not isinstance(item, str) or not item for item in speaker_ids)
+        or isinstance(resolved_count, bool)
+        or not isinstance(resolved_count, int)
+        or resolved_count != len(speaker_ids)
+        or resolved_count < 1
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "transcript source or canonical speaker namespace is invalid",
+        )
+    segments = _final_segments(
+        document,
+        speaker_ids=speaker_ids,
+        duration_ms=duration_ms,
+    )
+    semantic_hash = canonical_json_sha256(semantic)
+    transcript_hash = canonical_json_sha256(document)
+    review_hash = canonical_json_sha256(review_queue)
+    artifact = {
+        "schemaVersion": FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION,
+        "artifactType": FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
+        "artifactId": f"final-{document_id}",
+        "jobId": job_id,
+        "documentId": document_id,
+        "generatedAt": utc_now(),
+        "status": "adjudication-complete",
+        "acceptanceSubject": "speaker-language-time-final-text",
+        "input": {
+            "sourceMediaSha256": source_sha256,
+            "transcriptDocumentSha256": transcript_hash,
+            "semanticInputTranscriptSha256": semantic_input_hash,
+            "semanticArtifactSha256": semantic_hash,
+            "reviewQueueSha256": review_hash,
+        },
+        "semantic": {
+            "status": semantic["status"],
+            "model": semantic["model"],
+            "promptVersion": semantic["promptVersion"],
+            "applicationPolicy": semantic["applicationPolicy"],
+            "requiresHumanApproval": semantic["requiresHumanApproval"],
+            "suggestionCount": semantic["metrics"]["suggestionCount"],
+            "autoAppliedCount": semantic["metrics"]["autoAppliedCount"],
+        },
+        "review": {
+            "openCount": 0,
+            "itemCount": accepted + rejected,
+            "acceptedCount": accepted,
+            "rejectedCount": rejected,
+            "decisionCount": decision_count,
+        },
+        "source": {
+            "durationMs": duration_ms,
+        },
+        "speakerPolicy": {
+            "resolvedCount": resolved_count,
+            "speakerIds": list(speaker_ids),
+        },
+        "finalTextAuthority": "normalizedText",
+        "segments": segments,
+    }
+    return validate_final_adjudicated_transcript(
+        artifact,
+        expected_document=document,
+        expected_review_queue=review_queue,
+        expected_semantic_artifact=semantic,
+    )
+
+
+def validate_final_adjudicated_transcript(
+    artifact: Mapping[str, Any],
+    *,
+    expected_document: Mapping[str, Any],
+    expected_review_queue: Mapping[str, Any],
+    expected_semantic_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the final scoring subject and every source binding."""
+
+    value = dict(artifact)
+    try:
+        validate_strict_json(value)
+    except ValueError as exc:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "final adjudication artifact must contain strict finite JSON",
+            reason=str(exc),
+        ) from exc
+    required = {
+        "schemaVersion",
+        "artifactType",
+        "artifactId",
+        "jobId",
+        "documentId",
+        "generatedAt",
+        "status",
+        "acceptanceSubject",
+        "input",
+        "semantic",
+        "review",
+        "source",
+        "speakerPolicy",
+        "finalTextAuthority",
+        "segments",
+    }
+    if set(value) != required:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "final adjudication fields do not match schema 1.0.0",
+        )
+    expected_job_id = expected_document.get("jobId")
+    expected_document_id = expected_document.get("documentId")
+    if (
+        value.get("schemaVersion")
+        != FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION
+        or value.get("artifactType")
+        != FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE
+        or value.get("artifactId") != f"final-{expected_document_id}"
+        or value.get("jobId") != expected_job_id
+        or value.get("documentId") != expected_document_id
+        or not isinstance(value.get("generatedAt"), str)
+        or not value["generatedAt"]
+        or value.get("status") != "adjudication-complete"
+        or value.get("acceptanceSubject")
+        != "speaker-language-time-final-text"
+        or value.get("finalTextAuthority") != "normalizedText"
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "final adjudication identity or authority is invalid",
+        )
+    expected_semantic, semantic_input_hash = _semantic_input(
+        expected_semantic_artifact,
+        job_id=str(expected_job_id or ""),
+    )
+    accepted, rejected, decisions = _resolved_review_counts(
+        expected_review_queue
+    )
+    expected_input = {
+        "sourceMediaSha256": expected_document.get("source", {}).get("sha256"),
+        "transcriptDocumentSha256": canonical_json_sha256(expected_document),
+        "semanticInputTranscriptSha256": semantic_input_hash,
+        "semanticArtifactSha256": canonical_json_sha256(expected_semantic),
+        "reviewQueueSha256": canonical_json_sha256(expected_review_queue),
+    }
+    if value.get("input") != expected_input:
+        raise _fail(
+            "FINAL_ADJUDICATION_BINDING_INVALID",
+            "final adjudication source hashes do not match current evidence",
+        )
+    expected_semantic_summary = {
+        "status": expected_semantic["status"],
+        "model": expected_semantic["model"],
+        "promptVersion": expected_semantic["promptVersion"],
+        "applicationPolicy": expected_semantic["applicationPolicy"],
+        "requiresHumanApproval": expected_semantic["requiresHumanApproval"],
+        "suggestionCount": expected_semantic["metrics"]["suggestionCount"],
+        "autoAppliedCount": expected_semantic["metrics"]["autoAppliedCount"],
+    }
+    if value.get("semantic") != expected_semantic_summary:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "final adjudication semantic summary is invalid",
+        )
+    expected_review = {
+        "openCount": 0,
+        "itemCount": accepted + rejected,
+        "acceptedCount": accepted,
+        "rejectedCount": rejected,
+        "decisionCount": decisions,
+    }
+    if value.get("review") != expected_review:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "final adjudication review summary is invalid",
+        )
+    source = expected_document.get("source")
+    policy = expected_document.get("speakerPolicy")
+    if not isinstance(source, Mapping) or not isinstance(policy, Mapping):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "expected transcript source or speaker policy is invalid",
+        )
+    expected_source = {"durationMs": source.get("durationMs")}
+    expected_policy = {
+        "resolvedCount": policy.get("resolvedCount"),
+        "speakerIds": policy.get("speakerIds"),
+    }
+    if (
+        value.get("source") != expected_source
+        or value.get("speakerPolicy") != expected_policy
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "final adjudication source or speaker policy is invalid",
+        )
+    expected_segments = _final_segments(
+        expected_document,
+        speaker_ids=list(expected_policy["speakerIds"]),
+        duration_ms=int(expected_source["durationMs"]),
+    )
+    if value.get("segments") != expected_segments:
+        raise _fail(
+            "FINAL_ADJUDICATION_BINDING_INVALID",
+            "final adjudication segments do not match the reviewed transcript",
+        )
+    return value
+
+
+__all__ = [
+    "FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE",
+    "FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION",
+    "build_final_adjudicated_transcript",
+    "validate_final_adjudicated_transcript",
+]

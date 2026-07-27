@@ -9,6 +9,12 @@ from .adapters import (
     UnavailableTranscriptionAdapter,
 )
 from .errors import JobCancelled, WorkerError
+from .final_adjudication import (
+    FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
+    FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION,
+    build_final_adjudicated_transcript,
+    validate_final_adjudicated_transcript,
+)
 from .business_processing import (
     BUSINESS_PROMPT_VERSION,
     BUSINESS_REQUEST_SCHEMA_VERSION,
@@ -102,6 +108,8 @@ __all__ = [
     "BusinessProcessingConfig",
     "BusinessProcessingRunner",
     "CHECKPOINT_SCHEMA_VERSION",
+    "FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE",
+    "FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION",
     "JobCancelled",
     "JobStatus",
     "JsonlEmitter",
@@ -159,6 +167,7 @@ __all__ = [
     "WorkerService",
     "apply_offline_environment",
     "attach_semantic_suggestions_to_review",
+    "build_final_adjudicated_transcript",
     "build_production_composition",
     "compile_output_customizations",
     "canonical_speaker_ids",
@@ -170,5 +179,6 @@ __all__ = [
     "run_jsonl_loop",
     "run_production_preflight",
     "validate_semantic_suggestions_artifact",
+    "validate_final_adjudicated_transcript",
     "validate_job_id",
 ]

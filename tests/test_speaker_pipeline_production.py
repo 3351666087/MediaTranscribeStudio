@@ -316,6 +316,48 @@ class ContextualTurnCamPlusAdapter(FakeCamPlusAdapter):
         )
 
 
+class PyannoteBoundaryCamPlusAdapter(FakeCamPlusAdapter):
+    version = "pyannote-boundary-identity-fixture-v1"
+
+    def __init__(self, *, ambiguous: bool = False) -> None:
+        super().__init__(2)
+        self.ambiguous = ambiguous
+
+    def refinement_identity(self):
+        return {"method": self.version, "ambiguous": self.ambiguous}
+
+    def refine_windows(self, prepared, context):
+        context.raise_if_cancelled()
+        left_vector = (1.0, 1.0) if self.ambiguous else (1.0, 0.0)
+        right_vector = (1.0, 1.0) if self.ambiguous else (0.0, 1.0)
+        return replace(
+            prepared,
+            speaker_identity_windows=(
+                SpeakerIdentityWindow(
+                    "pyannote-left",
+                    "window-1",
+                    0,
+                    1_000,
+                    left_vector,
+                ),
+                SpeakerIdentityWindow(
+                    "pyannote-right",
+                    "window-1",
+                    1_000,
+                    2_000,
+                    right_vector,
+                ),
+                SpeakerIdentityWindow(
+                    "pyannote-second",
+                    "window-2",
+                    2_000,
+                    4_000,
+                    (0.0, 1.0),
+                ),
+            ),
+        )
+
+
 class FakeOverlapAdapter:
     adapter_id = "overlap-fixture"
     version = "1"
@@ -416,6 +458,138 @@ class FakePyannoteOverlapAdapter(FakeOverlapAdapter):
                         ],
                         "overlapIntervals": [],
                         "localSpeakerCount": 1,
+                    },
+                )
+            )
+        return output
+
+
+class PyannoteBoundaryOverlapAdapter(FakeOverlapAdapter):
+    adapter_id = "pyannote-community-1"
+    version = "2.4.0-boundary-fixture"
+
+    def __init__(
+        self,
+        *,
+        tamper_hash: bool = False,
+        overlap_boundary: bool = False,
+    ) -> None:
+        super().__init__()
+        self.tamper_hash = tamper_hash
+        self.overlap_boundary = overlap_boundary
+
+    def detect_batch(
+        self,
+        prepared,
+        windows,
+        context,
+        *,
+        speaker_count_constraints=None,
+    ):
+        context.raise_if_cancelled()
+        self.calls.append(tuple(window.window_id for window in windows))
+        self.constraint_calls.append(speaker_count_constraints)
+        regular = [
+            {"startMs": 0, "endMs": 1_000, "localSpeaker": "LOCAL_A"},
+            {
+                "startMs": 1_000,
+                "endMs": prepared.duration_ms,
+                "localSpeaker": "LOCAL_B",
+            },
+        ]
+        exclusive = [dict(turn) for turn in regular]
+        regular_hash = hashlib.sha256(
+            json.dumps(
+                regular,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        exclusive_hash = hashlib.sha256(
+            json.dumps(
+                exclusive,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.tamper_hash:
+            exclusive_hash = "0" * 64
+        full = {
+            "scope": "full-normalized-timeline",
+            "startMs": 0,
+            "endMs": prepared.duration_ms,
+            "turnCount": len(regular),
+            "localSpeakerCount": 2,
+            "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+            "speakerTurns": regular,
+            "speakerTurnsSha256": regular_hash,
+            "exclusiveNative": True,
+            "exclusiveTurnCount": len(exclusive),
+            "exclusiveSpeakerTurns": exclusive,
+            "exclusiveSpeakerTurnsSha256": exclusive_hash,
+            "speakerCountConstraints": speaker_count_constraints,
+        }
+        interval = {
+            "startMs": 900,
+            "endMs": 1_100,
+            "localSpeakers": ["LOCAL_A", "LOCAL_B"],
+        }
+        output = []
+        for window in windows:
+            clipped_regular = [
+                {
+                    **turn,
+                    "startMs": max(window.start_ms, turn["startMs"]),
+                    "endMs": min(window.end_ms, turn["endMs"]),
+                }
+                for turn in regular
+                if turn["startMs"] < window.end_ms
+                and turn["endMs"] > window.start_ms
+            ]
+            clipped_exclusive = [
+                {
+                    **turn,
+                    "startMs": max(window.start_ms, turn["startMs"]),
+                    "endMs": min(window.end_ms, turn["endMs"]),
+                }
+                for turn in exclusive
+                if turn["startMs"] < window.end_ms
+                and turn["endMs"] > window.start_ms
+            ]
+            clipped_overlap = (
+                [
+                    {
+                        **interval,
+                        "startMs": max(window.start_ms, interval["startMs"]),
+                        "endMs": min(window.end_ms, interval["endMs"]),
+                    }
+                ]
+                if self.overlap_boundary
+                and interval["startMs"] < window.end_ms
+                and interval["endMs"] > window.start_ms
+                else []
+            )
+            output.append(
+                OverlapDecision(
+                    window_id=window.window_id,
+                    overlapping=bool(clipped_overlap),
+                    confidence=0.5,
+                    evidence={
+                        "detectorStatus": "EVALUATED",
+                        "overlapDetectorRun": True,
+                        "reviewStatus": (
+                            "REVIEW_REQUIRED"
+                            if clipped_overlap
+                            else "NOT_REQUIRED"
+                        ),
+                        "confidenceKind": "binary-annotation-no-posterior",
+                        "calibratedConfidence": False,
+                        "fullTimelineInference": full,
+                        "speakerTurns": clipped_regular,
+                        "exclusiveSpeakerTurns": clipped_exclusive,
+                        "overlapIntervals": clipped_overlap,
                     },
                 )
             )
@@ -2249,6 +2423,240 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         self.assertEqual(
             PreparedAudio.from_mapping(refined.as_dict()),
             refined,
+        )
+
+    def test_hash_bound_pyannote_boundary_uses_only_campp_identity(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(
+            2,
+            window_ranges={
+                "window-1": (0, 2_000),
+                "window-2": (2_000, 4_000),
+            },
+        )
+        cam = PyannoteBoundaryCamPlusAdapter()
+        overlap = PyannoteBoundaryOverlapAdapter()
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            preparation=preparation,
+            cam=cam,
+            overlap=overlap,
+            pyannote=FakePyannoteAudit(),
+            secondary=FakeSecondaryVerifier(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", job_id="pyannote-boundary"),
+            self.context("pyannote-boundary"),
+        )
+
+        self.assertEqual(
+            [
+                (segment.start_ms, segment.end_ms, segment.speaker_id)
+                for segment in result.segments
+            ],
+            [
+                (0, 1_000, "speaker-1"),
+                (1_000, 2_000, "speaker-2"),
+                (2_000, 4_000, "speaker-2"),
+            ],
+        )
+        for segment in result.segments[:2]:
+            projection = segment.evidence["speakerTurnProjection"]
+            self.assertEqual(
+                projection["method"],
+                "pyannote-boundary-campp-identity-output-turn-v1",
+            )
+            self.assertIn(
+                "pyannote-native-exclusive-hash-bound-v1",
+                {
+                    projection["leftBoundaryAuthority"],
+                    projection["rightBoundaryAuthority"],
+                },
+            )
+            self.assertFalse(
+                projection["pyannoteCanonicalIdentityImported"]
+            )
+            self.assertEqual(
+                projection["identityAuthority"],
+                "campp-canonical-centroid",
+            )
+            self.assertRegex(
+                projection["pyannoteTimelineSha256"],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertEqual(
+                projection["reviewStatus"],
+                "REVIEW_REQUIRED",
+            )
+        policy = result.pipeline_metrics["policy"]
+        self.assertEqual(
+            policy["contextualTurnProjectionReason"],
+            "PYANNOTE_BOUNDARY_WITH_CAMPP_IDENTITY",
+        )
+        self.assertEqual(
+            policy["contextualTurnProjectionPyannoteBoundaryCount"],
+            1,
+        )
+        self.assertEqual(
+            policy["pyannoteBoundaryCandidateTimelineKind"],
+            "native-exclusive",
+        )
+        queue = build_review_queue(
+            job_id="pyannote-boundary",
+            policy=SpeakerCountPolicy.from_payload(
+                {"speakerCountMode": "manual", "speakerCount": 2}
+            ),
+            estimate=result.speaker_count_estimate,
+            segments=result.segments,
+            count_confidence_threshold=0.0,
+            segment_confidence_threshold=0.0,
+            speaker_margin_threshold=-1.0,
+            range_width_threshold=8,
+        )
+        boundary_items = [
+            item
+            for item in queue["items"]
+            if item["reasonCode"]
+            == "PYANNOTE_BOUNDARY_REVIEW_REQUIRED"
+        ]
+        self.assertEqual(
+            [item["segmentId"] for item in boundary_items],
+            [
+                result.segments[0].segment_id,
+                result.segments[1].segment_id,
+            ],
+        )
+        self.assertTrue(
+            all(item["status"] == "open" for item in boundary_items)
+        )
+
+    def test_low_margin_campp_inherits_identity_at_pyannote_boundary(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(
+            2,
+            window_ranges={
+                "window-1": (0, 2_000),
+                "window-2": (2_000, 4_000),
+            },
+        )
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            preparation=preparation,
+            cam=PyannoteBoundaryCamPlusAdapter(ambiguous=True),
+            overlap=PyannoteBoundaryOverlapAdapter(),
+            pyannote=FakePyannoteAudit(),
+            secondary=FakeSecondaryVerifier(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", job_id="pyannote-low-margin"),
+            self.context("pyannote-low-margin"),
+        )
+
+        self.assertEqual(
+            [
+                (segment.start_ms, segment.end_ms, segment.speaker_id)
+                for segment in result.segments
+            ],
+            [
+                (0, 1_000, "speaker-1"),
+                (1_000, 2_000, "speaker-1"),
+                (2_000, 4_000, "speaker-2"),
+            ],
+        )
+        for segment in result.segments[:2]:
+            projection = segment.evidence["speakerTurnProjection"]
+            self.assertTrue(projection["assignmentInherited"])
+            self.assertEqual(
+                projection["identityAuthority"],
+                "campp-source-inheritance",
+            )
+            mapping = segment.evidence["pyannoteCanonicalMapping"]
+            dominant_local = mapping["dominantLocalSpeaker"]
+            proposed_speaker = (
+                mapping["mapping"].get(dominant_local)
+                if dominant_local is not None
+                else None
+            )
+            if proposed_speaker != segment.speaker_id:
+                self.assertIn(
+                    "CAMPP_IDENTITY_MARGIN_BELOW_THRESHOLD",
+                    mapping["blockers"],
+                )
+            sequence = segment.evidence["speakerSequenceDecode"]
+            self.assertFalse(sequence["applied"])
+            self.assertEqual(
+                sequence["reviewStatus"],
+                "REVIEW_REQUIRED",
+            )
+            self.assertIn(
+                "CAMPP_IDENTITY_MARGIN_BELOW_THRESHOLD",
+                sequence["reasonCodes"],
+            )
+            self.assertNotIn("HUMAN_LOCKED", sequence["reasonCodes"])
+
+    def test_pyannote_boundary_excludes_overlap_and_rejects_hash_tampering(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(
+            2,
+            window_ranges={
+                "window-1": (0, 2_000),
+                "window-2": (2_000, 4_000),
+            },
+        )
+        overlap_pipeline, _, _, _, _ = self.pipeline(
+            2,
+            preparation=preparation,
+            cam=PyannoteBoundaryCamPlusAdapter(),
+            overlap=PyannoteBoundaryOverlapAdapter(
+                overlap_boundary=True,
+            ),
+            pyannote=FakePyannoteAudit(),
+            secondary=FakeSecondaryVerifier(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+
+        overlap_result = overlap_pipeline.transcribe(
+            self.request(2, "manual", job_id="pyannote-overlap-boundary"),
+            self.context("pyannote-overlap-boundary"),
+        )
+
+        self.assertEqual(len(overlap_result.segments), 2)
+        self.assertEqual(
+            overlap_result.pipeline_metrics["policy"][
+                "pyannoteBoundaryCandidateOverlapRejected"
+            ],
+            1,
+        )
+        self.assertFalse(
+            overlap_result.pipeline_metrics["policy"][
+                "contextualTurnProjectionApplied"
+            ]
+        )
+
+        tampered_pipeline, _, _, _, _ = self.pipeline(
+            2,
+            preparation=preparation,
+            cam=PyannoteBoundaryCamPlusAdapter(),
+            overlap=PyannoteBoundaryOverlapAdapter(tamper_hash=True),
+            pyannote=FakePyannoteAudit(),
+            secondary=FakeSecondaryVerifier(),
+            config=SpeakerPipelineConfig(pyannote_mode="fallback"),
+        )
+        with self.assertRaises(WorkerError) as captured:
+            tampered_pipeline.transcribe(
+                self.request(2, "manual", job_id="pyannote-tampered"),
+                self.context("pyannote-tampered"),
+            )
+        self.assertEqual(
+            captured.exception.code,
+            "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
         )
 
     def test_constrained_count_uses_acoustic_boundaries_without_extra_windows(

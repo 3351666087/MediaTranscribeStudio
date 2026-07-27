@@ -71,6 +71,7 @@ _REVIEW_REASONS = (
     "OVERLAP",
     "OVERLAP_DETECTOR_UNAVAILABLE",
     "SPEAKER_CHANGE_REFINEMENT_REVIEW_REQUIRED",
+    "PYANNOTE_BOUNDARY_REVIEW_REQUIRED",
 )
 _ERES_RESOLVED_EXIT_REASONS = {
     "VERIFIED_NO_CHANGE",
@@ -84,10 +85,12 @@ _AUTO_SPEAKER_EVIDENCE_WINDOW_MS = 1_000
 _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON = (
     "SPEAKER_CHANGE_REFINEMENT_REVIEW_REQUIRED"
 )
+_PYANNOTE_BOUNDARY_REVIEW_REASON = "PYANNOTE_BOUNDARY_REVIEW_REQUIRED"
 _SECONDARY_REVIEW_EXCLUSION_REASONS = frozenset(
     {
         _OVERLAP_DETECTOR_UNAVAILABLE_REASON,
         _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON,
+        _PYANNOTE_BOUNDARY_REVIEW_REASON,
     }
 )
 _CLUSTER_SELECTION_METHOD = "dynamic-n-adaptive-resample-stability-v12"
@@ -5691,6 +5694,263 @@ class SpeakerPipeline:
             evidence=evidence,
         )
 
+    def _pyannote_boundary_candidates(
+        self,
+        *,
+        prepared: PreparedAudio,
+        overlap: Sequence[OverlapDecision],
+    ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+        """Return hash-bound Pyannote boundary hints without identity mapping."""
+
+        audit: dict[str, Any] = {
+            "status": "not-applicable",
+            "provider": _adapter_identity(self.overlap_adapter),
+            "candidateCount": 0,
+            "overlapRejectedCount": 0,
+            "unstableRejectedCount": 0,
+        }
+        if (
+            self.config.pyannote_mode != "fallback"
+            or audit["provider"]["id"] != "pyannote-community-1"
+        ):
+            return {}, audit
+        if len(overlap) != len(prepared.windows) or not overlap:
+            audit["status"] = "invalid-window-coverage"
+            return {}, audit
+
+        snapshots: dict[str, Mapping[str, Any]] = {}
+        overlap_intervals: set[tuple[int, int]] = set()
+        for decision in overlap:
+            full = decision.evidence.get("fullTimelineInference")
+            if not isinstance(full, Mapping):
+                audit["status"] = "missing-full-timeline-evidence"
+                return {}, audit
+            snapshots[_digest(full)] = full
+            raw_intervals = decision.evidence.get("overlapIntervals", [])
+            if not isinstance(raw_intervals, list):
+                raise WorkerError(
+                    "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                    "pyannote overlap intervals must be an array",
+                )
+            for raw_interval in raw_intervals:
+                if not isinstance(raw_interval, Mapping):
+                    raise WorkerError(
+                        "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                        "pyannote overlap interval must be an object",
+                    )
+                start_ms = raw_interval.get("startMs")
+                end_ms = raw_interval.get("endMs")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or start_ms < 0
+                    or end_ms <= start_ms
+                    or end_ms > prepared.duration_ms
+                ):
+                    raise WorkerError(
+                        "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                        "pyannote overlap interval is outside the media",
+                    )
+                overlap_intervals.add((start_ms, end_ms))
+        if len(snapshots) != 1:
+            raise WorkerError(
+                "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                "pyannote full timeline snapshots are inconsistent",
+            )
+        full = next(iter(snapshots.values()))
+        if (
+            full.get("scope") != "full-normalized-timeline"
+            or full.get("startMs") != 0
+            or full.get("endMs") != prepared.duration_ms
+        ):
+            raise WorkerError(
+                "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                "pyannote full timeline does not cover normalized media",
+            )
+
+        def validated_turns(
+            *,
+            field: str,
+            count_field: str,
+            hash_field: str,
+            exclusive: bool,
+        ) -> tuple[list[dict[str, Any]], str]:
+            raw_turns = full.get(field)
+            declared_hash = full.get(hash_field)
+            if (
+                not isinstance(raw_turns, list)
+                or not raw_turns
+                or full.get(count_field) != len(raw_turns)
+                or not isinstance(declared_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", declared_hash) is None
+                or _digest(raw_turns) != declared_hash
+            ):
+                raise WorkerError(
+                    "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                    f"pyannote {field} is not hash-bound",
+                )
+            output: list[dict[str, Any]] = []
+            previous_start = -1
+            previous_end = -1
+            for raw_turn in raw_turns:
+                if not isinstance(raw_turn, Mapping):
+                    raise WorkerError(
+                        "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                        f"pyannote {field} contains a malformed turn",
+                    )
+                start_ms = raw_turn.get("startMs")
+                end_ms = raw_turn.get("endMs")
+                local_speaker = raw_turn.get("localSpeaker")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or not isinstance(local_speaker, str)
+                    or not local_speaker.strip()
+                    or start_ms < previous_start
+                    or start_ms < 0
+                    or end_ms <= start_ms
+                    or end_ms > prepared.duration_ms
+                    or (exclusive and start_ms < previous_end)
+                ):
+                    raise WorkerError(
+                        "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                        f"pyannote {field} turn order or bounds are invalid",
+                    )
+                output.append(
+                    {
+                        "startMs": start_ms,
+                        "endMs": end_ms,
+                        "localSpeaker": local_speaker.strip(),
+                    }
+                )
+                previous_start = start_ms
+                previous_end = end_ms
+            return output, declared_hash
+
+        regular_turns, regular_hash = validated_turns(
+            field="speakerTurns",
+            count_field="turnCount",
+            hash_field="speakerTurnsSha256",
+            exclusive=False,
+        )
+        if full.get("exclusiveNative") is True:
+            selected_turns, selected_hash = validated_turns(
+                field="exclusiveSpeakerTurns",
+                count_field="exclusiveTurnCount",
+                hash_field="exclusiveSpeakerTurnsSha256",
+                exclusive=True,
+            )
+            timeline_kind = "native-exclusive"
+        else:
+            selected_turns = regular_turns
+            selected_hash = regular_hash
+            timeline_kind = "regular-fallback"
+
+        declared_speakers = full.get("localSpeakers")
+        observed_speakers = sorted(
+            {turn["localSpeaker"] for turn in regular_turns}
+        )
+        if (
+            not isinstance(declared_speakers, list)
+            or declared_speakers != observed_speakers
+            or full.get("localSpeakerCount") != len(observed_speakers)
+        ):
+            raise WorkerError(
+                "PYANNOTE_BOUNDARY_EVIDENCE_INVALID",
+                "pyannote local speaker inventory is invalid",
+            )
+
+        runs: list[dict[str, Any]] = []
+        for turn in selected_turns:
+            if (
+                runs
+                and runs[-1]["localSpeaker"] == turn["localSpeaker"]
+                and turn["startMs"] <= runs[-1]["endMs"]
+            ):
+                runs[-1]["endMs"] = max(
+                    int(runs[-1]["endMs"]),
+                    int(turn["endMs"]),
+                )
+            else:
+                runs.append(dict(turn))
+
+        def intersects_overlap(start_ms: int, end_ms: int) -> bool:
+            return any(
+                min(end_ms, overlap_end) - max(start_ms, overlap_start) > 0
+                for overlap_start, overlap_end in overlap_intervals
+            )
+
+        candidates: dict[int, dict[str, Any]] = {}
+        for left, right in zip(runs, runs[1:]):
+            left_duration = int(left["endMs"]) - int(left["startMs"])
+            right_duration = int(right["endMs"]) - int(right["startMs"])
+            if (
+                left["localSpeaker"] == right["localSpeaker"]
+                or int(left["endMs"]) > int(right["startMs"])
+                or left_duration < _MIN_SPEAKER_COUNT_PARTITION_MS
+                or right_duration < _MIN_SPEAKER_COUNT_PARTITION_MS
+            ):
+                audit["unstableRejectedCount"] += 1
+                continue
+            split_ms = (
+                int(left["endMs"]) + int(right["startMs"])
+            ) // 2
+            left_support_start = int(left["endMs"]) - (
+                _MIN_SPEAKER_COUNT_PARTITION_MS
+            )
+            right_support_end = int(right["startMs"]) + (
+                _MIN_SPEAKER_COUNT_PARTITION_MS
+            )
+            if (
+                intersects_overlap(left_support_start, int(left["endMs"]))
+                or intersects_overlap(
+                    int(right["startMs"]),
+                    right_support_end,
+                )
+            ):
+                audit["overlapRejectedCount"] += 1
+                continue
+            proposal_id = (
+                f"pyannote-boundary-{split_ms}-{selected_hash[:12]}"
+            )
+            candidates[split_ms] = {
+                "splitMs": split_ms,
+                "proposalId": proposal_id,
+                "resolution": f"pyannote-{timeline_kind}",
+                "boundaryAuthority": (
+                    f"pyannote-{timeline_kind}-hash-bound-v1"
+                ),
+                "identityAuthority": "campp-canonical-centroid",
+                "timelineSha256": selected_hash,
+                "regularTimelineSha256": regular_hash,
+                "leftLocalSpeaker": left["localSpeaker"],
+                "rightLocalSpeaker": right["localSpeaker"],
+                "leftStableRunMs": left_duration,
+                "rightStableRunMs": right_duration,
+                "minimumStableRunMs": _MIN_SPEAKER_COUNT_PARTITION_MS,
+                "overlapExcluded": True,
+                "boundaryOnly": True,
+                "applyAutomatically": False,
+                "reviewStatus": "REVIEW_REQUIRED",
+                "changeScore": 0.0,
+                "acousticConfidence": 0.0,
+            }
+        audit.update(
+            {
+                "status": "eligible" if candidates else "no-safe-boundaries",
+                "timelineKind": timeline_kind,
+                "timelineSha256": selected_hash,
+                "regularTimelineSha256": regular_hash,
+                "stableRunCount": len(runs),
+                "candidateCount": len(candidates),
+            }
+        )
+        return candidates, audit
+
     def _project_contextual_speaker_turns(
         self,
         *,
@@ -5861,6 +6121,11 @@ class SpeakerPipeline:
                         "splitMs": split_ms,
                         "proposalId": str(raw.get("proposalId") or ""),
                         "resolution": resolution,
+                        "boundaryAuthority": (
+                            "campp-change-refinement-v1"
+                        ),
+                        "identityAuthority": "campp-canonical-centroid",
+                        "boundaryOnly": False,
                         "leftIdentityWindowId": left_id,
                         "rightIdentityWindowId": right_id,
                         "leftSpeakerId": (
@@ -5896,6 +6161,35 @@ class SpeakerPipeline:
                     ):
                         proposals_by_split[split_ms] = candidate
 
+        pyannote_candidates, pyannote_boundary_audit = (
+            self._pyannote_boundary_candidates(
+                prepared=prepared,
+                overlap=overlap,
+            )
+        )
+        for split_ms, candidate in pyannote_candidates.items():
+            if split_ms not in proposals_by_split:
+                proposals_by_split[split_ms] = candidate
+        metrics.set_policy(
+            pyannoteBoundaryCandidateStatus=pyannote_boundary_audit[
+                "status"
+            ],
+            pyannoteBoundaryCandidateCount=pyannote_boundary_audit[
+                "candidateCount"
+            ],
+            pyannoteBoundaryCandidateTimelineKind=(
+                pyannote_boundary_audit.get("timelineKind")
+            ),
+            pyannoteBoundaryCandidateTimelineSha256=(
+                pyannote_boundary_audit.get("timelineSha256")
+            ),
+            pyannoteBoundaryCandidateOverlapRejected=(
+                pyannote_boundary_audit["overlapRejectedCount"]
+            ),
+            pyannoteBoundaryCandidateUnstableRejected=(
+                pyannote_boundary_audit["unstableRejectedCount"]
+            ),
+        )
         if not proposals_by_split:
             metrics.set_policy(
                 contextualTurnProjectionApplied=False,
@@ -5913,6 +6207,7 @@ class SpeakerPipeline:
         output_embeddings: list[EmbeddingRecord] = []
         output_overlap: list[OverlapDecision] = []
         selected_proposal_ids: list[str] = []
+        selected_boundary_authorities: list[str] = []
         added_boundary_count = 0
 
         for source_index, (
@@ -5976,6 +6271,10 @@ class SpeakerPipeline:
                 str(item["proposalId"])
                 for item in accepted
                 if item["proposalId"]
+            )
+            selected_boundary_authorities.extend(
+                str(item["boundaryAuthority"])
+                for item in accepted
             )
 
             for child_index, (start_ms, end_ms) in enumerate(
@@ -6079,7 +6378,20 @@ class SpeakerPipeline:
                     else None
                 )
                 projection = {
-                    "method": "multiresolution-voiceprint-output-turn-v2",
+                    "method": (
+                        "pyannote-boundary-campp-identity-output-turn-v1"
+                        if any(
+                            isinstance(proposal, Mapping)
+                            and str(
+                                proposal.get("boundaryAuthority") or ""
+                            ).startswith("pyannote-")
+                            for proposal in (
+                                left_proposal,
+                                right_proposal,
+                            )
+                        )
+                        else "multiresolution-voiceprint-output-turn-v2"
+                    ),
                     "sourceWindowId": source.window_id,
                     "sourceSpeakerId": (
                         f"speaker-{clusters.assignments[source_index] + 1}"
@@ -6102,6 +6414,14 @@ class SpeakerPipeline:
                     "contextualMargin": round(contextual_margin, 9),
                     "minimumMargin": self.config.low_margin_threshold,
                     "assignmentInherited": inherited,
+                    "identityAuthority": (
+                        "human-lock"
+                        if source.locked_speaker_id is not None
+                        else "campp-source-inheritance"
+                        if inherited
+                        else "campp-canonical-centroid"
+                    ),
+                    "pyannoteCanonicalIdentityImported": False,
                     "leftBoundaryProposalId": (
                         left_proposal["proposalId"]
                         if left_proposal is not None
@@ -6111,6 +6431,31 @@ class SpeakerPipeline:
                         right_proposal["proposalId"]
                         if right_proposal is not None
                         else None
+                    ),
+                    "leftBoundaryAuthority": (
+                        left_proposal["boundaryAuthority"]
+                        if left_proposal is not None
+                        else None
+                    ),
+                    "rightBoundaryAuthority": (
+                        right_proposal["boundaryAuthority"]
+                        if right_proposal is not None
+                        else None
+                    ),
+                    "pyannoteTimelineSha256": next(
+                        (
+                            str(proposal["timelineSha256"])
+                            for proposal in (
+                                left_proposal,
+                                right_proposal,
+                            )
+                            if isinstance(proposal, Mapping)
+                            and isinstance(
+                                proposal.get("timelineSha256"),
+                                str,
+                            )
+                        ),
+                        None,
                     ),
                     "reviewStatus": "REVIEW_REQUIRED",
                     "sourceTextMutable": False,
@@ -6204,13 +6549,25 @@ class SpeakerPipeline:
         metrics.set_policy(
             contextualTurnProjectionApplied=True,
             contextualTurnProjectionReason=(
-                "ACOUSTIC_MULTIRESOLUTION_IDENTITY_CHANGE"
+                "PYANNOTE_BOUNDARY_WITH_CAMPP_IDENTITY"
+                if any(
+                    authority.startswith("pyannote-")
+                    for authority in selected_boundary_authorities
+                )
+                else "ACOUSTIC_MULTIRESOLUTION_IDENTITY_CHANGE"
             ),
             contextualTurnProjectionSourceWindows=len(prepared.windows),
             contextualTurnProjectionOutputWindows=len(output_windows),
             contextualTurnProjectionAddedBoundaries=added_boundary_count,
             contextualTurnProjectionSelectedProposalIds="|".join(
                 sorted(set(selected_proposal_ids))
+            ),
+            contextualTurnProjectionBoundaryAuthorities="|".join(
+                sorted(set(selected_boundary_authorities))
+            ),
+            contextualTurnProjectionPyannoteBoundaryCount=sum(
+                authority.startswith("pyannote-")
+                for authority in selected_boundary_authorities
             ),
         )
         return (
@@ -7161,6 +7518,21 @@ class SpeakerPipeline:
         excluded from this production path.
         """
 
+        def sequence_locked_speaker_id(
+            segment: TranscriptSegment,
+        ) -> str | None:
+            if segment.human_locked or segment.overlapping:
+                return segment.speaker_id
+            projection = segment.evidence.get("speakerTurnProjection")
+            if (
+                isinstance(projection, Mapping)
+                and projection.get("method")
+                == "pyannote-boundary-campp-identity-output-turn-v1"
+                and projection.get("assignmentInherited") is True
+            ):
+                return segment.speaker_id
+            return None
+
         result = decode_speaker_sequence(
             tuple(
                 SequenceSegment(
@@ -7175,10 +7547,8 @@ class SpeakerPipeline:
                         )
                         for item in segment.speaker_scores
                     ),
-                    human_locked_speaker_id=(
-                        segment.speaker_id
-                        if segment.human_locked or segment.overlapping
-                        else None
+                    human_locked_speaker_id=sequence_locked_speaker_id(
+                        segment
                     ),
                 )
                 for segment in segments
@@ -7197,6 +7567,28 @@ class SpeakerPipeline:
             assignment = assignments_by_id[segment.segment_id]
             reason_codes = list(assignment.reason_codes)
             review_status = assignment.review_status
+            projection = segment.evidence.get("speakerTurnProjection")
+            low_margin_pyannote_identity = (
+                isinstance(projection, Mapping)
+                and projection.get("method")
+                == "pyannote-boundary-campp-identity-output-turn-v1"
+                and projection.get("assignmentInherited") is True
+            )
+            if low_margin_pyannote_identity:
+                if not segment.human_locked:
+                    reason_codes = [
+                        code
+                        for code in reason_codes
+                        if code != "HUMAN_LOCKED"
+                    ]
+                if (
+                    "CAMPP_IDENTITY_MARGIN_BELOW_THRESHOLD"
+                    not in reason_codes
+                ):
+                    reason_codes.append(
+                        "CAMPP_IDENTITY_MARGIN_BELOW_THRESHOLD"
+                    )
+                review_status = "REVIEW_REQUIRED"
             if segment.overlapping:
                 reason_codes = [
                     code
@@ -7587,6 +7979,15 @@ class SpeakerPipeline:
                 < self.config.pyannote_primary_dominance_threshold
             ):
                 blockers.append("PYANNOTE_PRIMARY_DOMINANCE_BELOW_THRESHOLD")
+            turn_projection = segment.evidence.get("speakerTurnProjection")
+            if (
+                target_speaker != segment.speaker_id
+                and isinstance(turn_projection, Mapping)
+                and turn_projection.get("method")
+                == "pyannote-boundary-campp-identity-output-turn-v1"
+                and turn_projection.get("assignmentInherited") is True
+            ):
+                blockers.append("CAMPP_IDENTITY_MARGIN_BELOW_THRESHOLD")
             if segment.human_locked and target_speaker != segment.speaker_id:
                 blockers.append("HUMAN_LOCKED")
             applied = target_speaker != segment.speaker_id and not blockers
@@ -7974,6 +8375,21 @@ class SpeakerPipeline:
                 reasons.append(
                     _SPEAKER_CHANGE_REFINEMENT_REVIEW_REASON
                 )
+            turn_projection = segment.evidence.get("speakerTurnProjection")
+            if (
+                isinstance(turn_projection, Mapping)
+                and turn_projection.get("reviewStatus")
+                == "REVIEW_REQUIRED"
+                and (
+                    str(
+                        turn_projection.get("leftBoundaryAuthority") or ""
+                    ).startswith("pyannote-")
+                    or str(
+                        turn_projection.get("rightBoundaryAuthority") or ""
+                    ).startswith("pyannote-")
+                )
+            ):
+                reasons.append(_PYANNOTE_BOUNDARY_REVIEW_REASON)
             count_partition_evidence = segment.evidence.get(
                 "speakerCountPartition"
             )

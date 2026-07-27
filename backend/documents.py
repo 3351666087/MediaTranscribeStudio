@@ -419,6 +419,22 @@ def build_review_queue(
         boundary = segment.evidence.get("boundary")
         if isinstance(boundary, Mapping) and boundary.get("conflict") is True:
             add_reason("BOUNDARY_CONFLICT")
+        turn_projection = segment.evidence.get("speakerTurnProjection")
+        if (
+            isinstance(turn_projection, Mapping)
+            and turn_projection.get("method")
+            == "pyannote-boundary-campp-identity-output-turn-v1"
+            and turn_projection.get("reviewStatus") == "REVIEW_REQUIRED"
+            and (
+                str(
+                    turn_projection.get("leftBoundaryAuthority") or ""
+                ).startswith("pyannote-")
+                or str(
+                    turn_projection.get("rightBoundaryAuthority") or ""
+                ).startswith("pyannote-")
+            )
+        ):
+            add_reason("PYANNOTE_BOUNDARY_REVIEW_REQUIRED")
         selective_review = segment.evidence.get("selectiveReview")
         selective_refs: set[str] = set()
         if isinstance(selective_review, Mapping):

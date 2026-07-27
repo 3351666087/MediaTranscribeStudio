@@ -142,6 +142,44 @@ def _fixture(root: Path) -> tuple[Path, Path, Path]:
             "referenceEvaluation": {"available": False},
         },
     )
+    _write(
+        output / "semantic" / "semantic-suggestions.v1.json",
+        {
+            "jobId": job_id,
+            "status": "completed",
+            "model": "qwen3.5:9b",
+            "promptVersion": "semantic-fixture-v1",
+            "applicationPolicy": "suggestion-only",
+            "requiresHumanApproval": True,
+            "provider": {
+                "id": "ollama-loopback",
+                "version": "fixture",
+                "networkPolicy": "loopback-only",
+            },
+            "metrics": {
+                "segmentsEvaluated": 2,
+                "providerCalls": 2,
+                "gateProviderCalls": 2,
+                "proposalProviderCalls": 0,
+                "acceptedResultCount": 2,
+                "abstentionCount": 2,
+                "suggestionCount": 0,
+                "speakerSuggestionCount": 0,
+                "textSuggestionCount": 0,
+                "rejectionCount": 0,
+                "failureCount": 0,
+                "unresolvedSegmentCount": 0,
+                "autoAppliedCount": 0,
+                "providerCompletedCalls": 2,
+                "providerTotalDurationNanoseconds": 2_000_000_000,
+                "providerLoadDurationNanoseconds": 200_000_000,
+                "providerPromptEvalTokens": 100,
+                "providerPromptEvalDurationNanoseconds": 1_000_000_000,
+                "providerOutputTokens": 20,
+                "providerOutputEvalDurationNanoseconds": 800_000_000,
+            },
+        },
+    )
     return manifest, results, outputs
 
 
@@ -184,11 +222,35 @@ def test_summarizes_content_free_audit_and_separate_gates(
     assert summary["aggregate"]["documentLanguageCounts"] == {"mul": 1}
     assert summary["aggregate"]["segmentLanguageCounts"] == {"en": 1, "zh": 1}
     assert summary["aggregate"]["maxObservedLanguageWindowMs"] == 6000
+    assert summary["aggregate"]["semantic"] == {
+        "evidenceCaseCount": 1,
+        "statusCounts": {"completed": 1},
+        "modelCounts": {"qwen3.5:9b": 1},
+        "segmentsEvaluatedTotal": 2,
+        "providerCallsTotal": 2,
+        "acceptedResultCount": 2,
+        "abstentionCount": 2,
+        "suggestionCount": 0,
+        "speakerSuggestionCount": 0,
+        "textSuggestionCount": 0,
+        "rejectionCount": 0,
+        "failureCount": 0,
+        "unresolvedSegmentCount": 0,
+        "autoAppliedCount": 0,
+        "providerTotalDurationSeconds": 2.0,
+        "providerLoadDurationSeconds": 0.2,
+        "providerPromptEvalDurationSeconds": 1.0,
+        "providerOutputEvalDurationSeconds": 0.8,
+        "providerPromptEvalTokens": 100,
+        "providerOutputTokens": 20,
+    }
     assert summary["gates"] == {
         "technicalExecutionPassed": True,
         "allCasesRequireReview": True,
         "languageWindowLimitPassed": True,
         "referenceQualityScored": False,
+        "mandatorySemanticCompleted": True,
+        "semanticSuggestionOnlyPolicyPassed": True,
         "lexicalSpeechNegativeGatePassed": None,
         "qualityConclusion": "not_scored_missing_reference_truth",
     }
@@ -242,7 +304,7 @@ def test_summarizes_long_media_source_terminal_without_overclaiming(
         outputs_root=outputs,
     )
 
-    assert summary["schemaVersion"] == "1.1.0"
+    assert summary["schemaVersion"] == "1.2.0"
     source = summary["sourceSummaries"][0]
     assert source["sourceSha256"] == "b" * 64
     assert source["fullTimelineAcousticScan"] == {
@@ -269,8 +331,11 @@ def test_summarizes_long_media_source_terminal_without_overclaiming(
         "acoustic-change": False,
     }
     assert source["speakerCountStability"]["distribution"] == {"2": 1}
+    assert source["semantic"]["providerLoadDurationSeconds"] == 0.2
+    assert source["semantic"]["providerPromptEvalTokens"] == 100
     assert source["terminal"] == {
         "windowTechnicalExecutionPassed": True,
+        "mandatorySemanticEvidenceComplete": True,
         "fullTimelineAcousticScanPassed": True,
         "requiredStrataCovered": False,
         "windowSetComplete": True,
@@ -318,6 +383,26 @@ def test_rejects_cross_job_artifact_link(
         )
 
 
+def test_rejects_cross_job_semantic_artifact_link(tmp_path: Path) -> None:
+    manifest, results, outputs = _fixture(tmp_path)
+    semantic = (
+        outputs
+        / "sample-a"
+        / "semantic"
+        / "semantic-suggestions.v1.json"
+    )
+    value = json.loads(semantic.read_text(encoding="utf-8"))
+    value["jobId"] = "sample-other"
+    _write(semantic, value)
+
+    with pytest.raises(ValueError, match="semantic jobId mismatch"):
+        summarize_run(
+            manifest_path=manifest,
+            results_root=results,
+            outputs_root=outputs,
+        )
+
+
 def test_summarizes_no_speech_negative_without_transcript(
     tmp_path: Path,
 ) -> None:
@@ -346,6 +431,7 @@ def test_summarizes_no_speech_negative_without_transcript(
     (output / "transcript-document.v2.json").unlink()
     (output / "pipeline-metrics.v1.json").unlink()
     (output / "review" / "review-queue.json").unlink()
+    (output / "semantic" / "semantic-suggestions.v1.json").unlink()
 
     summary = summarize_run(
         manifest_path=manifest,
@@ -364,6 +450,8 @@ def test_summarizes_no_speech_negative_without_transcript(
     assert summary["aggregate"]["lexicalSpeechFalsePositiveCount"] == 0
     assert summary["aggregate"]["lexicalSpeechFalsePositiveRate"] == 0
     assert summary["gates"]["lexicalSpeechNegativeGatePassed"] is True
+    assert summary["gates"]["mandatorySemanticCompleted"] is None
+    assert summary["gates"]["semanticSuggestionOnlyPolicyPassed"] is None
     assert (
         summary["gates"]["qualityConclusion"]
         == "lexical_speech_negative_gate_passed"

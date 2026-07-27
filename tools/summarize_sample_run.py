@@ -79,6 +79,12 @@ def _nonnegative_int(value: object, *, field: str) -> int:
     return value
 
 
+def _optional_nonnegative_int(value: object, *, field: str) -> int | None:
+    if value is None:
+        return None
+    return _nonnegative_int(value, field=field)
+
+
 def _optional_number(value: object, *, field: str) -> float | None:
     if value is None:
         return None
@@ -95,6 +101,19 @@ def _list(value: object, *, field: str) -> list[Any]:
     if not isinstance(value, list):
         raise ValueError(f"{field} must be an array")
     return value
+
+
+def _sum_present_numbers(
+    values: Sequence[Mapping[str, Any]],
+    key: str,
+    *,
+    digits: int | None = None,
+) -> int | float | None:
+    present = [value[key] for value in values if value.get(key) is not None]
+    if not present:
+        return None
+    total = sum(present)
+    return round(float(total), digits) if digits is not None else total
 
 
 def _job_id(value: Mapping[str, Any], *, field: str) -> str:
@@ -367,6 +386,88 @@ def _metrics_summary(
     }
 
 
+def _semantic_summary(
+    semantic: Mapping[str, Any] | None,
+    *,
+    case_id: str,
+) -> dict[str, Any] | None:
+    if semantic is None:
+        return None
+    metrics = _mapping(
+        semantic.get("metrics"),
+        field=f"{case_id}.semantic.metrics",
+    )
+    provider = _mapping(
+        semantic.get("provider"),
+        field=f"{case_id}.semantic.provider",
+    )
+
+    def count(name: str) -> int:
+        return _nonnegative_int(
+            metrics.get(name),
+            field=f"{case_id}.semantic.metrics.{name}",
+        )
+
+    def optional_count(name: str) -> int | None:
+        return _optional_nonnegative_int(
+            metrics.get(name),
+            field=f"{case_id}.semantic.metrics.{name}",
+        )
+
+    def duration_seconds(name: str) -> float | None:
+        value = optional_count(name)
+        return round(value / 1_000_000_000, 9) if value is not None else None
+
+    status = semantic.get("status")
+    model = semantic.get("model")
+    if not isinstance(status, str) or not status:
+        raise ValueError(f"{case_id}.semantic.status must be non-empty text")
+    if not isinstance(model, str) or not model:
+        raise ValueError(f"{case_id}.semantic.model must be non-empty text")
+    return {
+        "status": status,
+        "model": model,
+        "promptVersion": semantic.get("promptVersion"),
+        "applicationPolicy": semantic.get("applicationPolicy"),
+        "requiresHumanApproval": semantic.get("requiresHumanApproval"),
+        "provider": {
+            "id": provider.get("id"),
+            "version": provider.get("version"),
+            "networkPolicy": provider.get("networkPolicy"),
+        },
+        "segmentsEvaluated": count("segmentsEvaluated"),
+        "providerCalls": count("providerCalls"),
+        "gateProviderCalls": count("gateProviderCalls"),
+        "proposalProviderCalls": count("proposalProviderCalls"),
+        "acceptedResultCount": count("acceptedResultCount"),
+        "abstentionCount": count("abstentionCount"),
+        "suggestionCount": count("suggestionCount"),
+        "speakerSuggestionCount": count("speakerSuggestionCount"),
+        "textSuggestionCount": count("textSuggestionCount"),
+        "rejectionCount": count("rejectionCount"),
+        "failureCount": count("failureCount"),
+        "unresolvedSegmentCount": count("unresolvedSegmentCount"),
+        "autoAppliedCount": count("autoAppliedCount"),
+        "providerMetrics": {
+            "completedCalls": optional_count("providerCompletedCalls"),
+            "totalDurationSeconds": duration_seconds(
+                "providerTotalDurationNanoseconds"
+            ),
+            "loadDurationSeconds": duration_seconds(
+                "providerLoadDurationNanoseconds"
+            ),
+            "promptEvalTokens": optional_count("providerPromptEvalTokens"),
+            "promptEvalDurationSeconds": duration_seconds(
+                "providerPromptEvalDurationNanoseconds"
+            ),
+            "outputTokens": optional_count("providerOutputTokens"),
+            "outputEvalDurationSeconds": duration_seconds(
+                "providerOutputEvalDurationNanoseconds"
+            ),
+        },
+    }
+
+
 def _case_summary(
     case: Mapping[str, Any],
     *,
@@ -400,19 +501,24 @@ def _case_summary(
     transcript_path = output / "transcript-document.v2.json"
     review_path = output / "review" / "review-queue.json"
     metrics_path = output / "pipeline-metrics.v1.json"
+    semantic_path = output / "semantic" / "semantic-suggestions.v1.json"
     transcript = _read_object(transcript_path) if transcript_path.exists() else None
     review = _read_object(review_path) if review_path.exists() else None
     metrics = _read_object(metrics_path) if metrics_path.exists() else None
+    semantic = _read_object(semantic_path) if semantic_path.exists() else None
 
     transcribable = classification == "transcribable-speech-detected"
     if transcribable and transcript is None:
         raise ValueError(f"{case_id} is transcribable but has no transcript")
     if not transcribable and transcript is not None:
         raise ValueError(f"{case_id} is no-speech but has a transcript")
+    if not transcribable and semantic is not None:
+        raise ValueError(f"{case_id} is no-speech but has semantic output")
     for field, artifact in (
         ("transcript", transcript),
         ("review", review),
         ("metrics", metrics),
+        ("semantic", semantic),
     ):
         if artifact is not None:
             _assert_job_id(
@@ -501,6 +607,7 @@ def _case_summary(
         "transcription": transcription,
         "review": _review_summary(review, case_id=case_id),
         "metrics": _metrics_summary(metrics, case_id=case_id),
+        "semantic": _semantic_summary(semantic, case_id=case_id),
     }
 
 
@@ -621,6 +728,17 @@ def _source_summaries(
         ]
         review_counts = [int(row["review"]["openCount"]) for row in rows]
         metrics = [row["metrics"] for row in rows if row.get("metrics") is not None]
+        semantic_rows = [
+            row["semantic"] for row in rows if row.get("semantic") is not None
+        ]
+        semantic_statuses = Counter(row["status"] for row in semantic_rows)
+        semantic_models = Counter(row["model"] for row in semantic_rows)
+        semantic_provider_ids = Counter(
+            str(row["provider"]["id"]) for row in semantic_rows
+        )
+        semantic_provider_metrics = [
+            row["providerMetrics"] for row in semantic_rows
+        ]
         rtfs = [float(value["pipelineRtf"]) for value in metrics]
         peak_ram = [
             float(value["peakRamMb"])
@@ -747,6 +865,64 @@ def _source_summaries(
                     "openCountMax": max(review_counts),
                     "allWindowsRequireReview": all_review_required,
                 },
+                "semantic": {
+                    "evidenceWindowCount": len(semantic_rows),
+                    "statusCounts": dict(sorted(semantic_statuses.items())),
+                    "modelCounts": dict(sorted(semantic_models.items())),
+                    "providerIdCounts": dict(sorted(semantic_provider_ids.items())),
+                    "segmentsEvaluatedTotal": sum(
+                        row["segmentsEvaluated"] for row in semantic_rows
+                    ),
+                    "providerCallsTotal": sum(
+                        row["providerCalls"] for row in semantic_rows
+                    ),
+                    "acceptedResultCount": sum(
+                        row["acceptedResultCount"] for row in semantic_rows
+                    ),
+                    "abstentionCount": sum(
+                        row["abstentionCount"] for row in semantic_rows
+                    ),
+                    "suggestionCount": sum(
+                        row["suggestionCount"] for row in semantic_rows
+                    ),
+                    "rejectionCount": sum(
+                        row["rejectionCount"] for row in semantic_rows
+                    ),
+                    "failureCount": sum(
+                        row["failureCount"] for row in semantic_rows
+                    ),
+                    "autoAppliedCount": sum(
+                        row["autoAppliedCount"] for row in semantic_rows
+                    ),
+                    "providerTotalDurationSeconds": _sum_present_numbers(
+                        semantic_provider_metrics,
+                        "totalDurationSeconds",
+                        digits=9,
+                    ),
+                    "providerLoadDurationSeconds": _sum_present_numbers(
+                        semantic_provider_metrics,
+                        "loadDurationSeconds",
+                        digits=9,
+                    ),
+                    "providerPromptEvalDurationSeconds": _sum_present_numbers(
+                        semantic_provider_metrics,
+                        "promptEvalDurationSeconds",
+                        digits=9,
+                    ),
+                    "providerOutputEvalDurationSeconds": _sum_present_numbers(
+                        semantic_provider_metrics,
+                        "outputEvalDurationSeconds",
+                        digits=9,
+                    ),
+                    "providerPromptEvalTokens": _sum_present_numbers(
+                        semantic_provider_metrics,
+                        "promptEvalTokens",
+                    ),
+                    "providerOutputTokens": _sum_present_numbers(
+                        semantic_provider_metrics,
+                        "outputTokens",
+                    ),
+                },
                 "performance": {
                     "pipelineRtfMin": min(rtfs) if rtfs else None,
                     "pipelineRtfMedian": (
@@ -763,6 +939,14 @@ def _source_summaries(
                 },
                 "terminal": {
                     "windowTechnicalExecutionPassed": all_technical,
+                    "mandatorySemanticEvidenceComplete": (
+                        len(semantic_rows) == len(speaker_counts)
+                        and all(
+                            row["status"] == "completed"
+                            and row["autoAppliedCount"] == 0
+                            for row in semantic_rows
+                        )
+                    ),
                     "fullTimelineAcousticScanPassed": (
                         acoustic_coverage_ratio is not None
                         and acoustic_coverage_ratio >= 0.999
@@ -832,6 +1016,7 @@ def summarize_run(
     cache_requests = 0
     cache_hits = 0.0
     max_language_window = 0
+    semantic_rows: list[Mapping[str, Any]] = []
     for row in summaries:
         runner_elapsed += row["runner"]["elapsedSeconds"]
         reason_counts.update(row["review"]["reasonCounts"])
@@ -854,6 +1039,9 @@ def summarize_run(
             pipeline_rtfs.append(metrics["pipelineRtf"])
             cache_requests += metrics["cacheRequests"]
             cache_hits += metrics["cacheRequests"] * metrics["cacheHitRate"]
+        semantic = row["semantic"]
+        if semantic is not None:
+            semantic_rows.append(semantic)
 
     truth_eligible_counts: Counter[str] = Counter()
     for row in summaries:
@@ -888,13 +1076,40 @@ def summarize_run(
         and row["metrics"]["referenceEvaluationAvailable"]
         for row in summaries
     )
+    transcribable_rows = [
+        row for row in summaries if row["transcription"] is not None
+    ]
+    semantic_statuses = Counter(row["status"] for row in semantic_rows)
+    semantic_models = Counter(row["model"] for row in semantic_rows)
+    semantic_provider_metrics = [
+        row["providerMetrics"] for row in semantic_rows
+    ]
+    mandatory_semantic_complete = (
+        all(
+            row["semantic"] is not None
+            and row["semantic"]["status"] == "completed"
+            for row in transcribable_rows
+        )
+        if transcribable_rows
+        else None
+    )
+    semantic_suggestion_only = (
+        all(
+            row["applicationPolicy"] == "suggestion-only"
+            and row["requiresHumanApproval"] is True
+            and row["autoAppliedCount"] == 0
+            for row in semantic_rows
+        )
+        if semantic_rows
+        else None
+    )
     source_summaries = _source_summaries(
         manifest,
         cases=case_records,
         summaries=summaries,
     )
     return {
-        "schemaVersion": "1.1.0",
+        "schemaVersion": "1.2.0",
         "artifactType": "sample-run-audit-summary",
         "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "libraryId": manifest.get("libraryId"),
@@ -935,6 +1150,72 @@ def summarize_run(
             "weightedCacheHitRate": (
                 round(cache_hits / cache_requests, 9) if cache_requests else None
             ),
+            "semantic": {
+                "evidenceCaseCount": len(semantic_rows),
+                "statusCounts": dict(sorted(semantic_statuses.items())),
+                "modelCounts": dict(sorted(semantic_models.items())),
+                "segmentsEvaluatedTotal": sum(
+                    row["segmentsEvaluated"] for row in semantic_rows
+                ),
+                "providerCallsTotal": sum(
+                    row["providerCalls"] for row in semantic_rows
+                ),
+                "acceptedResultCount": sum(
+                    row["acceptedResultCount"] for row in semantic_rows
+                ),
+                "abstentionCount": sum(
+                    row["abstentionCount"] for row in semantic_rows
+                ),
+                "suggestionCount": sum(
+                    row["suggestionCount"] for row in semantic_rows
+                ),
+                "speakerSuggestionCount": sum(
+                    row["speakerSuggestionCount"] for row in semantic_rows
+                ),
+                "textSuggestionCount": sum(
+                    row["textSuggestionCount"] for row in semantic_rows
+                ),
+                "rejectionCount": sum(
+                    row["rejectionCount"] for row in semantic_rows
+                ),
+                "failureCount": sum(
+                    row["failureCount"] for row in semantic_rows
+                ),
+                "unresolvedSegmentCount": sum(
+                    row["unresolvedSegmentCount"] for row in semantic_rows
+                ),
+                "autoAppliedCount": sum(
+                    row["autoAppliedCount"] for row in semantic_rows
+                ),
+                "providerTotalDurationSeconds": _sum_present_numbers(
+                    semantic_provider_metrics,
+                    "totalDurationSeconds",
+                    digits=9,
+                ),
+                "providerLoadDurationSeconds": _sum_present_numbers(
+                    semantic_provider_metrics,
+                    "loadDurationSeconds",
+                    digits=9,
+                ),
+                "providerPromptEvalDurationSeconds": _sum_present_numbers(
+                    semantic_provider_metrics,
+                    "promptEvalDurationSeconds",
+                    digits=9,
+                ),
+                "providerOutputEvalDurationSeconds": _sum_present_numbers(
+                    semantic_provider_metrics,
+                    "outputEvalDurationSeconds",
+                    digits=9,
+                ),
+                "providerPromptEvalTokens": _sum_present_numbers(
+                    semantic_provider_metrics,
+                    "promptEvalTokens",
+                ),
+                "providerOutputTokens": _sum_present_numbers(
+                    semantic_provider_metrics,
+                    "outputTokens",
+                ),
+            },
             "truthEligibleCaseCounts": dict(sorted(truth_eligible_counts.items())),
             "lexicalSpeechNegativeCases": len(lexical_negative_rows),
             "lexicalSpeechFalsePositiveCount": lexical_false_positives,
@@ -958,6 +1239,8 @@ def summarize_run(
                 for row in summaries
             ),
             "referenceQualityScored": quality_scored,
+            "mandatorySemanticCompleted": mandatory_semantic_complete,
+            "semanticSuggestionOnlyPolicyPassed": semantic_suggestion_only,
             "lexicalSpeechNegativeGatePassed": (
                 lexical_false_positives == 0
                 if lexical_negative_rows

@@ -13,7 +13,9 @@ from .final_adjudication import (
     FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
     FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION,
     build_final_adjudicated_transcript,
+    build_final_no_speech_adjudication,
     validate_final_adjudicated_transcript,
+    validate_final_no_speech_adjudication,
 )
 from .business_processing import (
     BUSINESS_PROMPT_VERSION,
@@ -168,6 +170,7 @@ __all__ = [
     "apply_offline_environment",
     "attach_semantic_suggestions_to_review",
     "build_final_adjudicated_transcript",
+    "build_final_no_speech_adjudication",
     "build_production_composition",
     "compile_output_customizations",
     "canonical_speaker_ids",
@@ -180,5 +183,6 @@ __all__ = [
     "run_production_preflight",
     "validate_semantic_suggestions_artifact",
     "validate_final_adjudicated_transcript",
+    "validate_final_no_speech_adjudication",
     "validate_job_id",
 ]

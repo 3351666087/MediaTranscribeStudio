@@ -147,13 +147,14 @@ def _semantic_arbitration(language: str) -> dict[str, Any]:
 
 def _final_adjudicated_transcript(language: str) -> dict[str, Any]:
     return {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "artifactType": "final-adjudicated-transcript",
         "artifactId": "final-contract-report-001",
         "jobId": "contract-final-001",
         "documentId": "contract-report-001",
         "generatedAt": "2026-07-28T00:00:00Z",
         "status": "adjudication-complete",
+        "disposition": "transcribable-speech",
         "acceptanceSubject": "speaker-language-time-final-text",
         "input": {
             "sourceMediaSha256": SHA256,
@@ -400,3 +401,43 @@ def test_final_adjudicated_schema_rejects_unresolved_or_raw_text_shapes() -> Non
     leaked_raw_text["segments"][0]["rawText"] = "Unreviewed source text."
     with pytest.raises(ValidationError):
         validator.validate(leaked_raw_text)
+
+
+def test_final_adjudicated_schema_accepts_only_hash_bound_no_speech_shape() -> None:
+    validator = _validator("final-adjudicated-transcript.schema.json")
+    value = {
+        "schemaVersion": "1.1.0",
+        "artifactType": "final-adjudicated-transcript",
+        "artifactId": "final-no-speech-contract-final-001",
+        "jobId": "contract-final-001",
+        "generatedAt": "2026-07-28T00:00:00Z",
+        "status": "adjudication-complete",
+        "disposition": "no-transcribable-speech",
+        "acceptanceSubject": "lexical-speech-presence",
+        "input": {
+            "sourceMediaSha256": SHA256,
+            "voiceActivitySha256": SHA256,
+        },
+        "source": {"durationMs": 1_000},
+        "voiceActivity": {
+            "classification": "no-speech-candidates-detected",
+            "hasSpeechCandidates": False,
+            "hasTranscribableSpeech": False,
+            "speechWindowCount": 0,
+            "speechDurationMs": 0,
+        },
+        "segments": [],
+    }
+    validator.validate(value)
+
+    fabricated_transcript = copy.deepcopy(value)
+    fabricated_transcript["segments"] = [
+        _final_adjudicated_transcript("en")["segments"][0]
+    ]
+    with pytest.raises(ValidationError):
+        validator.validate(fabricated_transcript)
+
+    semantic_leak = copy.deepcopy(value)
+    semantic_leak["semantic"] = {"status": "not-applicable"}
+    with pytest.raises(ValidationError):
+        validator.validate(semantic_leak)

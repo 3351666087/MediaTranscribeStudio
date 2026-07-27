@@ -549,7 +549,9 @@ def test_completed_semantic_job_persists_final_adjudicated_transcript() -> None:
         output = root / "output" / "job"
         final_path = output / "final-adjudicated-transcript.v1.json"
         artifact = json.loads(final_path.read_text(encoding="utf-8"))
+        assert artifact["schemaVersion"] == "1.1.0"
         assert artifact["status"] == "adjudication-complete"
+        assert artifact["disposition"] == "transcribable-speech"
         assert artifact["review"]["openCount"] == 0
         assert artifact["semantic"]["status"] == "completed"
         assert artifact["segments"][0]["finalText"] == (
@@ -726,12 +728,36 @@ def test_no_speech_completes_with_voice_activity_artifact() -> None:
         assert artifact["classification"] == "no-speech-candidates-detected"
         assert artifact["hasTranscribableSpeech"] is False
         assert not (artifact_path.parent / "transcript-document.v2.json").exists()
+        final_path = (
+            artifact_path.parent / "final-adjudicated-transcript.v1.json"
+        )
+        final_artifact = json.loads(final_path.read_text(encoding="utf-8"))
+        assert final_artifact["schemaVersion"] == "1.1.0"
+        assert final_artifact["disposition"] == "no-transcribable-speech"
+        assert final_artifact["acceptanceSubject"] == (
+            "lexical-speech-presence"
+        )
+        assert final_artifact["segments"] == []
+        assert "semantic" not in final_artifact
+        assert "speakerPolicy" not in final_artifact
+        assert str(final_path) in final["artifactPaths"]
         completed = next(
             event for event in events if event["type"] == "job.completed"
         )
         assert completed["payload"]["hasTranscribableSpeech"] is False
         assert completed["payload"]["disposition"] == (
             "no-speech-candidates-detected"
+        )
+        final_events = [
+            event
+            for event in events
+            if event["type"] == "artifact.created"
+            and event["payload"]["artifactType"]
+            == "final-adjudicated-transcript-v1"
+        ]
+        assert len(final_events) == 1
+        assert final_events[0]["payload"]["disposition"] == (
+            "no-transcribable-speech"
         )
         service.shutdown()
 

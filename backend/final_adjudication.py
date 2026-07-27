@@ -14,9 +14,10 @@ from .semantic_processing import (
     SEMANTIC_APPLICATION_POLICY,
     validate_semantic_suggestions_artifact,
 )
+from .voice_activity import validate_voice_activity
 
 
-FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION = "1.0.0"
+FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION = "1.1.0"
 FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE = "final-adjudicated-transcript"
 
 
@@ -306,6 +307,7 @@ def build_final_adjudicated_transcript(
         "documentId": document_id,
         "generatedAt": utc_now(),
         "status": "adjudication-complete",
+        "disposition": "transcribable-speech",
         "acceptanceSubject": "speaker-language-time-final-text",
         "input": {
             "sourceMediaSha256": source_sha256,
@@ -374,6 +376,7 @@ def validate_final_adjudicated_transcript(
         "documentId",
         "generatedAt",
         "status",
+        "disposition",
         "acceptanceSubject",
         "input",
         "semantic",
@@ -386,7 +389,7 @@ def validate_final_adjudicated_transcript(
     if set(value) != required:
         raise _fail(
             "FINAL_ADJUDICATION_ARTIFACT_INVALID",
-            "final adjudication fields do not match schema 1.0.0",
+            "final adjudication fields do not match schema 1.1.0",
         )
     expected_job_id = expected_document.get("jobId")
     expected_document_id = expected_document.get("documentId")
@@ -401,6 +404,7 @@ def validate_final_adjudicated_transcript(
         or not isinstance(value.get("generatedAt"), str)
         or not value["generatedAt"]
         or value.get("status") != "adjudication-complete"
+        or value.get("disposition") != "transcribable-speech"
         or value.get("acceptanceSubject")
         != "speaker-language-time-final-text"
         or value.get("finalTextAuthority") != "normalizedText"
@@ -487,9 +491,156 @@ def validate_final_adjudicated_transcript(
     return value
 
 
+def _no_speech_voice_summary(
+    voice_activity: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "classification": voice_activity["classification"],
+        "hasSpeechCandidates": voice_activity["hasSpeechCandidates"],
+        "hasTranscribableSpeech": voice_activity[
+            "hasTranscribableSpeech"
+        ],
+        "speechWindowCount": voice_activity["speechWindowCount"],
+        "speechDurationMs": voice_activity["speechDurationMs"],
+    }
+
+
+def build_final_no_speech_adjudication(
+    voice_activity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the final scoring subject for verified speech absence."""
+
+    try:
+        validate_strict_json(dict(voice_activity))
+    except ValueError as exc:
+        raise _fail(
+            "FINAL_ADJUDICATION_INPUT_INVALID",
+            "voice activity must contain strict finite JSON",
+            reason=str(exc),
+        ) from exc
+    validated_voice = validate_voice_activity(voice_activity)
+    if validated_voice["hasTranscribableSpeech"] is not False:
+        raise _fail(
+            "FINAL_ADJUDICATION_VOICE_ACTIVITY_INVALID",
+            "no-speech adjudication requires a non-transcribable disposition",
+            classification=validated_voice["classification"],
+        )
+    job_id = validated_voice["jobId"]
+    artifact = {
+        "schemaVersion": FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION,
+        "artifactType": FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
+        "artifactId": f"final-no-speech-{job_id}",
+        "jobId": job_id,
+        "generatedAt": utc_now(),
+        "status": "adjudication-complete",
+        "disposition": "no-transcribable-speech",
+        "acceptanceSubject": "lexical-speech-presence",
+        "input": {
+            "sourceMediaSha256": validated_voice["sourceSha256"],
+            "voiceActivitySha256": canonical_json_sha256(validated_voice),
+        },
+        "source": {
+            "durationMs": validated_voice["mediaDurationMs"],
+        },
+        "voiceActivity": _no_speech_voice_summary(validated_voice),
+        "segments": [],
+    }
+    return validate_final_no_speech_adjudication(
+        artifact,
+        expected_voice_activity=validated_voice,
+    )
+
+
+def validate_final_no_speech_adjudication(
+    artifact: Mapping[str, Any],
+    *,
+    expected_voice_activity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a no-speech final subject and its voice-evidence binding."""
+
+    value = dict(artifact)
+    try:
+        validate_strict_json(value)
+        validate_strict_json(dict(expected_voice_activity))
+    except ValueError as exc:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "no-speech final adjudication must contain strict finite JSON",
+            reason=str(exc),
+        ) from exc
+    voice = validate_voice_activity(expected_voice_activity)
+    if voice["hasTranscribableSpeech"] is not False:
+        raise _fail(
+            "FINAL_ADJUDICATION_VOICE_ACTIVITY_INVALID",
+            "expected voice activity does not prove speech absence",
+            classification=voice["classification"],
+        )
+    required = {
+        "schemaVersion",
+        "artifactType",
+        "artifactId",
+        "jobId",
+        "generatedAt",
+        "status",
+        "disposition",
+        "acceptanceSubject",
+        "input",
+        "source",
+        "voiceActivity",
+        "segments",
+    }
+    if set(value) != required:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "no-speech final adjudication fields do not match schema 1.1.0",
+        )
+    job_id = voice["jobId"]
+    if (
+        value.get("schemaVersion")
+        != FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION
+        or value.get("artifactType")
+        != FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE
+        or value.get("artifactId") != f"final-no-speech-{job_id}"
+        or value.get("jobId") != job_id
+        or not isinstance(value.get("generatedAt"), str)
+        or not value["generatedAt"]
+        or value.get("status") != "adjudication-complete"
+        or value.get("disposition") != "no-transcribable-speech"
+        or value.get("acceptanceSubject")
+        != "lexical-speech-presence"
+        or value.get("segments") != []
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "no-speech final adjudication identity or disposition is invalid",
+        )
+    expected_input = {
+        "sourceMediaSha256": voice["sourceSha256"],
+        "voiceActivitySha256": canonical_json_sha256(voice),
+    }
+    if value.get("input") != expected_input:
+        raise _fail(
+            "FINAL_ADJUDICATION_BINDING_INVALID",
+            "no-speech final adjudication source hashes do not match voice evidence",
+        )
+    if value.get("source") != {"durationMs": voice["mediaDurationMs"]}:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "no-speech final adjudication source duration is invalid",
+        )
+    if value.get("voiceActivity") != _no_speech_voice_summary(voice):
+        raise _fail(
+            "FINAL_ADJUDICATION_BINDING_INVALID",
+            "no-speech final adjudication summary does not match voice evidence",
+        )
+    return value
+
+
 __all__ = [
     "FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE",
     "FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION",
+    "build_final_no_speech_adjudication",
     "build_final_adjudicated_transcript",
+    "validate_final_no_speech_adjudication",
     "validate_final_adjudicated_transcript",
 ]

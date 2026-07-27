@@ -81,7 +81,7 @@ JSON Schema alone:
 | `artifact-manifest.schema.json` | Content-addressed artifact inventory and integrity metadata. |
 | `asr-evidence.schema.json` | Immutable model-, source-window-, token-, score-, candidate-ID-, and hash-bound ASR top-1/N-best evidence. |
 | `business-processing-request.schema.json` | Opt-in local translation and summary request. |
-| `final-adjudicated-transcript.schema.json` | Hash-bound post-semantic scoring subject after every review item is resolved. |
+| `final-adjudicated-transcript.schema.json` | Unified hash-bound final disposition: reviewed post-semantic transcript or verified absence of transcribable speech. |
 | `job-event.schema.json` | Versioned worker event stream. |
 | `output-customization.schema.json` | Evidence-bearing canonical report, subtitle, delivery, export, and reversibility snapshot. |
 | `output-recipe.schema.json` | Compact native desktop presentation recipe compiled into canonical output customizations. |
@@ -144,12 +144,16 @@ or public contract; source-language repair belongs exclusively to mandatory
 semantic arbitration.
 
 Formal quality scoring uses only
-`final-adjudicated-transcript.schema.json`, whose segment authority is the
-reviewed `speakerId`, `language`, `startMs`, `endMs`, and `finalText` tuple.
-VAD, diarization, voiceprint, LID, ASR, and semantic candidate metrics remain
-useful diagnostics, but no individual front-model result can authorize
-release. Missing or incomplete semantic processing, open review work, or a
-broken source hash blocks the final artifact and therefore blocks scoring.
+`final-adjudicated-transcript.schema.json`. Its `transcribable-speech`
+disposition is authoritative for the reviewed `speakerId`, `language`,
+`startMs`, `endMs`, and `finalText` tuple. Its
+`no-transcribable-speech` disposition contains no transcript, speaker, or
+semantic fields and instead binds the source media to validated
+`voice-activity.v1.json` evidence. VAD, diarization, voiceprint, LID, ASR, and
+semantic candidate metrics remain useful diagnostics, but no individual
+front-model result can authorize release. Missing or incomplete semantic
+processing, open review work, an invalid no-speech disposition, or a broken
+source hash blocks the final artifact and therefore blocks scoring.
 
 The default local provider implementation is loopback-only and rejects
 redirects, but transport policy is enforced by the backend rather than by JSON

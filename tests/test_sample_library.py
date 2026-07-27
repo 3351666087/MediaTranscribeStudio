@@ -10,7 +10,9 @@ from backend import (
     MappingLocalLLMProvider,
     SemanticProcessingRunner,
     build_final_adjudicated_transcript,
+    build_final_no_speech_adjudication,
 )
+from backend.voice_activity import build_voice_activity
 from tools.sample_library import (
     SampleLibraryError,
     edit_distance,
@@ -193,6 +195,53 @@ def _write_adjudicated_fixture(
     return result_path, output
 
 
+def _write_no_speech_adjudicated_fixture(
+    tmp_path: Path,
+    *,
+    tamper_voice_hash: bool = False,
+) -> tuple[Path, Path]:
+    output = tmp_path / "outputs" / "no-speech"
+    output.mkdir(parents=True)
+    voice = build_voice_activity(
+        job_id="no-speech",
+        source_sha256="b" * 64,
+        media_duration_ms=5_000,
+        normalization_profile="mono-16khz-f32-v1",
+        provider={"id": "FunASR", "version": "1.2.0"},
+        windows=(),
+        minimum_window_ms=120,
+        classification="no-speech-candidates-detected",
+        has_transcribable_speech=False,
+    )
+    final = build_final_no_speech_adjudication(voice)
+    if tamper_voice_hash:
+        final["input"]["voiceActivitySha256"] = "0" * 64
+    voice_path = output / "voice-activity.v1.json"
+    final_path = output / "final-adjudicated-transcript.v1.json"
+    voice_path.write_text(json.dumps(voice), encoding="utf-8")
+    final_path.write_text(json.dumps(final), encoding="utf-8")
+    result_path = tmp_path / "no-speech-result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "status": "observed",
+                "terminal_type": "job.completed",
+                "terminal_event": {
+                    "payload": {
+                        "hasTranscribableSpeech": False,
+                        "artifactPaths": [
+                            str(voice_path),
+                            str(final_path),
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return result_path, output
+
+
 def test_manifest_covers_languages_and_scenarios() -> None:
     manifest = load_manifest(SPEC)
     assert manifest.max_duration_seconds <= 30
@@ -328,9 +377,11 @@ def test_formal_acceptance_scores_only_hash_bound_final_segments(
     assert report["textQuality"]["werOrCer"] > 0.0
     acceptance = report["postSemanticAcceptance"]
     assert acceptance["artifactValid"] is True
+    assert acceptance["disposition"] == "transcribable-speech"
     assert acceptance["status"] == "not-approved-threshold-profile-missing"
     assert acceptance["releaseApproved"] is False
     metrics = acceptance["metrics"]
+    assert metrics["speechPresence"]["match"] is True
     assert metrics["finalText"]["hypothesisAuthority"] == "finalText"
     assert metrics["finalText"]["werOrCer"] == 0.0
     assert metrics["jointTranscription"]["hypothesisTextAuthority"] == (
@@ -498,6 +549,124 @@ def test_formal_acceptance_blocks_final_artifact_hash_tampering(
     assert acceptance["error"]["code"] == (
         "FINAL_ADJUDICATION_BINDING_INVALID"
     )
+
+
+def test_formal_acceptance_scores_hash_bound_no_speech_disposition(
+    tmp_path: Path,
+) -> None:
+    result_path, output = _write_no_speech_adjudicated_fixture(tmp_path)
+
+    report = evaluate_case(
+        case={
+            "id": "no-speech",
+            "expectedLexicalSpeech": False,
+            "truthEligibility": {"voiceActivity": True},
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="no-speech",
+    )
+
+    assert report["evidence"]["transcript"] == (
+        "not-applicable-no-speech"
+    )
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["artifactValid"] is True
+    assert acceptance["disposition"] == "no-transcribable-speech"
+    assert acceptance["acceptanceSubject"] == "lexical-speech-presence"
+    assert acceptance["semanticStatus"] == "not-applicable-no-speech"
+    assert acceptance["openReviewCount"] == 0
+    assert acceptance["status"] == "not-approved-threshold-profile-missing"
+    assert acceptance["missingReferenceTruth"] == []
+    assert acceptance["metrics"]["speechPresence"] == {
+        "authority": "final-adjudicated-disposition",
+        "eligible": True,
+        "truthSource": "expectedLexicalSpeech",
+        "expectedLexicalSpeech": False,
+        "detectedTranscribableSpeech": False,
+        "classification": "no-speech-candidates-detected",
+        "match": True,
+    }
+    assert acceptance["metrics"]["speakerCount"] is None
+    assert acceptance["metrics"]["finalText"] is None
+    assert acceptance["artifactPath"] == str(
+        output / "final-adjudicated-transcript.v1.json"
+    )
+
+
+def test_formal_acceptance_rejects_no_speech_voice_hash_tampering(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_no_speech_adjudicated_fixture(
+        tmp_path,
+        tamper_voice_hash=True,
+    )
+
+    report = evaluate_case(
+        case={"id": "no-speech", "expectedLexicalSpeech": False},
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="no-speech",
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["status"] == "blocked"
+    assert acceptance["blockingReasons"] == [
+        "final-artifact-binding-invalid"
+    ]
+    assert acceptance["error"]["code"] == (
+        "FINAL_ADJUDICATION_BINDING_INVALID"
+    )
+
+
+def test_formal_acceptance_hard_fails_missed_lexical_speech(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_no_speech_adjudicated_fixture(tmp_path)
+
+    report = evaluate_case(
+        case={"id": "no-speech", "expectedLexicalSpeech": True},
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="no-speech",
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["artifactValid"] is True
+    assert acceptance["status"] == "not-approved-hard-domain-failure"
+    assert acceptance["releaseApproved"] is False
+    assert acceptance["missingReferenceTruth"] == []
+    assert acceptance["blockingReasons"] == ["speech-presence-mismatch"]
+    assert acceptance["metrics"]["speechPresence"]["match"] is False
+
+
+def test_formal_acceptance_hard_fails_false_lexical_speech(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(tmp_path)
+
+    report = evaluate_case(
+        case={
+            "id": "adjudicated",
+            "expectedLexicalSpeech": False,
+            "expectedSpeakerCount": 2,
+            "scoringTranscript": "alpha beta",
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["artifactValid"] is True
+    assert acceptance["status"] == "not-approved-hard-domain-failure"
+    assert acceptance["releaseApproved"] is False
+    assert acceptance["blockingReasons"] == ["speech-presence-mismatch"]
+    assert acceptance["metrics"]["speechPresence"]["match"] is False
 
 
 def test_evaluator_preserves_source_and_split_buckets() -> None:

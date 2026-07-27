@@ -10,9 +10,12 @@ from backend import (
     SemanticProcessingRunner,
     WorkerError,
     build_final_adjudicated_transcript,
+    build_final_no_speech_adjudication,
     validate_final_adjudicated_transcript,
+    validate_final_no_speech_adjudication,
 )
 from backend.persistence import canonical_json_sha256
+from backend.voice_activity import build_voice_activity
 
 
 def _document() -> dict:
@@ -136,7 +139,9 @@ def test_builds_hash_bound_final_scoring_subject() -> None:
 
     final = build_final_adjudicated_transcript(document, queue, semantic)
 
+    assert final["schemaVersion"] == "1.1.0"
     assert final["status"] == "adjudication-complete"
+    assert final["disposition"] == "transcribable-speech"
     assert final["acceptanceSubject"] == "speaker-language-time-final-text"
     assert final["finalTextAuthority"] == "normalizedText"
     assert final["input"] == {
@@ -215,3 +220,64 @@ def test_validation_rejects_final_text_or_review_rebinding() -> None:
             expected_review_queue=changed_queue,
             expected_semantic_artifact=semantic,
         )
+
+
+def test_builds_hash_bound_no_speech_final_subject_without_transcript() -> None:
+    voice = build_voice_activity(
+        job_id="no-speech-fixture",
+        source_sha256="b" * 64,
+        media_duration_ms=5_000,
+        normalization_profile="mono-16khz-f32-v1",
+        provider={"id": "FunASR", "version": "1.2.0"},
+        windows=(),
+        minimum_window_ms=120,
+        classification="no-speech-candidates-detected",
+        has_transcribable_speech=False,
+    )
+
+    final = build_final_no_speech_adjudication(voice)
+
+    assert final["schemaVersion"] == "1.1.0"
+    assert final["disposition"] == "no-transcribable-speech"
+    assert final["acceptanceSubject"] == "lexical-speech-presence"
+    assert final["segments"] == []
+    assert "documentId" not in final
+    assert "semantic" not in final
+    assert "review" not in final
+    assert "speakerPolicy" not in final
+    assert "finalTextAuthority" not in final
+    assert final["input"] == {
+        "sourceMediaSha256": "b" * 64,
+        "voiceActivitySha256": canonical_json_sha256(voice),
+    }
+
+    tampered = copy.deepcopy(final)
+    tampered["voiceActivity"]["speechDurationMs"] = 1
+    with pytest.raises(
+        WorkerError,
+        match="summary does not match voice evidence",
+    ):
+        validate_final_no_speech_adjudication(
+            tampered,
+            expected_voice_activity=voice,
+        )
+
+
+def test_no_speech_final_refuses_transcribable_voice_activity() -> None:
+    voice = build_voice_activity(
+        job_id="speech-fixture",
+        source_sha256="c" * 64,
+        media_duration_ms=5_000,
+        normalization_profile="mono-16khz-f32-v1",
+        provider={"id": "FunASR", "version": "1.2.0"},
+        windows=({"id": "vad-1", "startMs": 0, "endMs": 5_000},),
+        minimum_window_ms=120,
+        classification="transcribable-speech-detected",
+        has_transcribable_speech=True,
+    )
+
+    with pytest.raises(
+        WorkerError,
+        match="requires a non-transcribable disposition",
+    ):
+        build_final_no_speech_adjudication(voice)

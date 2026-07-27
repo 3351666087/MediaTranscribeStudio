@@ -36,7 +36,9 @@ from .documents import (
 from .errors import JobCancelled, WorkerError, invalid_request
 from .final_adjudication import (
     build_final_adjudicated_transcript,
+    build_final_no_speech_adjudication,
     validate_final_adjudicated_transcript,
+    validate_final_no_speech_adjudication,
 )
 from .local_llm import LocalLLMConfig, LocalLLMProvider, OllamaLocalProvider
 from .language import normalize_language_tag
@@ -2735,6 +2737,42 @@ class WorkerService:
             )
         return artifact
 
+    def _persist_final_no_speech_adjudication(
+        self,
+        record: JobRecord,
+        voice_activity: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        final_path = (
+            record.request.output_directory
+            / "final-adjudicated-transcript.v1.json"
+        )
+        created = False
+        if final_path.exists():
+            artifact = validate_final_no_speech_adjudication(
+                read_json_strict(final_path),
+                expected_voice_activity=voice_activity,
+            )
+        else:
+            artifact = build_final_no_speech_adjudication(voice_activity)
+            atomic_write_json_no_replace(final_path, artifact)
+            created = True
+        final_text = str(final_path)
+        if final_text not in record.artifact_paths:
+            record.artifact_paths.append(final_text)
+        if created:
+            self._emit(
+                record,
+                "artifact.created",
+                {
+                    "artifactType": "final-adjudicated-transcript-v1",
+                    "path": final_text,
+                    "sha256": canonical_json_sha256(artifact),
+                    "disposition": artifact["disposition"],
+                    "acceptanceSubject": artifact["acceptanceSubject"],
+                },
+            )
+        return artifact
+
     def _heartbeat_loop(
         self,
         record: JobRecord,
@@ -3261,6 +3299,8 @@ class WorkerService:
                 "no-speech completion cannot claim transcribable speech",
             )
         self._persist_voice_activity(record, normalized, context)
+        context.raise_if_cancelled()
+        self._persist_final_no_speech_adjudication(record, normalized)
         with record.lock:
             if record.business_status in {"pending", "running"}:
                 record.business_status = "not-applicable-no-speech"

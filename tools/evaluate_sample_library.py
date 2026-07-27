@@ -24,6 +24,7 @@ from backend.language import normalize_language_tag
 from backend.errors import WorkerError
 from backend.final_adjudication import (
     validate_final_adjudicated_transcript,
+    validate_final_no_speech_adjudication,
 )
 from backend.pipeline_metrics import (
     ReferenceTurn,
@@ -34,6 +35,7 @@ from backend.speaker_timeline import (
     speaker_timeline_turns,
     validate_speaker_timeline,
 )
+from backend.voice_activity import validate_voice_activity
 from tools.sample_library import tokenize_for_score, word_error_rate
 
 _MEETEVAL_VERSION = "0.4.3"
@@ -153,7 +155,7 @@ def _review_quality(transcript_path: Path) -> dict[str, Any] | None:
 
 def _final_adjudication_path(
     result: Mapping[str, Any],
-    transcript_path: Path,
+    output_directory: Path,
 ) -> Path:
     terminal = result.get("terminal_event")
     payload = terminal.get("payload") if isinstance(terminal, Mapping) else None
@@ -166,7 +168,61 @@ def _final_adjudication_path(
                 == "final-adjudicated-transcript.v1.json"
             ):
                 return Path(value)
-    return transcript_path.parent / "final-adjudicated-transcript.v1.json"
+    return output_directory / "final-adjudicated-transcript.v1.json"
+
+
+def _voice_activity_path(
+    result: Mapping[str, Any],
+    output_directory: Path,
+) -> Path:
+    terminal = result.get("terminal_event")
+    payload = terminal.get("payload") if isinstance(terminal, Mapping) else None
+    paths = payload.get("artifactPaths") if isinstance(payload, Mapping) else None
+    if isinstance(paths, list):
+        for value in paths:
+            if (
+                isinstance(value, str)
+                and Path(value).name == "voice-activity.v1.json"
+            ):
+                return Path(value)
+    return output_directory / "voice-activity.v1.json"
+
+
+def _expected_lexical_speech(
+    case: Mapping[str, Any],
+) -> tuple[bool | None, str | None]:
+    expected = case.get("expectedLexicalSpeech")
+    if isinstance(expected, bool):
+        return expected, "expectedLexicalSpeech"
+    if (
+        str(
+            case.get("scoringTranscript")
+            or case.get("expectedTranscript")
+            or ""
+        ).strip()
+        or isinstance(case.get("referenceTranscriptTurns"), list)
+        and bool(case["referenceTranscriptTurns"])
+    ):
+        return True, "reference-transcript-truth"
+    return None, None
+
+
+def _speech_presence_quality(
+    *,
+    case: Mapping[str, Any],
+    detected: bool,
+    classification: str,
+) -> dict[str, Any]:
+    expected, truth_source = _expected_lexical_speech(case)
+    return {
+        "authority": "final-adjudicated-disposition",
+        "eligible": expected is not None,
+        "truthSource": truth_source,
+        "expectedLexicalSpeech": expected,
+        "detectedTranscribableSpeech": detected,
+        "classification": classification,
+        "match": detected == expected if expected is not None else None,
+    }
 
 
 def _language_root(value: object) -> str | None:
@@ -1388,7 +1444,7 @@ def _post_semantic_acceptance(
     transcript_path: Path,
     transcript: Mapping[str, Any],
 ) -> dict[str, Any]:
-    final_path = _final_adjudication_path(result, transcript_path)
+    final_path = _final_adjudication_path(result, transcript_path.parent)
     review_path = transcript_path.parent / "review" / "review-queue.json"
     semantic_path = (
         transcript_path.parent / "semantic" / "semantic-suggestions.v1.json"
@@ -1551,7 +1607,14 @@ def _post_semantic_acceptance(
         case=case,
         final_text=final_text,
     )
+    speech_presence = _speech_presence_quality(
+        case=case,
+        detected=True,
+        classification="transcribable-speech-detected",
+    )
     missing_truth: list[str] = []
+    if speech_presence["eligible"] is not True:
+        missing_truth.append("speech-presence-truth")
     if not speaker_count_eligible:
         missing_truth.append("speaker-count-truth")
     if diarization is None:
@@ -1578,6 +1641,7 @@ def _post_semantic_acceptance(
         missing_truth.append("annotated-factual-truth")
     runtime = _runtime_quality(transcript_path)
     metrics = {
+        "speechPresence": speech_presence,
         "speakerCount": speaker_count_quality,
         "diarization": diarization,
         "boundary": boundary,
@@ -1597,8 +1661,16 @@ def _post_semantic_acceptance(
         "review": validated["review"],
         "runtimeResources": runtime,
     }
+    hard_failures = (
+        ["speech-presence-mismatch"]
+        if speech_presence["eligible"] is True
+        and speech_presence["match"] is False
+        else []
+    )
     status = (
-        "not-scored-missing-reference-truth"
+        "not-approved-hard-domain-failure"
+        if hard_failures
+        else "not-scored-missing-reference-truth"
         if missing_truth
         else "not-approved-threshold-profile-missing"
     )
@@ -1608,15 +1680,133 @@ def _post_semantic_acceptance(
         "releaseApproved": False,
         "artifactPath": str(final_path),
         "artifactValid": True,
+        "disposition": validated["disposition"],
         "acceptanceSubject": validated["acceptanceSubject"],
         "finalTextAuthority": validated["finalTextAuthority"],
         "semanticStatus": validated["semantic"]["status"],
         "openReviewCount": validated["review"]["openCount"],
         "missingReferenceTruth": missing_truth,
         "blockingReasons": (
-            ["missing-reference-truth"]
-            if missing_truth
-            else ["acceptance-threshold-profile-missing"]
+            hard_failures
+            or (
+                ["missing-reference-truth"]
+                if missing_truth
+                else ["acceptance-threshold-profile-missing"]
+            )
+        ),
+        "metrics": metrics,
+    }
+
+
+def _no_speech_post_semantic_acceptance(
+    *,
+    case: Mapping[str, Any],
+    result: Mapping[str, Any],
+    output_directory: Path,
+) -> dict[str, Any]:
+    final_path = _final_adjudication_path(result, output_directory)
+    voice_path = _voice_activity_path(result, output_directory)
+    missing = []
+    if not final_path.is_file():
+        missing.append("final-adjudicated-transcript-missing")
+    if not voice_path.is_file():
+        missing.append("voice-activity-missing")
+    if missing:
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=missing,
+        )
+    final = _read_json(final_path)
+    voice = _read_json(voice_path)
+    invalid = [
+        label
+        for label, value in (
+            ("final-adjudicated-transcript-invalid-json", final),
+            ("voice-activity-invalid-json", voice),
+        )
+        if value is None
+    ]
+    if invalid:
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=invalid,
+        )
+    assert final is not None
+    assert voice is not None
+    try:
+        normalized_voice = validate_voice_activity(voice)
+        validated = validate_final_no_speech_adjudication(
+            final,
+            expected_voice_activity=normalized_voice,
+        )
+    except WorkerError as exc:
+        return _blocked_post_semantic_acceptance(
+            final_path=final_path,
+            reasons=["final-artifact-binding-invalid"],
+            error=exc.as_payload(),
+        )
+    speech_presence = _speech_presence_quality(
+        case=case,
+        detected=False,
+        classification=str(
+            validated["voiceActivity"]["classification"]
+        ),
+    )
+    missing_truth = (
+        [] if speech_presence["eligible"] is True
+        else ["speech-presence-truth"]
+    )
+    hard_failures = (
+        ["speech-presence-mismatch"]
+        if speech_presence["eligible"] is True
+        and speech_presence["match"] is False
+        else []
+    )
+    status = (
+        "not-approved-hard-domain-failure"
+        if hard_failures
+        else "not-scored-missing-reference-truth"
+        if missing_truth
+        else "not-approved-threshold-profile-missing"
+    )
+    metrics = {
+        "speechPresence": speech_presence,
+        "speakerCount": None,
+        "diarization": None,
+        "boundary": None,
+        "finalText": None,
+        "jointTranscription": None,
+        "language": None,
+        "codeSwitch": None,
+        "factualIntegrity": None,
+        "overlap": None,
+        "review": {
+            "status": "not-applicable-no-speech",
+            "openCount": 0,
+        },
+        "runtimeResources": _runtime_quality(
+            output_directory / "transcript-document.v2.json"
+        ),
+    }
+    return {
+        "authority": "final-adjudicated-transcript.v1",
+        "status": status,
+        "releaseApproved": False,
+        "artifactPath": str(final_path),
+        "artifactValid": True,
+        "disposition": validated["disposition"],
+        "acceptanceSubject": validated["acceptanceSubject"],
+        "finalTextAuthority": None,
+        "semanticStatus": "not-applicable-no-speech",
+        "openReviewCount": 0,
+        "missingReferenceTruth": missing_truth,
+        "blockingReasons": (
+            hard_failures
+            or (
+                ["missing-reference-truth"]
+                if missing_truth
+                else ["acceptance-threshold-profile-missing"]
+            )
         ),
         "metrics": metrics,
     }
@@ -1631,6 +1821,7 @@ def evaluate_case(
     artifact_id: str,
 ) -> dict[str, Any]:
     result = _read_json(result_path)
+    output_directory = worker_output_root / artifact_id
     base: dict[str, Any] = {
         "id": case["id"],
         "sourceId": case.get("sourceId"),
@@ -1647,8 +1838,7 @@ def evaluate_case(
         },
         "postSemanticAcceptance": _blocked_post_semantic_acceptance(
             final_path=(
-                worker_output_root
-                / artifact_id
+                output_directory
                 / "final-adjudicated-transcript.v1.json"
             ),
             reasons=["result-or-final-adjudication-missing"],
@@ -1666,10 +1856,27 @@ def evaluate_case(
         )
     transcript_path = _transcript_path(result)
     if transcript_path is None or not transcript_path.is_file():
-        base["evidence"] = {"transcript": "missing"}
-        base["subtitleQuality"] = _subtitle_quality(
-            worker_output_root / artifact_id
+        acceptance = _no_speech_post_semantic_acceptance(
+            case=case,
+            result=result,
+            output_directory=output_directory,
         )
+        base["evidence"] = {
+            "transcript": (
+                "not-applicable-no-speech"
+                if acceptance.get("artifactValid") is True
+                and acceptance.get("disposition")
+                == "no-transcribable-speech"
+                else "missing"
+            ),
+            "voiceActivity": str(
+                _voice_activity_path(result, output_directory)
+            ),
+        }
+        base["subtitleQuality"] = _subtitle_quality(
+            output_directory
+        )
+        base["postSemanticAcceptance"] = acceptance
         return base
     transcript = _read_json(transcript_path)
     if transcript is None:
@@ -1847,7 +2054,7 @@ def evaluate_case(
     base["runtimeQuality"] = _runtime_quality(transcript_path)
     base["reviewQuality"] = _review_quality(transcript_path)
     base["subtitleQuality"] = _subtitle_quality(
-        worker_output_root / artifact_id
+        output_directory
     )
     base["postSemanticAcceptance"] = _post_semantic_acceptance(
         case=case,
@@ -2101,7 +2308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     report = {
-        "schemaVersion": "1.3.0",
+        "schemaVersion": "1.4.0",
         "libraryId": resolved.get("libraryId"),
         "cases": reports,
         "summary": {
@@ -2110,6 +2317,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             "statuses": _value_counts(reports, "status"),
             "terminalTypes": _value_counts(reports, "terminalType"),
             "errorCodes": _value_counts(reports, "errorCode"),
+            "speechPresenceScored": sum(
+                _post_metric(item, "speechPresence", "eligible") is True
+                for item in reports
+            ),
+            "speechPresenceMatched": sum(
+                _post_metric(item, "speechPresence", "match") is True
+                for item in reports
+            ),
+            "finalDispositions": {
+                disposition: sum(
+                    isinstance(
+                        item.get("postSemanticAcceptance"),
+                        Mapping,
+                    )
+                    and item["postSemanticAcceptance"].get("disposition")
+                    == disposition
+                    for item in reports
+                )
+                for disposition in sorted(
+                    {
+                        str(item["postSemanticAcceptance"]["disposition"])
+                        for item in reports
+                        if isinstance(
+                            item.get("postSemanticAcceptance"),
+                            Mapping,
+                        )
+                        and item["postSemanticAcceptance"].get(
+                            "disposition"
+                        )
+                        is not None
+                    }
+                )
+            },
             "languageScored": sum(
                 _post_metric(item, "language", "eligible") is True
                 for item in reports

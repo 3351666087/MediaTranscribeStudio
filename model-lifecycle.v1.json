@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "1.0.0",
+  "minimumFreeBytes": 8589934592,
+  "productionConfigPaths": [
+    {
+      "path": "production.config.example.json",
+      "required": true
+    },
+    {
+      "path": "production.config.json",
+      "required": false
+    },
+    {
+      "path": "production.pyannote-eval.config.json",
+      "required": false
+    }
+  ],
+  "ollamaModels": [
+    {
+      "name": "qwen3.5:9b",
+      "status": "active"
+    },
+    {
+      "name": "qwen3.5:4b",
+      "status": "retired"
+    },
+    {
+      "name": "qwen2.5:1.5b",
+      "status": "retired"
+    }
+  ],
+  "scratchPolicies": [
+    {
+      "path": ".runtime_cache/tmp",
+      "maxAgeDays": 7
+    },
+    {
+      "path": ".runtime_cache/test-tmp",
+      "maxAgeDays": 7
+    }
+  ]
+}

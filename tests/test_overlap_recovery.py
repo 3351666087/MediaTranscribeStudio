@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from backend import production_runners
 from backend.adapters import AdapterContext
 from backend.asr_evidence import build_asr_candidate_set
 from backend.models import SpeakerScore, TranscriptSegment
@@ -188,6 +189,19 @@ def _clusters() -> _ClusterResult:
 
 
 def _primary_segment() -> TranscriptSegment:
+    full_timeline = {
+        "scope": "full-normalized-timeline",
+        "startMs": 0,
+        "endMs": 4000,
+        "turnCount": 2,
+        "localSpeakerCount": 2,
+        "localSpeakers": ["A", "B"],
+        "speakerTurns": [
+            {"startMs": 0, "endMs": 2000, "localSpeaker": "A"},
+            {"startMs": 2000, "endMs": 4000, "localSpeaker": "B"},
+        ],
+        "speakerTurnsSha256": "a" * 64,
+    }
     return TranscriptSegment(
         segment_id="source-1",
         start_ms=0,
@@ -202,6 +216,9 @@ def _primary_segment() -> TranscriptSegment:
             SpeakerScore("speaker-2", 0.0),
         ),
         speaker_margin=1.0,
+        evidence={
+            "overlap": {"fullTimelineInference": full_timeline}
+        },
     )
 
 
@@ -269,6 +286,9 @@ def test_guarded_overlap_recovery_publishes_only_aligned_secondary_channel(
         "contextPublishedAsSpeech"
     ] is False
     assert recovered.evidence["overlapRecovery"]["asrMaxNewTokens"] == 34
+    assert recovered.evidence["overlap"]["fullTimelineInference"] == (
+        _primary_segment().evidence["overlap"]["fullTimelineInference"]
+    )
     policy = metrics.as_dict()["policy"]
     assert policy["overlapRecoveryAsrCandidateCount"] == 1
     assert policy["overlapRecoveryAsrMinTokenBudgetApplied"] == 34
@@ -293,6 +313,7 @@ def test_guarded_overlap_recovery_publishes_only_aligned_secondary_channel(
 
 def test_mossformer_adapter_writes_two_hash_bound_full_length_channels(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     source = tmp_path / "source.wav"
     samples = np.linspace(-0.25, 0.25, 32_000, dtype=np.float32)
@@ -316,11 +337,30 @@ def test_mossformer_adapter_writes_two_hash_bound_full_length_channels(
 
     class Separator:
         def __call__(self, mixture):
+            import torch
+
+            assert torch.is_inference_mode_enabled()
             return np.stack((mixture, -mixture), axis=0)
 
     adapter = LocalMossFormer2SeparationAdapter(
         model_path=model_path,
         separator_factory=lambda **_: Separator(),
+    )
+    pcm_buffer_id = production_runners._pcm_buffer_key(
+        fingerprint,
+        source,
+    )
+    production_runners._SHARED_PCM_STORE.put(
+        pcm_buffer_id,
+        samples,
+        16_000,
+    )
+    monkeypatch.setattr(
+        production_runners,
+        "_load_audio",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("separator must reuse the shared PCM buffer")
+        ),
     )
     context = AdapterContext(
         job_id="separator-test",
@@ -347,6 +387,7 @@ def test_mossformer_adapter_writes_two_hash_bound_full_length_channels(
         path = Path(channel.audio_path)
         assert channel.channel_index == index
         assert channel.duration_ms == 2000
+        assert channel.evidence["pcmBufferId"] == pcm_buffer_id
         assert path.is_file()
         assert hashlib.sha256(path.read_bytes()).hexdigest() == (
             channel.audio_sha256
@@ -354,3 +395,4 @@ def test_mossformer_adapter_writes_two_hash_bound_full_length_channels(
         output, sample_rate = sf.read(path, always_2d=False)
         assert sample_rate == 16_000
         assert output.shape == samples.shape
+    production_runners._SHARED_PCM_STORE.clear()

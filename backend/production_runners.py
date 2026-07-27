@@ -3237,11 +3237,11 @@ class LocalMossFormer2SeparationAdapter:
                 "numpy and soundfile are required for overlap separation",
             ) from exc
         try:
-            samples, sample_rate = sf.read(
-                prepared.audio_path,
-                dtype="float32",
-                always_2d=False,
+            samples, sample_rate, pcm_buffer_id = _shared_pcm_for_prepared(
+                prepared
             )
+        except WorkerError:
+            raise
         except Exception as exc:
             raise WorkerError(
                 "MOSSFORMER2_AUDIO_READ_FAILED",
@@ -3266,6 +3266,13 @@ class LocalMossFormer2SeparationAdapter:
         )
         output_root.mkdir(parents=True, exist_ok=True)
         model = self._model()
+        try:
+            import torch
+        except ImportError as exc:
+            raise WorkerError(
+                "MOSSFORMER2_RUNTIME_MISSING",
+                "MossFormer2 requires PyTorch for bounded inference",
+            ) from exc
         output: list[SeparatedSpeechChannel] = []
         for interval in intervals:
             context.raise_if_cancelled()
@@ -3283,11 +3290,12 @@ class LocalMossFormer2SeparationAdapter:
                     details={"intervalId": interval.interval_id},
                 )
             try:
-                with self._inference_lock:
-                    separated = self._decode(
-                        model,
-                        mixture.reshape(1, -1),
-                    )
+                with torch.inference_mode():
+                    with self._inference_lock:
+                        separated = self._decode(
+                            model,
+                            mixture.reshape(1, -1),
+                        )
             except WorkerError:
                 raise
             except Exception as exc:
@@ -3372,6 +3380,7 @@ class LocalMossFormer2SeparationAdapter:
                                 interval.detected_start_ms
                             ),
                             "detectedEndMs": interval.detected_end_ms,
+                            "pcmBufferId": pcm_buffer_id,
                             "rms": rms,
                         },
                     )

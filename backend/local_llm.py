@@ -65,7 +65,7 @@ class LocalLLMConfig:
 
     model: str = "qwen3.5:9b"
     endpoint: str = "http://127.0.0.1:11434"
-    timeout_seconds: float = 180.0
+    timeout_seconds: float = 300.0
     temperature: float = 0.0
     top_p: float = 0.1
     context_tokens: int = 8192

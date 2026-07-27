@@ -9093,6 +9093,33 @@ class SpeakerPipeline:
             max(24, estimated),
         )
 
+    @staticmethod
+    def _shared_full_timeline_inference(
+        segments: Sequence[TranscriptSegment],
+    ) -> Mapping[str, Any] | None:
+        serialized: str | None = None
+        shared: Mapping[str, Any] | None = None
+        for segment in segments:
+            overlap = segment.evidence.get("overlap")
+            full_timeline = (
+                overlap.get("fullTimelineInference")
+                if isinstance(overlap, Mapping)
+                else None
+            )
+            if not isinstance(full_timeline, Mapping):
+                return None
+            current = json.dumps(
+                full_timeline,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if serialized is not None and current != serialized:
+                return None
+            serialized = current
+            shared = full_timeline
+        return dict(shared) if shared is not None else None
+
     def _recover_overlap_speech(
         self,
         *,
@@ -9198,6 +9225,9 @@ class SpeakerPipeline:
         interval_by_id = {
             interval.interval_id: interval for interval in intervals
         }
+        full_timeline_inference = self._shared_full_timeline_inference(
+            segments
+        )
         centroids = self._canonical_centroids(embeddings, clusters)
         gated: list[
             tuple[
@@ -9465,6 +9495,15 @@ class SpeakerPipeline:
                                         ),
                                     }
                                 ],
+                                **(
+                                    {
+                                        "fullTimelineInference": (
+                                            full_timeline_inference
+                                        )
+                                    }
+                                    if full_timeline_inference is not None
+                                    else {}
+                                ),
                             },
                             "overlapRecovery": {
                                 "provider": _adapter_identity(

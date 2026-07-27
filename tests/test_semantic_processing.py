@@ -177,6 +177,7 @@ def test_response_schema_binds_each_segment_to_its_evidence_domain() -> None:
         "",
         "nbest-2",
     ]
+    assert result["properties"]["confidence"] == {"type": "number"}
     assert result["properties"]["evidenceRefs"]["items"]["enum"] == [
         "segment:segment-1",
         "speaker-score:segment-1:speaker-1",
@@ -270,7 +271,7 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
         "plannedBatchCount": 1,
         "plannedMaxBatchSize": 3,
         "contextTokenBudget": 3072,
-        "maxEstimatedInputTokens": 2669,
+        "maxEstimatedInputTokens": 2664,
         "suggestionCount": 2,
         "speakerSuggestionCount": 1,
         "textSuggestionCount": 1,
@@ -540,6 +541,38 @@ def test_unsupported_lexical_change_and_human_lock_conflict_are_rejected() -> No
     )
     assert queue["items"][0]["reasonCode"] == "SEMANTIC_PROCESSING_FAILED"
     assert queue["items"][0]["rejections"] == artifact["rejections"]
+
+
+def test_invalid_confidence_rejects_only_the_affected_batch_result() -> None:
+    invalid = _keep("segment-3", "speaker-2", "Acknowledged")
+    invalid["confidence"] = 2.0
+    artifact = SemanticProcessingRunner(
+        provider=MappingLocalLLMProvider(
+            [
+                {
+                    "results": [
+                        _keep("segment-1", "speaker-1", "I can go"),
+                        _keep("segment-2", "speaker-1", "Hello world"),
+                        invalid,
+                    ]
+                }
+            ]
+        ),
+        model="fixture",
+        batch_size=3,
+    ).run(_document())
+
+    assert artifact["status"] == "partial"
+    assert artifact["failures"] == []
+    assert artifact["metrics"]["acceptedResultCount"] == 2
+    assert artifact["metrics"]["rejectionCount"] == 1
+    assert artifact["rejections"] == [
+        {
+            "segmentId": "segment-3",
+            "code": "SEMANTIC_RESPONSE_INVALID",
+            "message": "semantic confidence must be finite and between 0 and 1",
+        }
+    ]
 
 
 def test_provider_failure_is_durable_and_adds_a_review_blocker() -> None:

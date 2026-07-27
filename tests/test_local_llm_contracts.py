@@ -232,6 +232,10 @@ def test_ollama_provider_sends_strict_json_chat_request(
     ]
 
 
+def test_default_local_llm_timeout_matches_bounded_acceptance_runner() -> None:
+    assert LocalLLMConfig().timeout_seconds == 300.0
+
+
 def test_ollama_provider_sends_a_strict_response_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

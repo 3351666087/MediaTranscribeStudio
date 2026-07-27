@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
+MAX_END_ROUNDING_TOLERANCE_MS = 1
 
 
 def _request() -> dict[str, Any]:
@@ -74,6 +75,29 @@ def _speaker_count_kwargs(value: Any) -> dict[str, int]:
             "max_speakers": maximum,
         }
     raise ValueError("speakerCountConstraints uses unsupported fields")
+
+
+def _sample_bounds(
+    *,
+    start_ms: int,
+    end_ms: int,
+    sample_rate: int,
+    frame_count: int,
+) -> tuple[int, int]:
+    first_sample = round(start_ms * sample_rate / 1000)
+    last_sample = round(end_ms * sample_rate / 1000)
+    if first_sample < 0 or first_sample >= frame_count:
+        raise ValueError("inference interval exceeds audio")
+    if last_sample > frame_count:
+        tolerance_samples = math.ceil(
+            sample_rate * MAX_END_ROUNDING_TOLERANCE_MS / 1000
+        )
+        if last_sample - frame_count > tolerance_samples:
+            raise ValueError("inference interval exceeds audio")
+        last_sample = frame_count
+    if last_sample <= first_sample:
+        raise ValueError("inference interval is empty")
+    return first_sample, last_sample
 
 
 def _annotation(result: Any, *, field: str) -> Any:
@@ -190,13 +214,13 @@ def run() -> dict[str, Any]:
         )
         if sample_rate != 16_000 or samples.shape[1] != 1:
             raise ValueError("audio must be mono 16 kHz")
-        first_sample = round(start_ms * sample_rate / 1000)
-        last_sample = round(end_ms * sample_rate / 1000)
-        if first_sample < 0 or last_sample > samples.shape[0]:
-            raise ValueError("inference interval exceeds audio")
+        first_sample, last_sample = _sample_bounds(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            sample_rate=sample_rate,
+            frame_count=samples.shape[0],
+        )
         clip = samples[first_sample:last_sample, 0]
-        if clip.size == 0:
-            raise ValueError("inference interval is empty")
         pipeline = Pipeline.from_pretrained(str(model_path))
         pipeline.to(torch.device(device.strip()))
         result = pipeline(

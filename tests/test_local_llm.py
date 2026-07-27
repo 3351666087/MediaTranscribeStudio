@@ -34,10 +34,13 @@ class _RecordingOpener:
     def __init__(self, body: bytes) -> None:
         self.body = body
         self.calls = 0
+        self.requests: list[object] = []
+        self.timeouts: list[float] = []
 
     def open(self, request: object, *, timeout: float) -> _FakeResponse:
-        del request, timeout
         self.calls += 1
+        self.requests.append(request)
+        self.timeouts.append(timeout)
         return _FakeResponse(self.body)
 
 
@@ -137,6 +140,60 @@ def test_context_preflight_accepts_exact_boundary_and_blocks_overflow_transport(
             model="boundary-model",
         )
     assert opener.calls == 1
+
+
+def test_stage_scoped_provider_keeps_model_warm_then_unloads_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, opener = _provider_with_body(
+        monkeypatch,
+        _envelope({"answer": "ok"}, done=True),
+        config=LocalLLMConfig(
+            model="stage-model",
+            timeout_seconds=120,
+            keep_alive="5m",
+            release_on_close=True,
+        ),
+    )
+
+    assert provider.generate_json(
+        system_prompt="system",
+        user_prompt="user",
+        model="stage-model",
+    ) == {"answer": "ok"}
+    provider.release_resources()
+    provider.release_resources()
+
+    assert opener.calls == 2
+    generation_request, release_request = opener.requests
+    assert generation_request.full_url == "http://127.0.0.1:11434/api/chat"
+    assert json.loads(generation_request.data)["keep_alive"] == "5m"
+    assert release_request.full_url == "http://127.0.0.1:11434/api/generate"
+    assert json.loads(release_request.data) == {
+        "model": "stage-model",
+        "keep_alive": 0,
+        "stream": False,
+    }
+    assert opener.timeouts == [120, 30.0]
+
+
+def test_worker_scoped_provider_release_does_not_unload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, opener = _provider_with_body(
+        monkeypatch,
+        _envelope({"answer": "unused"}, done=True),
+        config=LocalLLMConfig(keep_alive="10m", release_on_close=False),
+    )
+
+    provider.release_resources()
+
+    assert opener.calls == 0
+
+
+def test_release_on_close_must_be_boolean() -> None:
+    with pytest.raises(ValueError, match="release_on_close"):
+        LocalLLMConfig(release_on_close=1)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ import ipaddress
 import json
 import math
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,6 +59,9 @@ class LocalLLMProvider(Protocol):
     ) -> Mapping[str, Any]:
         """Generate one strict JSON object and return it as a mapping."""
 
+    def release_resources(self) -> None:
+        """Release provider-owned resources when its configured scope ends."""
+
 
 @dataclass(frozen=True)
 class LocalLLMConfig:
@@ -71,6 +75,7 @@ class LocalLLMConfig:
     context_tokens: int = 8192
     output_tokens: int = 1024
     keep_alive: str = "10m"
+    release_on_close: bool = False
     offline_only: bool = True
 
     def __post_init__(self) -> None:
@@ -103,6 +108,8 @@ class LocalLLMConfig:
             raise ValueError(
                 "local LLM keep_alive must be 0, -1, or a bounded duration"
             )
+        if not isinstance(self.release_on_close, bool):
+            raise ValueError("local LLM release_on_close must be boolean")
         if self.offline_only is not True:
             raise ValueError(
                 "offline_only must remain enabled for the local LLM boundary"
@@ -388,6 +395,8 @@ class OllamaLocalProvider:
             ),
         )
         self._opener = urllib.request.build_opener(_RejectRedirectHandler())
+        self._release_lock = threading.Lock()
+        self._released = False
         self._generation_metrics = {
             "completedCalls": 0,
             "totalDurationNanoseconds": 0,
@@ -545,6 +554,53 @@ class OllamaLocalProvider:
         self._record_generation_metrics(envelope)
         return result
 
+    def release_resources(self) -> None:
+        """Explicitly unload a stage-scoped model through the loopback API."""
+
+        if not self.config.release_on_close:
+            return
+        with self._release_lock:
+            if self._released:
+                return
+            endpoint = self.config.endpoint.rstrip("/") + "/api/generate"
+            try:
+                _assert_loopback_endpoint(endpoint)
+            except ValueError as exc:
+                raise LocalLLMError(
+                    "local LLM release endpoint is not loopback-only"
+                ) from exc
+            request = urllib.request.Request(
+                endpoint,
+                data=json.dumps(
+                    {
+                        "model": self.config.model,
+                        "keep_alive": 0,
+                        "stream": False,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with self._opener.open(
+                    request,
+                    timeout=min(self.config.timeout_seconds, 30.0),
+                ) as response:
+                    _assert_loopback_response_url(response, endpoint)
+                    response.read()
+            except LocalLLMError:
+                raise
+            except (OSError, urllib.error.URLError) as exc:
+                raise LocalLLMError(
+                    "loopback local LLM resource release failed"
+                ) from exc
+            self._released = True
+
 
 class MappingLocalLLMProvider:
     """Small deterministic provider useful for tests and offline fixtures."""
@@ -574,6 +630,9 @@ class MappingLocalLLMProvider:
         if not self._responses:
             raise LocalLLMError("mapping provider has no remaining responses")
         return parse_strict_json_object(self._responses.pop(0))
+
+    def release_resources(self) -> None:
+        return None
 
 
 __all__ = [

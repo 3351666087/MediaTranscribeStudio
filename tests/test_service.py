@@ -431,6 +431,13 @@ def test_required_semantic_stage_persists_suggestion_without_mutating_transcript
                 }
             ]
         )
+        release_calls = 0
+
+        def release_resources() -> None:
+            nonlocal release_calls
+            release_calls += 1
+
+        provider.release_resources = release_resources  # type: ignore[method-assign]
         transcription = result_mapping(1)
         transcription["segments"][0].update(
             {
@@ -494,6 +501,7 @@ def test_required_semantic_stage_persists_suggestion_without_mutating_transcript
             "normalizedText": "这是第1位说话人的中文原文。",
             "displayText": "这是第1位说话人的中文原文。",
         }
+        assert release_calls == 1
         service.shutdown()
 
 
@@ -1111,18 +1119,26 @@ def test_business_variants_run_after_review_and_preserve_transcript() -> None:
 
 
 class _CancelledBusinessRunner:
+    def __init__(self) -> None:
+        self.release_calls = 0
+
     def run(self, document, *, output_directory, config):
         del document, output_directory, config
         raise JobCancelled()
+
+    def release_resources(self) -> None:
+        self.release_calls += 1
+        raise RuntimeError("release failed after cancellation")
 
 
 def test_business_cancellation_remains_job_cancelled() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
+        runner = _CancelledBusinessRunner()
         service = _service(
             root,
             adapter=FakeTranscriptionAdapter(result_mapping(1)),
-            runner_factory=lambda request, context: _CancelledBusinessRunner(),
+            runner_factory=lambda request, context: runner,
         )
         started = service.start(
             {
@@ -1139,6 +1155,45 @@ def test_business_cancellation_remains_job_cancelled() -> None:
         final = service.wait(started["jobId"], timeout=5)
         assert final["status"] == "cancelled"
         assert final["business"]["status"] == "cancelled"
+        assert runner.release_calls == 1
+        service.shutdown()
+
+
+class _ReleaseFailingBusinessRunner:
+    def run(self, document, *, output_directory, config):
+        del document, output_directory, config
+        return ()
+
+    def release_resources(self) -> None:
+        raise RuntimeError("release failed")
+
+
+def test_business_release_failure_fails_closed_after_successful_run() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            runner_factory=lambda request, context: _ReleaseFailingBusinessRunner(),
+        )
+        started = service.start(
+            {
+                "jobId": "business-release-failure",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "language": "zh-CN",
+                "localLlmMode": "business",
+                "summary": True,
+            }
+        )
+
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "failed"
+        assert final["business"]["status"] == "failed"
+        assert final["error"]["code"] == "BUSINESS_RESOURCE_RELEASE_FAILED"
         service.shutdown()
 
 

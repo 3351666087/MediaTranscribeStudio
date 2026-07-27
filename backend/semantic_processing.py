@@ -1004,6 +1004,11 @@ class SemanticProcessingRunner:
         self.output_tokens = resolved_output
         self.input_token_budget = resolved_context - resolved_output
 
+    def release_resources(self) -> None:
+        release = getattr(self.provider, "release_resources", None)
+        if callable(release):
+            release()
+
     def _check_cancelled(self) -> None:
         check = self.cancellation_check
         if check is None:

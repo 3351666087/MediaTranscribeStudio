@@ -463,8 +463,10 @@ class ProductionCompositionTests(unittest.TestCase):
         semantic_provider = service.kwargs["semantic_provider_factory"](request)
         self.assertEqual(business_provider.config.keep_alive, "10m")
         self.assertEqual(semantic_provider.config.keep_alive, "10m")
+        self.assertFalse(business_provider.config.release_on_close)
+        self.assertFalse(semantic_provider.config.release_on_close)
 
-    def test_stage_residency_uses_short_local_llm_keep_alive(self) -> None:
+    def test_stage_residency_stays_warm_and_explicitly_releases(self) -> None:
         config = self.load()
         config = replace(
             config,
@@ -501,8 +503,10 @@ class ProductionCompositionTests(unittest.TestCase):
         business_provider = service.kwargs["business_provider_factory"](request)
         semantic_provider = service.kwargs["semantic_provider_factory"](request)
 
-        self.assertEqual(business_provider.config.keep_alive, "1s")
-        self.assertEqual(semantic_provider.config.keep_alive, "1s")
+        self.assertEqual(business_provider.config.keep_alive, "5m")
+        self.assertEqual(semantic_provider.config.keep_alive, "5m")
+        self.assertTrue(business_provider.config.release_on_close)
+        self.assertTrue(semantic_provider.config.release_on_close)
 
     def test_real_config_builds_real_speaker_pipeline_config(self) -> None:
         config = self.load(pyannote_mode="fallback")

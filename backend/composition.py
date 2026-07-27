@@ -214,9 +214,8 @@ def build_production_composition(
         ffprobe_command=(ffprobe_command,),
         ffmpeg_command=(config.executables.ffmpeg,),
     )
-    local_llm_keep_alive = (
-        "1s" if config.runtime.model_residency == "stage" else "10m"
-    )
+    local_llm_stage_residency = config.runtime.model_residency == "stage"
+    local_llm_keep_alive = "5m" if local_llm_stage_residency else "10m"
     service = factories.service(
         path_policy=PathPolicy(
             allowed_input_roots=config.paths.allowed_input_roots,
@@ -244,6 +243,7 @@ def build_production_composition(
                 model=request.business_config.model,
                 endpoint=request.local_llm_endpoint,
                 keep_alive=local_llm_keep_alive,
+                release_on_close=local_llm_stage_residency,
             )
         ),
         semantic_provider_factory=lambda request: OllamaLocalProvider(
@@ -251,6 +251,7 @@ def build_production_composition(
                 model=config.speaker.local_llm_model,
                 endpoint=request.local_llm_endpoint,
                 keep_alive=local_llm_keep_alive,
+                release_on_close=local_llm_stage_residency,
             )
         ),
         semantic_required=True,

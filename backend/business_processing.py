@@ -2793,6 +2793,11 @@ class BusinessProcessingRunner:
         self.provider = provider
         self.cancellation_check = cancellation_check
 
+    def release_resources(self) -> None:
+        release = getattr(self.provider, "release_resources", None)
+        if callable(release):
+            release()
+
     def run(
         self,
         document: Mapping[str, Any],

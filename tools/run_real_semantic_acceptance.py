@@ -41,7 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-tokens", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=3)
     parser.add_argument("--speaker-top-k", type=int, default=3)
-    parser.add_argument("--keep-alive", default="1s")
+    parser.add_argument("--keep-alive", default="5m")
+    parser.add_argument(
+        "--release-on-close",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--replace", action="store_true")
     return parser
 
@@ -72,15 +77,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             context_tokens=args.context_tokens,
             output_tokens=args.output_tokens,
             keep_alive=args.keep_alive,
+            release_on_close=args.release_on_close,
         )
     )
-    started = time.monotonic()
-    artifact = SemanticProcessingRunner(
+    runner = SemanticProcessingRunner(
         provider=provider,
         model=args.model,
         batch_size=args.batch_size,
         speaker_top_k=args.speaker_top_k,
-    ).run(document)
+    )
+    started = time.monotonic()
+    try:
+        artifact = runner.run(document)
+    except BaseException as primary_error:
+        try:
+            runner.release_resources()
+        except Exception as release_error:
+            primary_error.add_note(
+                "semantic stage resource release also failed: "
+                f"{type(release_error).__name__}"
+            )
+        raise
+    runner.release_resources()
     elapsed = time.monotonic() - started
     after = read_json_strict(transcript)
     after_canonical_sha = canonical_json_sha256(after)
@@ -113,6 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "batchSize": args.batch_size,
             "speakerTopK": args.speaker_top_k,
             "keepAlive": args.keep_alive,
+            "releaseOnClose": args.release_on_close,
         },
         "metrics": artifact["metrics"],
         "sourceUnchanged": after_canonical_sha == source_canonical_sha,

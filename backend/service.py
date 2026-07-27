@@ -2339,6 +2339,26 @@ class WorkerService:
             return value.strip()
         return "MediaTranscribeStudio subtitles"
 
+    @staticmethod
+    def _release_stage_runner_resources(runner: Any, *, stage: str) -> None:
+        release = getattr(runner, "release_resources", None)
+        if not callable(release):
+            return
+        try:
+            release()
+        except Exception as exc:
+            code = (
+                "SEMANTIC_RESOURCE_RELEASE_FAILED"
+                if stage == "semantic_processing"
+                else "BUSINESS_RESOURCE_RELEASE_FAILED"
+            )
+            raise WorkerError(
+                code,
+                f"{stage} could not release its local model resources",
+                details={"exceptionType": type(exc).__name__},
+                retryable=True,
+            ) from exc
+
     def _business_runner(
         self,
         record: JobRecord,
@@ -2422,7 +2442,25 @@ class WorkerService:
                 / "semantic"
                 / "semantic-suggestions.v1.json"
             )
-            artifact = self._semantic_runner(record, context).run(document)
+            runner = self._semantic_runner(record, context)
+            try:
+                artifact = runner.run(document)
+            except BaseException as primary_error:
+                try:
+                    self._release_stage_runner_resources(
+                        runner,
+                        stage="semantic_processing",
+                    )
+                except Exception as release_error:
+                    primary_error.add_note(
+                        "semantic_processing resource release also failed: "
+                        f"{type(release_error).__name__}"
+                    )
+                raise
+            self._release_stage_runner_resources(
+                runner,
+                stage="semantic_processing",
+            )
             queue = attach_semantic_suggestions_to_review(
                 document,
                 review_queue,
@@ -2511,10 +2549,27 @@ class WorkerService:
         )
         try:
             runner = self._business_runner(record, context)
-            paths = runner.run(
-                document,
-                output_directory=record.request.output_directory,
-                config=config,
+            try:
+                paths = runner.run(
+                    document,
+                    output_directory=record.request.output_directory,
+                    config=config,
+                )
+            except BaseException as primary_error:
+                try:
+                    self._release_stage_runner_resources(
+                        runner,
+                        stage="business_processing",
+                    )
+                except Exception as release_error:
+                    primary_error.add_note(
+                        "business_processing resource release also failed: "
+                        f"{type(release_error).__name__}"
+                    )
+                raise
+            self._release_stage_runner_resources(
+                runner,
+                stage="business_processing",
             )
             context.raise_if_cancelled()
             if canonical_json_sha256(document) != before_hash:

@@ -4174,6 +4174,13 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         ):
             SpeakerPipelineConfig(pyannote_mode="audit")
 
+    def test_retired_local_model_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "production model qwen3.5:9b",
+        ):
+            SpeakerPipelineConfig(local_llm_model="qwen3.5:4b")
+
     def test_fail_closed_review_evidence_and_queue_reasons(self) -> None:
         for window_count, expected_exit in (
             (2, "SECONDARY_BUDGET_EXHAUSTED"),

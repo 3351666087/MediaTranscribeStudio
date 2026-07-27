@@ -581,7 +581,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             render_pdf=True,
             language="auto",
             local_llm_mode="business",
-            local_llm_model="qwen3.5:4b",
+            local_llm_model="qwen3.5:9b",
             local_llm_endpoint="http://127.0.0.1:11434",
             local_llm_endpoint_policy="loopback-only",
             translation_targets=("en-US", "ja-JP"),
@@ -593,7 +593,7 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
         self.assertTrue(payload["renderPdf"])
         self.assertEqual(payload["language"], "auto")
         self.assertEqual(payload["localLlmMode"], "business")
-        self.assertEqual(payload["localLlmModel"], "qwen3.5:4b")
+        self.assertEqual(payload["localLlmModel"], "qwen3.5:9b")
         self.assertEqual(
             payload["translationTargets"],
             ["en-US", "ja-JP"],

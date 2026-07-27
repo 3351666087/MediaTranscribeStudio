@@ -21,7 +21,7 @@ function validCreateRequest(): CreateJobRequest {
     strategyId: "balanced",
     language: "sr-Latn-RS",
     localLlmMode: "business",
-    localLlmModel: "qwen3.5:4b",
+  localLlmModel: "qwen3.5:9b",
     localLlmEndpoint: "http://127.0.0.1:11434",
     localLlmEndpointPolicy: "loopback-only",
     localLlmAutoApply: false,

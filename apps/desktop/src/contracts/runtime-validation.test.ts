@@ -75,7 +75,7 @@ function validCreateRequest(
     strategyId: "balanced",
     language: "auto",
     localLlmMode: "disabled",
-    localLlmModel: "qwen3.5:4b",
+    localLlmModel: "qwen3.5:9b",
     localLlmEndpoint: "http://127.0.0.1:11434",
     localLlmEndpointPolicy: "loopback-only",
     localLlmAutoApply: false,
@@ -313,17 +313,17 @@ describe("dynamic speaker runtime validation", () => {
     });
   });
 
-  it("requires every strategy to publish the rejected local semantic-model verdict", () => {
+  it("requires every strategy to publish the guarded semantic-model policy", () => {
     const parsed = parseStudioSnapshot(structuredClone(studioFixture));
 
     parsed.strategies.forEach((strategy) => {
-      expect(strategy.semanticModel).toBe("qwen3.5:4b");
-      expect(strategy.semanticModelStatus).toBe("reject_for_production");
+      expect(strategy.semanticModel).toBe("qwen3.5:9b");
+      expect(strategy.semanticModelStatus).toBe("suggestion_only");
       expect(strategy.semanticModelEvaluation).toContain(
-        "the local semantic model is disabled",
+        "required for fail-closed semantic arbitration",
       );
       expect(strategy.semanticGuardrail).toContain(
-        "cannot auto-edit transcript text or speakers",
+        "cannot create speakers",
       );
     });
   });
@@ -337,18 +337,18 @@ describe("dynamic speaker runtime validation", () => {
       expected: /semanticModelStatus/u,
     },
     {
-      label: "non-rejected status",
+      label: "unsafe status",
       mutate: (strategy: Record<string, unknown>) => {
         strategy.semanticModelStatus = "production_ready";
       },
-      expected: /reject_for_production/u,
+      expected: /suggestion_only/u,
     },
     {
       label: "different model",
       mutate: (strategy: Record<string, unknown>) => {
-        strategy.semanticModel = "qwen3.5:9b";
+        strategy.semanticModel = "qwen3.5:4b";
       },
-      expected: /qwen3\.5:4b/u,
+      expected: /qwen3\.5:9b/u,
     },
     {
       label: "empty evaluation",
@@ -1044,6 +1044,15 @@ describe("dynamic speaker runtime validation", () => {
       assertCreateJobRequest(validCreateRequest(hybrid, labels.slice(0, -1))),
     ).toThrow(
       /accepts either an empty label list or exactly 8 speaker labels/u,
+    );
+  });
+
+  it("rejects a retired local model in production requests", () => {
+    const request = validCreateRequest({ mode: "auto" }, []);
+    request.localLlmModel = "qwen3.5:4b";
+
+    expect(() => assertCreateJobRequest(request)).toThrow(
+      /must be exactly "qwen3\.5:9b"/u,
     );
   });
 });

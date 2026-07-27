@@ -362,7 +362,7 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
                 "speakerCount": 1,
                 "language": "ja-JP",
                 "localLlmMode": "business",
-                "localLlmModel": "qwen3.5:4b",
+                "localLlmModel": "qwen3.5:9b",
                 "localLlmEndpoint": "http://127.0.0.1:11434",
                 "localLlmEndpointPolicy": "loopback-only",
                 "translationTargets": ["en"],
@@ -375,6 +375,29 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
         assert request.business_config.output_locale == "en-US"
         assert request.language == "ja-JP"
         assert request.local_llm_endpoint == "http://127.0.0.1:11434"
+        service.shutdown()
+
+
+def test_start_payload_rejects_retired_local_model() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        service = _service(
+            Path(temporary),
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+        )
+        with pytest.raises(
+            WorkerError,
+            match="production model qwen3.5:9b",
+        ):
+            service.parse_start_payload(
+                {
+                    "jobId": "retired-model",
+                    "sourcePath": "source.wav",
+                    "outputDirectory": "job",
+                    "speakerCountMode": "manual",
+                    "speakerCount": 1,
+                    "localLlmModel": "qwen3.5:4b",
+                }
+            )
         service.shutdown()
 
 

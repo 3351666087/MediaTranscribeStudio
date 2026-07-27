@@ -354,9 +354,9 @@ class WorkerService:
         if not isinstance(local_llm_model_raw, str):
             raise invalid_request("localLlmModel must be a string")
         local_llm_model = local_llm_model_raw.strip() or "qwen3.5:9b"
-        if not local_llm_model or len(local_llm_model) > 160:
+        if local_llm_model != "qwen3.5:9b":
             raise invalid_request(
-                "localLlmModel must be a non-empty string of at most 160 characters"
+                "localLlmModel must identify the production model qwen3.5:9b"
             )
         endpoint_raw = payload.get(
             "localLlmEndpoint", "http://127.0.0.1:11434"

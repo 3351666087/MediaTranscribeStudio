@@ -618,7 +618,7 @@ export function TaskCreator({
     isListedLanguage(outputLocale, OUTPUT_LOCALE_PRESETS);
   const localRuntimeValid =
     !businessEnabled ||
-    (localLlmModel.trim().length > 0 &&
+    (localLlmModel.trim() === DEFAULT_LOCAL_MODEL &&
       /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/.*)?$/u.test(
         localLlmEndpoint.trim(),
       ));
@@ -2054,6 +2054,9 @@ export function TaskCreator({
                           value={localLlmModel}
                           spellCheck={false}
                           autoComplete="off"
+                          aria-invalid={
+                            localLlmModel.trim() !== DEFAULT_LOCAL_MODEL
+                          }
                           onChange={(event) =>
                             setLocalLlmModel(event.target.value)
                           }

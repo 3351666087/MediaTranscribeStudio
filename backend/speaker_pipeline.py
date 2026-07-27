@@ -1305,9 +1305,9 @@ class SpeakerPipelineConfig:
             raise ValueError(
                 "local_llm_mode must be disabled or suggestion-only; auto_apply is forbidden"
             )
-        if self.local_llm_model not in {"qwen3.5:4b", "qwen3.5:9b"}:
+        if self.local_llm_model != "qwen3.5:9b":
             raise ValueError(
-                "local_llm_model must identify qwen3.5:9b or qwen3.5:4b"
+                "local_llm_model must identify the production model qwen3.5:9b"
             )
         if self.model_residency not in {"stage", "worker"}:
             raise ValueError("model_residency must be stage or worker")

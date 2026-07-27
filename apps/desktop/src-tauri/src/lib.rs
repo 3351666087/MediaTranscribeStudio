@@ -31,6 +31,7 @@ use worker_supervisor::{
 const CONTRACT_VERSION: &str = "1.6.0";
 const JS_MAX_SAFE_INTEGER: usize = 9_007_199_254_740_991usize;
 const LOCAL_LLM_ENDPOINT_POLICY: &str = "loopback-only";
+const PRODUCTION_LOCAL_LLM_MODEL: &str = "qwen3.5:9b";
 const BUSINESS_PROMPT_VERSION: &str = "business-v1";
 const MAX_OUTPUT_CUSTOMIZATION_BYTES: usize = 256 * 1024;
 static NEXT_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -1061,6 +1062,12 @@ fn validate_loopback_endpoint(value: &str, field: &str) -> IpcResult<()> {
 fn validate_business_processing(request: &CreateJobRequest) -> IpcResult<()> {
     validate_language_tag(&request.language, "language", true)?;
     validate_text(&request.local_llm_model, "localLlmModel", 160, false)?;
+    if request.local_llm_model.trim() != PRODUCTION_LOCAL_LLM_MODEL {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            format!("localLlmModel must be {PRODUCTION_LOCAL_LLM_MODEL}."),
+        ));
+    }
     validate_loopback_endpoint(&request.local_llm_endpoint, "localLlmEndpoint")?;
     if request.local_llm_endpoint_policy != LOCAL_LLM_ENDPOINT_POLICY {
         return Err(IpcError::new(
@@ -7000,11 +7007,11 @@ fn default_strategies() -> Vec<ModelStrategy> {
             description: "CAM++ dynamic clustering, Qwen3-ASR, and FunASR boundaries work together; difficult segments enter local human review.".to_owned(),
             asr_model: "Qwen3-ASR-1.7B".to_owned(),
             diarization_model: "CAM++ · dynamic clustering".to_owned(),
-            semantic_model: "qwen3.5:4b".to_owned(),
-            semantic_model_status: "reject_for_production".to_owned(),
-            semantic_model_evaluation: "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
+            semantic_model_status: "suggestion_only".to_owned(),
+            semantic_model_evaluation: "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.".to_owned(),
             estimated_vram_gb: 7.2,
-            semantic_guardrail: "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_guardrail: "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.".to_owned(),
             recommended: Some(true),
         },
         ModelStrategy {
@@ -7013,11 +7020,11 @@ fn default_strategies() -> Vec<ModelStrategy> {
             description: "Difficult segments receive local reruns, a second overlap pass, and human listening while preserving the full acoustic evidence chain.".to_owned(),
             asr_model: "Qwen3-ASR-1.7B · dual-window review".to_owned(),
             diarization_model: "CAM++ · second overlap pass".to_owned(),
-            semantic_model: "qwen3.5:4b".to_owned(),
-            semantic_model_status: "reject_for_production".to_owned(),
-            semantic_model_evaluation: "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
+            semantic_model_status: "suggestion_only".to_owned(),
+            semantic_model_evaluation: "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.".to_owned(),
             estimated_vram_gb: 8.0,
-            semantic_guardrail: "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_guardrail: "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.".to_owned(),
             recommended: None,
         },
         ModelStrategy {
@@ -7026,11 +7033,11 @@ fn default_strategies() -> Vec<ModelStrategy> {
             description: "Reduces VRAM use while retaining acoustic anomaly escalation, local audio review, and human confirmation.".to_owned(),
             asr_model: "SenseVoiceSmall".to_owned(),
             diarization_model: "CAM++ · CPU clustering".to_owned(),
-            semantic_model: "qwen3.5:4b".to_owned(),
-            semantic_model_status: "reject_for_production".to_owned(),
-            semantic_model_evaluation: "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
+            semantic_model_status: "suggestion_only".to_owned(),
+            semantic_model_evaluation: "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.".to_owned(),
             estimated_vram_gb: 4.4,
-            semantic_guardrail: "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_guardrail: "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.".to_owned(),
             recommended: None,
         },
     ]
@@ -7513,7 +7520,7 @@ mod tests {
             speaker_labels,
             language: "auto".to_owned(),
             local_llm_mode: LocalLlmMode::Disabled,
-            local_llm_model: "qwen3.5:4b".to_owned(),
+            local_llm_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
             local_llm_endpoint: "http://127.0.0.1:11434".to_owned(),
             local_llm_endpoint_policy: LOCAL_LLM_ENDPOINT_POLICY.to_owned(),
             local_llm_auto_apply: false,
@@ -7527,6 +7534,20 @@ mod tests {
 
     fn valid_manual_request(root: &Path, count: usize) -> CreateJobRequest {
         valid_request_with_policy(root, SpeakerCountPolicy::Manual { count }, labels(count))
+    }
+
+    #[test]
+    fn rejects_retired_local_model() {
+        let root = temp_workspace("retired-local-model");
+        let mut request = valid_manual_request(&root, 1);
+        request.local_llm_model = "qwen3.5:4b".to_owned();
+
+        let error = match prepare_job(request) {
+            Ok(_) => panic!("retired local model must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains(PRODUCTION_LOCAL_LLM_MODEL));
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     fn labels(count: usize) -> Vec<String> {
@@ -8775,7 +8796,7 @@ mod tests {
             assert_eq!(payload["renderPdf"], true);
             assert_eq!(payload["language"], "auto");
             assert_eq!(payload["localLlmMode"], "disabled");
-            assert_eq!(payload["localLlmModel"], "qwen3.5:4b");
+            assert_eq!(payload["localLlmModel"], PRODUCTION_LOCAL_LLM_MODEL);
             assert_eq!(payload["localLlmAutoApply"], false);
         }
 

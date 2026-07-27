@@ -24,11 +24,11 @@
       "description": "CAM++ dynamic clustering, Qwen3-ASR, and FunASR boundaries work together; difficult segments enter local human review.",
       "asrModel": "Qwen3-ASR-1.7B",
       "diarizationModel": "CAM++ · dynamic clustering",
-      "semanticModel": "qwen3.5:4b",
-      "semanticModelStatus": "reject_for_production",
-      "semanticModelEvaluation": "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.",
+      "semanticModel": "qwen3.5:9b",
+      "semanticModelStatus": "suggestion_only",
+      "semanticModelEvaluation": "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.",
       "estimatedVramGb": 7.2,
-      "semanticGuardrail": "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers.",
+      "semanticGuardrail": "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.",
       "recommended": true
     },
     {
@@ -37,11 +37,11 @@
       "description": "Difficult segments receive local reruns, a second overlap pass, and human listening while preserving the full acoustic evidence chain.",
       "asrModel": "Qwen3-ASR-1.7B · dual-window review",
       "diarizationModel": "CAM++ · second overlap pass",
-      "semanticModel": "qwen3.5:4b",
-      "semanticModelStatus": "reject_for_production",
-      "semanticModelEvaluation": "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.",
+      "semanticModel": "qwen3.5:9b",
+      "semanticModelStatus": "suggestion_only",
+      "semanticModelEvaluation": "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.",
       "estimatedVramGb": 8.0,
-      "semanticGuardrail": "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers."
+      "semanticGuardrail": "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text."
     },
     {
       "id": "memory-saver",
@@ -49,11 +49,11 @@
       "description": "Reduces VRAM use while retaining acoustic anomaly escalation, local audio review, and human confirmation.",
       "asrModel": "SenseVoiceSmall",
       "diarizationModel": "CAM++ · CPU clustering",
-      "semanticModel": "qwen3.5:4b",
-      "semanticModelStatus": "reject_for_production",
-      "semanticModelEvaluation": "Production evaluation: the local semantic model is disabled and cannot auto-edit transcript text or speakers.",
+      "semanticModel": "qwen3.5:9b",
+      "semanticModelStatus": "suggestion_only",
+      "semanticModelEvaluation": "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.",
       "estimatedVramGb": 4.4,
-      "semanticGuardrail": "The local semantic model is disabled in production and cannot auto-edit transcript text or speakers."
+      "semanticGuardrail": "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text."
     }
   ],
   "stages": [

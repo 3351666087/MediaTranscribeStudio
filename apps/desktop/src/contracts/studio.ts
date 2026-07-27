@@ -134,7 +134,7 @@ export interface ModelStrategy {
   asrModel: string;
   diarizationModel: string;
   semanticModel: string;
-  semanticModelStatus: "reject_for_production";
+  semanticModelStatus: "suggestion_only";
   semanticModelEvaluation: string;
   estimatedVramGb: number;
   semanticGuardrail: string;

@@ -149,16 +149,16 @@ describe("MediaTranscribe Studio desktop scaffold", () => {
       .closest("section");
     expect(strategyPanel).not.toBeNull();
     expect(
-      within(strategyPanel as HTMLElement).getByText("qwen3.5:4b"),
+      within(strategyPanel as HTMLElement).getByText("qwen3.5:9b"),
     ).toBeInTheDocument();
     expect(
-      within(strategyPanel as HTMLElement).getByText("reject_for_production"),
+      within(strategyPanel as HTMLElement).getByText("suggestion_only"),
     ).toBeInTheDocument();
     expect(
-      within(strategyPanel as HTMLElement).getAllByText(
-        /local semantic model is disabled in production and cannot auto-edit transcript text or speakers/i,
-      ).length,
-    ).toBeGreaterThan(0);
+      within(strategyPanel as HTMLElement).getByText(
+        /qwen3\.5:9b is required for fail-closed semantic arbitration/i,
+      ),
+    ).toBeInTheDocument();
 
     const createTaskButton = screen.getByRole("button", { name: "Create task" });
     await user.click(createTaskButton);

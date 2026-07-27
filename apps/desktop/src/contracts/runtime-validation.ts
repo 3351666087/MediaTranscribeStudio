@@ -77,6 +77,7 @@ const REVIEW_REASONS = [
   "local_audio_review",
 ] as const;
 const STRATEGY_IDS = ["balanced", "quality", "memory-saver"] as const;
+const PRODUCTION_LOCAL_LLM_MODEL = "qwen3.5:9b";
 const STAGE_IDS = [
   "media",
   "vad",
@@ -1439,16 +1440,16 @@ export function parseStudioSnapshot(value: unknown): StudioSnapshot {
       min: 1,
       max: 256,
     });
-    if (item.semanticModel !== "qwen3.5:4b") {
+    if (item.semanticModel !== PRODUCTION_LOCAL_LLM_MODEL) {
       fail(
         `snapshot.strategies[${index}].semanticModel`,
-        "the production semantic model must remain fixed at qwen3.5:4b.",
+        `the production semantic model must remain fixed at ${PRODUCTION_LOCAL_LLM_MODEL}.`,
       );
     }
-    if (item.semanticModelStatus !== "reject_for_production") {
+    if (item.semanticModelStatus !== "suggestion_only") {
       fail(
         `snapshot.strategies[${index}].semanticModelStatus`,
-        "semanticModelStatus must be reject_for_production.",
+        "semanticModelStatus must be suggestion_only.",
       );
     }
     string(
@@ -1885,6 +1886,12 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     { min: 1, max: 256 },
   );
   ensureNoControlCharacters(localLlmModel, "createJobRequest.localLlmModel");
+  if (localLlmModel !== PRODUCTION_LOCAL_LLM_MODEL) {
+    fail(
+      "createJobRequest.localLlmModel",
+      `must be exactly "${PRODUCTION_LOCAL_LLM_MODEL}".`,
+    );
+  }
   loopbackEndpoint(
     request.localLlmEndpoint,
     "createJobRequest.localLlmEndpoint",

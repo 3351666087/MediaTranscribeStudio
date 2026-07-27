@@ -223,6 +223,16 @@ class ProductionCompositionTests(unittest.TestCase):
         ):
             ProductionConfig.load(self.config_path)
 
+    def test_retired_local_model_fails_closed(self) -> None:
+        value = self.mapping()
+        value["speaker"]["localLlmModel"] = "qwen3.5:4b"
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "speaker.localLlmModel",
+        ):
+            ProductionConfig.load(self.config_path)
+
     def test_pyannote_mode_and_model_must_agree(self) -> None:
         value = self.mapping(pyannote_mode="fallback")
         value["models"]["pyannote"] = None

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -454,6 +455,54 @@ class ProductionCompositionTests(unittest.TestCase):
             embedding.calls[0][1]["language_split_search_ms"],
             900,
         )
+        request = SimpleNamespace(
+            business_config=SimpleNamespace(model="qwen3.5:9b"),
+            local_llm_endpoint="http://127.0.0.1:11434",
+        )
+        business_provider = service.kwargs["business_provider_factory"](request)
+        semantic_provider = service.kwargs["semantic_provider_factory"](request)
+        self.assertEqual(business_provider.config.keep_alive, "10m")
+        self.assertEqual(semantic_provider.config.keep_alive, "10m")
+
+    def test_stage_residency_uses_short_local_llm_keep_alive(self) -> None:
+        config = self.load()
+        config = replace(
+            config,
+            runtime=replace(config.runtime, model_residency="stage"),
+        )
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        composition = build_production_composition(
+            config,
+            preflight_report=report,
+            factories=ProductionFactories(
+                preparation=RecordingFactory(),
+                asr=RecordingFactory(),
+                embedding=RecordingFactory(),
+                secondary=RecordingFactory(),
+                pyannote=RecordingFactory(),
+                cache=RecordingFactory(),
+                pipeline=FakePipeline,
+                assembler=RecordingFactory(),
+                java_client_from_jar=RecordingFactory(),
+                renderer=RecordingFactory(),
+                service=FakeService,
+            ),
+        )
+        request = SimpleNamespace(
+            business_config=SimpleNamespace(model="qwen3.5:9b"),
+            local_llm_endpoint="http://127.0.0.1:11434",
+        )
+        service = composition.service
+
+        business_provider = service.kwargs["business_provider_factory"](request)
+        semantic_provider = service.kwargs["semantic_provider_factory"](request)
+
+        self.assertEqual(business_provider.config.keep_alive, "1s")
+        self.assertEqual(semantic_provider.config.keep_alive, "1s")
 
     def test_real_config_builds_real_speaker_pipeline_config(self) -> None:
         config = self.load(pyannote_mode="fallback")

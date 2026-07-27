@@ -17,7 +17,8 @@ from backend import (
 from backend.persistence import canonical_json_sha256
 from backend.semantic_processing import (
     _segment_request,
-    _semantic_batch_response_schema,
+    _semantic_gate_response_schema,
+    _semantic_proposal_response_schema,
 )
 
 
@@ -105,6 +106,7 @@ def _result(
 ) -> dict:
     return {
         "segmentId": segment_id,
+        "decision": "propose",
         "speakerRanking": ranking,
         "normalizedText": text,
         "textEvidenceCandidateId": candidate_id,
@@ -115,13 +117,30 @@ def _result(
 
 
 def _keep(segment_id: str, speaker_id: str, text: str) -> dict:
-    other = "speaker-2" if speaker_id == "speaker-1" else "speaker-1"
-    return _result(
-        segment_id,
-        ranking=[speaker_id, other],
-        text=text,
-        evidence_refs=[f"segment:{segment_id}"],
-    )
+    del speaker_id, text
+    return {
+        "segmentId": segment_id,
+        "decision": "abstain",
+        "confidence": 0.8,
+    }
+
+
+def _scripted_responses(results: list[dict]) -> list[dict]:
+    gate_results = [
+        {
+            "segmentId": result["segmentId"],
+            "decision": result["decision"],
+            "confidence": result["confidence"],
+        }
+        for result in results
+    ]
+    proposals = [
+        result for result in results if result.get("decision") == "propose"
+    ]
+    responses = [{"results": gate_results}]
+    if proposals:
+        responses.append({"results": proposals})
+    return responses
 
 
 def _empty_queue() -> dict:
@@ -144,45 +163,132 @@ def _empty_queue() -> dict:
 def test_response_schema_binds_each_segment_to_its_evidence_domain() -> None:
     document = _document()
     first = document["segments"][0]
-    schema = _semantic_batch_response_schema(
-        [
+    request = {
+        "segmentId": first["id"],
+        "speakerCandidates": first["speakerScores"],
+        "asrNBest": [
             {
-                "segmentId": first["id"],
-                "speakerCandidates": first["speakerScores"],
-                "asrNBest": [
-                    {
-                        "candidateId": "nbest-2",
-                        "text": "I cannot go",
-                        "lexicalRepairEligible": True,
-                    }
-                ],
-                "allowedEvidenceRefs": [
-                    "segment:segment-1",
-                    "speaker-score:segment-1:speaker-1",
-                    "speaker-score:segment-1:speaker-2",
-                    "asr-nbest:segment-1:nbest-2",
-                ],
+                "candidateId": "nbest-2",
+                "text": "I cannot go",
+                "lexicalRepairEligible": True,
             }
+        ],
+        "allowedEvidenceRefs": [
+            "segment:segment-1",
+            "speaker-score:segment-1:speaker-1",
+            "speaker-score:segment-1:speaker-2",
+            "asr-nbest:segment-1:nbest-2",
+        ],
+    }
+    gate_schema = _semantic_gate_response_schema([request])
+    proposal_schema = _semantic_proposal_response_schema(
+        [
+            request,
         ]
     )
 
-    results = schema["properties"]["results"]
+    results = gate_schema["properties"]["results"]
     assert results["minItems"] == results["maxItems"] == 1
-    result = results["prefixItems"][0]
-    assert result["properties"]["segmentId"] == {"const": "segment-1"}
-    ranking = result["properties"]["speakerRanking"]
+    gate = results["prefixItems"][0]
+    assert gate["required"] == ["segmentId", "decision", "confidence"]
+    assert gate["properties"]["segmentId"] == {"const": "segment-1"}
+    assert gate["properties"]["decision"]["enum"] == ["abstain", "propose"]
+    proposal = proposal_schema["properties"]["results"]["prefixItems"][0]
+    assert proposal["properties"]["decision"] == {"const": "propose"}
+    ranking = proposal["properties"]["speakerRanking"]
     assert ranking["minItems"] == ranking["maxItems"] == 2
     assert ranking["items"]["enum"] == ["speaker-1", "speaker-2"]
-    assert result["properties"]["textEvidenceCandidateId"]["enum"] == [
+    assert proposal["properties"]["textEvidenceCandidateId"]["enum"] == [
         "",
         "nbest-2",
     ]
-    assert result["properties"]["confidence"] == {"type": "number"}
-    assert result["properties"]["evidenceRefs"]["items"]["enum"] == [
+    assert proposal["properties"]["confidence"] == {"type": "number"}
+    assert proposal["properties"]["evidenceRefs"]["items"]["enum"] == [
         "segment:segment-1",
         "speaker-score:segment-1:speaker-1",
         "speaker-score:segment-1:speaker-2",
         "asr-nbest:segment-1:nbest-2",
+    ]
+
+
+def test_abstention_schema_stays_minimal_and_deterministic() -> None:
+    artifact = SemanticProcessingRunner(
+        provider=MappingLocalLLMProvider(
+            [
+                {
+                    "results": [
+                        _keep("segment-1", "speaker-1", "I can go"),
+                        _keep("segment-2", "speaker-1", "Hello world"),
+                        _keep("segment-3", "speaker-2", "Acknowledged"),
+                    ]
+                }
+            ]
+        ),
+        model="fixture",
+        batch_size=3,
+    ).run(_document())
+
+    assert artifact["status"] == "completed"
+    assert artifact["suggestions"] == []
+    assert artifact["metrics"]["abstentionCount"] == 3
+
+
+def test_abstention_with_proposal_fields_is_rejected() -> None:
+    invalid = _keep("segment-1", "speaker-1", "I can go")
+    invalid["speakerRanking"] = ["speaker-1", "speaker-2"]
+    artifact = SemanticProcessingRunner(
+        provider=MappingLocalLLMProvider(
+            [
+                {
+                    "results": [
+                        invalid,
+                        _keep("segment-2", "speaker-1", "Hello world"),
+                        _keep("segment-3", "speaker-2", "Acknowledged"),
+                    ]
+                }
+            ]
+        ),
+        model="fixture",
+        batch_size=3,
+    ).run(_document())
+
+    assert artifact["status"] == "partial"
+    assert artifact["rejections"][0]["code"] == "SEMANTIC_RESPONSE_INVALID"
+
+
+def test_prompt_deduplicates_batch_neighbors_and_omits_validator_only_data() -> None:
+    document = _document()
+    requests = [
+        _segment_request(
+            document,
+            document["segments"],
+            index,
+            speaker_top_k=3,
+        )[0]
+        for index in range(2)
+    ]
+
+    prompt = SemanticProcessingRunner._user_prompt(requests)
+    payload = json.loads(prompt.split("input=", 1)[1])
+
+    assert [item["segmentId"] for item in payload["segments"]] == [
+        "segment-1",
+        "segment-2",
+    ]
+    assert [item["segmentId"] for item in payload["neighborContext"]] == [
+        "segment-3"
+    ]
+    assert all("neighbors" not in item for item in payload["segments"])
+    assert all("allowedEvidenceRefs" not in item for item in payload["segments"])
+    assert all(
+        "sourceSha256" not in item["tokenTimestampEvidence"]
+        for item in payload["segments"]
+    )
+    assert payload["evidenceRefTemplates"] == [
+        "segment:<segmentId>",
+        "speaker-score:<segmentId>:<speakerId>",
+        "asr-nbest:<segmentId>:<candidateId>",
+        "asr-tokens:<segmentId>",
     ]
 
 
@@ -232,28 +338,26 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
     document = _document()
     before = copy.deepcopy(document)
     provider = MappingLocalLLMProvider(
-        [
-            {
-                "results": [
-                    _result(
-                        "segment-1",
-                        ranking=["speaker-2", "speaker-1"],
-                        text="I can go",
-                        evidence_refs=[
-                            "segment:segment-1",
-                            "speaker-score:segment-1:speaker-2",
-                        ],
-                    ),
-                    _result(
-                        "segment-2",
-                        ranking=["speaker-1", "speaker-2"],
-                        text="Hello, world.",
-                        evidence_refs=["segment:segment-2"],
-                    ),
-                    _keep("segment-3", "speaker-2", "Acknowledged"),
-                ]
-            }
-        ]
+        _scripted_responses(
+            [
+                _result(
+                    "segment-1",
+                    ranking=["speaker-2", "speaker-1"],
+                    text="I can go",
+                    evidence_refs=[
+                        "segment:segment-1",
+                        "speaker-score:segment-1:speaker-2",
+                    ],
+                ),
+                _result(
+                    "segment-2",
+                    ranking=["speaker-1", "speaker-2"],
+                    text="Hello, world.",
+                    evidence_refs=["segment:segment-2"],
+                ),
+                _keep("segment-3", "speaker-2", "Acknowledged"),
+            ]
+        )
     )
 
     artifact = SemanticProcessingRunner(
@@ -266,12 +370,17 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
     assert artifact["status"] == "completed"
     assert artifact["metrics"] == {
         "segmentsEvaluated": 3,
-        "providerCalls": 1,
+        "providerCalls": 2,
+        "gateProviderCalls": 1,
+        "proposalProviderCalls": 1,
+        "gateProposalCount": 2,
         "contextSplitCount": 0,
         "plannedBatchCount": 1,
         "plannedMaxBatchSize": 3,
+        "proposalPlannedBatchCount": 1,
+        "proposalPlannedMaxBatchSize": 2,
         "contextTokenBudget": 3072,
-        "maxEstimatedInputTokens": 2664,
+        "maxEstimatedInputTokens": 1757,
         "suggestionCount": 2,
         "speakerSuggestionCount": 1,
         "textSuggestionCount": 1,
@@ -344,9 +453,9 @@ def test_token_budget_aware_packing_avoids_known_context_overflow() -> None:
     ).run(document)
 
     assert artifact["status"] == "completed"
-    assert provider.batch_sizes == [1, 1, 1]
-    assert artifact["metrics"]["plannedBatchCount"] == 3
-    assert artifact["metrics"]["plannedMaxBatchSize"] == 1
+    assert provider.batch_sizes == [3]
+    assert artifact["metrics"]["plannedBatchCount"] == 1
+    assert artifact["metrics"]["plannedMaxBatchSize"] == 3
     assert artifact["metrics"]["contextTokenBudget"] == 3_072
     assert artifact["metrics"]["maxEstimatedInputTokens"] <= 3_072
     assert artifact["metrics"]["contextSplitCount"] == 0
@@ -408,24 +517,22 @@ def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
     }
     document = _document(first_asr=nbest)
     provider = MappingLocalLLMProvider(
-        [
-            {
-                "results": [
-                    _result(
-                        "segment-1",
-                        ranking=["speaker-1", "speaker-2"],
-                        text="I cannot go",
-                        candidate_id="nbest-2",
-                        evidence_refs=[
-                            "segment:segment-1",
-                            "asr-nbest:segment-1:nbest-2",
-                        ],
-                    ),
-                    _keep("segment-2", "speaker-1", "Hello world"),
-                    _keep("segment-3", "speaker-2", "Acknowledged"),
-                ]
-            }
-        ]
+        _scripted_responses(
+            [
+                _result(
+                    "segment-1",
+                    ranking=["speaker-1", "speaker-2"],
+                    text="I cannot go",
+                    candidate_id="nbest-2",
+                    evidence_refs=[
+                        "segment:segment-1",
+                        "asr-nbest:segment-1:nbest-2",
+                    ],
+                ),
+                _keep("segment-2", "speaker-1", "Hello world"),
+                _keep("segment-3", "speaker-2", "Acknowledged"),
+            ]
+        )
     )
 
     artifact = SemanticProcessingRunner(
@@ -457,24 +564,22 @@ def test_lexical_repair_rejects_ineligible_nbest_candidate() -> None:
         }
     )
     provider = MappingLocalLLMProvider(
-        [
-            {
-                "results": [
-                    _result(
-                        "segment-1",
-                        ranking=["speaker-1", "speaker-2"],
-                        text="I cannot go",
-                        candidate_id="nbest-2",
-                        evidence_refs=[
-                            "segment:segment-1",
-                            "asr-nbest:segment-1:nbest-2",
-                        ],
-                    ),
-                    _keep("segment-2", "speaker-1", "Hello world"),
-                    _keep("segment-3", "speaker-2", "Acknowledged"),
-                ]
-            }
-        ]
+        _scripted_responses(
+            [
+                _result(
+                    "segment-1",
+                    ranking=["speaker-1", "speaker-2"],
+                    text="I cannot go",
+                    candidate_id="nbest-2",
+                    evidence_refs=[
+                        "segment:segment-1",
+                        "asr-nbest:segment-1:nbest-2",
+                    ],
+                ),
+                _keep("segment-2", "speaker-1", "Hello world"),
+                _keep("segment-3", "speaker-2", "Acknowledged"),
+            ]
+        )
     )
 
     artifact = SemanticProcessingRunner(
@@ -499,23 +604,21 @@ def test_unsupported_lexical_change_and_human_lock_conflict_are_rejected() -> No
     document = _document()
     document["segments"][0]["humanLocked"] = True
     provider = MappingLocalLLMProvider(
-        [
-            {
-                "results": [
-                    _result(
-                        "segment-1",
-                        ranking=["speaker-2", "speaker-1"],
-                        text="I invented words",
-                        evidence_refs=[
-                            "segment:segment-1",
-                            "speaker-score:segment-1:speaker-2",
-                        ],
-                    ),
-                    _keep("segment-2", "speaker-1", "Hello world"),
-                    _keep("segment-3", "speaker-2", "Acknowledged"),
-                ]
-            }
-        ]
+        _scripted_responses(
+            [
+                _result(
+                    "segment-1",
+                    ranking=["speaker-2", "speaker-1"],
+                    text="I invented words",
+                    evidence_refs=[
+                        "segment:segment-1",
+                        "speaker-score:segment-1:speaker-2",
+                    ],
+                ),
+                _keep("segment-2", "speaker-1", "Hello world"),
+                _keep("segment-3", "speaker-2", "Acknowledged"),
+            ]
+        )
     )
 
     artifact = SemanticProcessingRunner(
@@ -570,7 +673,7 @@ def test_invalid_confidence_rejects_only_the_affected_batch_result() -> None:
         {
             "segmentId": "segment-3",
             "code": "SEMANTIC_RESPONSE_INVALID",
-            "message": "semantic confidence must be finite and between 0 and 1",
+            "message": "semantic gate confidence must be finite and between 0 and 1",
         }
     ]
 
@@ -598,23 +701,21 @@ def test_provider_failure_is_durable_and_adds_a_review_blocker() -> None:
 def test_semantic_artifact_rejects_transcript_rebinding_and_raw_text_patch() -> None:
     document = _document()
     provider = MappingLocalLLMProvider(
-        [
-            {
-                "results": [
-                    _result(
-                        "segment-1",
-                        ranking=["speaker-2", "speaker-1"],
-                        text="I can go",
-                        evidence_refs=[
-                            "segment:segment-1",
-                            "speaker-score:segment-1:speaker-2",
-                        ],
-                    ),
-                    _keep("segment-2", "speaker-1", "Hello world"),
-                    _keep("segment-3", "speaker-2", "Acknowledged"),
-                ]
-            }
-        ]
+        _scripted_responses(
+            [
+                _result(
+                    "segment-1",
+                    ranking=["speaker-2", "speaker-1"],
+                    text="I can go",
+                    evidence_refs=[
+                        "segment:segment-1",
+                        "speaker-score:segment-1:speaker-2",
+                    ],
+                ),
+                _keep("segment-2", "speaker-1", "Hello world"),
+                _keep("segment-3", "speaker-2", "Acknowledged"),
+            ]
+        )
     )
     artifact = SemanticProcessingRunner(
         provider=provider,

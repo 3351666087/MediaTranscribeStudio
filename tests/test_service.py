@@ -410,6 +410,16 @@ def test_required_semantic_stage_persists_suggestion_without_mutating_transcript
                     "results": [
                         {
                             "segmentId": "segment-0001",
+                            "decision": "propose",
+                            "confidence": 0.82,
+                        }
+                    ]
+                },
+                {
+                    "results": [
+                        {
+                            "segmentId": "segment-0001",
+                            "decision": "propose",
                             "speakerRanking": ["speaker-1"],
                             "normalizedText": "这是第1位说话人的中文原文。",
                             "textEvidenceCandidateId": "",

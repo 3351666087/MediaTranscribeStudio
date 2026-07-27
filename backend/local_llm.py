@@ -388,6 +388,40 @@ class OllamaLocalProvider:
             ),
         )
         self._opener = urllib.request.build_opener(_RejectRedirectHandler())
+        self._generation_metrics = {
+            "completedCalls": 0,
+            "totalDurationNanoseconds": 0,
+            "loadDurationNanoseconds": 0,
+            "promptEvalTokens": 0,
+            "promptEvalDurationNanoseconds": 0,
+            "outputTokens": 0,
+            "outputEvalDurationNanoseconds": 0,
+        }
+
+    @property
+    def generation_metrics(self) -> dict[str, int]:
+        """Return aggregate provider timings without exposing response content."""
+
+        return dict(self._generation_metrics)
+
+    def _record_generation_metrics(self, envelope: Mapping[str, Any]) -> None:
+        self._generation_metrics["completedCalls"] += 1
+        fields = {
+            "total_duration": "totalDurationNanoseconds",
+            "load_duration": "loadDurationNanoseconds",
+            "prompt_eval_count": "promptEvalTokens",
+            "prompt_eval_duration": "promptEvalDurationNanoseconds",
+            "eval_count": "outputTokens",
+            "eval_duration": "outputEvalDurationNanoseconds",
+        }
+        for source, target in fields.items():
+            value = envelope.get(source)
+            if (
+                not isinstance(value, bool)
+                and isinstance(value, int)
+                and value >= 0
+            ):
+                self._generation_metrics[target] += value
 
     def generate_json(
         self,
@@ -508,6 +542,7 @@ class OllamaLocalProvider:
             result,
             validator=schema_validator,
         )
+        self._record_generation_metrics(envelope)
         return result
 
 

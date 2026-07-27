@@ -100,7 +100,16 @@ def test_context_preflight_accepts_exact_boundary_and_blocks_overflow_transport(
     )
     provider, opener = _provider_with_body(
         monkeypatch,
-        _envelope({"answer": "ok"}, done=True, eval_count=4),
+        _envelope(
+            {"answer": "ok"},
+            done=True,
+            total_duration=120,
+            load_duration=20,
+            prompt_eval_count=30,
+            prompt_eval_duration=40,
+            eval_count=4,
+            eval_duration=50,
+        ),
         config=config,
     )
 
@@ -111,6 +120,15 @@ def test_context_preflight_accepts_exact_boundary_and_blocks_overflow_transport(
     )
     assert result == {"answer": "ok"}
     assert opener.calls == 1
+    assert provider.generation_metrics == {
+        "completedCalls": 1,
+        "totalDurationNanoseconds": 120,
+        "loadDurationNanoseconds": 20,
+        "promptEvalTokens": 30,
+        "promptEvalDurationNanoseconds": 40,
+        "outputTokens": 4,
+        "outputEvalDurationNanoseconds": 50,
+    }
 
     with pytest.raises(LocalLLMContextWindowError, match="context window"):
         provider.generate_json(

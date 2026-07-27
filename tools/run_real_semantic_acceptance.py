@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-tokens", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=3)
     parser.add_argument("--speaker-top-k", type=int, default=3)
+    parser.add_argument("--keep-alive", default="1s")
     parser.add_argument("--replace", action="store_true")
     return parser
 
@@ -70,6 +71,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             context_tokens=args.context_tokens,
             output_tokens=args.output_tokens,
+            keep_alive=args.keep_alive,
         )
     )
     started = time.monotonic()
@@ -104,6 +106,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         },
         "elapsedSeconds": round(elapsed, 3),
         "maxRssMb": _max_rss_mb(),
+        "execution": {
+            "timeoutSeconds": args.timeout_seconds,
+            "contextTokens": args.context_tokens,
+            "outputTokens": args.output_tokens,
+            "batchSize": args.batch_size,
+            "speakerTopK": args.speaker_top_k,
+            "keepAlive": args.keep_alive,
+        },
         "metrics": artifact["metrics"],
         "sourceUnchanged": after_canonical_sha == source_canonical_sha,
         "transcriptTextPersistedInSummary": False,

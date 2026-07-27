@@ -29,6 +29,26 @@
       "status": "retired"
     }
   ],
+  "localArtifacts": [
+    {
+      "id": "moss-transcribe-diarize-0.9b-e5118b4-model",
+      "root": "project",
+      "path": ".runtime_cache/production-models/moss-transcribe-diarize-0.9b",
+      "status": "active"
+    },
+    {
+      "id": "moss-transcribe-diarize-0.9b-transformers-5.14.1-runtime",
+      "root": "applicationSupport",
+      "path": "venvs/moss-transcribe-diarize-0.9b",
+      "status": "active"
+    },
+    {
+      "id": "moss-transcribe-diarize-0.9b-file-provider-runtime",
+      "root": "project",
+      "path": ".runtime_cache/venvs/moss-transcribe-diarize-0.9b",
+      "status": "retired"
+    }
+  ],
   "scratchPolicies": [
     {
       "path": ".runtime_cache/tmp",

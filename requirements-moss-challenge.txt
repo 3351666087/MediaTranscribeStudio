@@ -1,0 +1,18 @@
+# Pinned MOSS Transformers challenge runtime for macOS arm64 / CPython 3.12.
+# Model revision: e5118b411bf5a77d7a90c4941066bec93c967312
+# Source revision: 0e3d1403fd8f1f1c674e883ece96b9f630794ebe
+#
+# Rebuild outside File Provider managed directories:
+# uv venv --python 3.12 <runtime-path>
+# uv pip install --python <runtime-path>/bin/python -r requirements-moss-challenge.txt
+
+av==18.0.0
+librosa==0.11.0
+numba==0.66.0
+numpy==2.4.6
+packaging==26.2
+safetensors==0.8.0
+soundfile==0.14.0
+soxr==1.1.0
+torch==2.13.0
+transformers==5.14.1

@@ -35,9 +35,8 @@ def _write_policy(root: Path, *, config_model: str = "qwen3.5:9b") -> Path:
                     {"name": "qwen3.5:9b", "status": "active"},
                     {"name": "qwen3.5:4b", "status": "retired"},
                 ],
-                "scratchPolicies": [
-                    {"path": ".runtime_cache/tmp", "maxAgeDays": 7}
-                ],
+                "localArtifacts": [],
+                "scratchPolicies": [{"path": ".runtime_cache/tmp", "maxAgeDays": 7}],
             }
         ),
         encoding="utf-8",
@@ -185,3 +184,53 @@ def test_newest_descendant_prevents_early_directory_removal(tmp_path: Path) -> N
     os.utime(child, ns=(now_ns, now_ns))
 
     assert scratch_candidates(policy.scratch_policies, now_ns=now_ns) == ()
+
+
+def test_apply_removes_only_registered_retired_local_artifacts(
+    tmp_path: Path,
+) -> None:
+    policy_path = _write_policy(tmp_path)
+    app_support = tmp_path / "application-support"
+    active = app_support / "venvs" / "active-runtime"
+    retired = tmp_path / ".runtime_cache" / "venvs" / "retired-runtime"
+    active.mkdir(parents=True)
+    retired.mkdir(parents=True)
+    (active / "keep.bin").write_bytes(b"active")
+    (retired / "remove.bin").write_bytes(b"retired")
+    value = json.loads(policy_path.read_text(encoding="utf-8"))
+    value["localArtifacts"] = [
+        {
+            "id": "active-runtime",
+            "root": "applicationSupport",
+            "path": "venvs/active-runtime",
+            "status": "active",
+        },
+        {
+            "id": "retired-runtime",
+            "root": "project",
+            "path": ".runtime_cache/venvs/retired-runtime",
+            "status": "retired",
+        },
+    ]
+    policy_path.write_text(json.dumps(value), encoding="utf-8")
+    installed = ["qwen3.5:9b"]
+    calls: list[list[str]] = []
+
+    report = maintain_storage(
+        load_policy(
+            policy_path,
+            project_root=tmp_path,
+            application_support_root=app_support,
+        ),
+        apply=True,
+        runner=_runner(installed, calls),
+    )
+
+    assert report["retiredLocalArtifactsBefore"] == ["retired-runtime"]
+    assert report["retiredLocalArtifacts"] == []
+    assert report["removedLocalArtifacts"] == ["retired-runtime"]
+    assert report["missingActiveLocalArtifacts"] == []
+    assert report["plannedLocalArtifactReclaimBytes"] > 0
+    assert report["actionRequired"] is False
+    assert active.is_dir()
+    assert not retired.exists()

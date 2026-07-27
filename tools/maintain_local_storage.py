@@ -9,10 +9,10 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Mapping, Sequence
-
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = PROJECT_ROOT / "model-lifecycle.v1.json"
@@ -20,6 +20,16 @@ POLICY_SCHEMA_VERSION = "1.0.0"
 MINIMUM_ALLOWED_FREE_BYTES = 8 * 1024**3
 ALLOWED_MODEL_STATUSES = frozenset({"active", "retired"})
 ALLOWED_SCRATCH_ROOT = PurePosixPath(".runtime_cache")
+ALLOWED_LOCAL_ARTIFACT_ROOTS = frozenset({"project", "applicationSupport"})
+ALLOWED_PROJECT_ARTIFACT_PREFIXES = frozenset(
+    {
+        (".runtime_cache", "production-models"),
+        (".runtime_cache", "venvs"),
+    }
+)
+ALLOWED_APPLICATION_SUPPORT_ARTIFACT_PREFIXES = frozenset(
+    {"production-models", "venvs"}
+)
 
 
 class StoragePolicyError(RuntimeError):
@@ -45,12 +55,22 @@ class ProductionConfigPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalArtifactPolicy:
+    artifact_id: str
+    root_name: str
+    root: Path
+    path: Path
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class StoragePolicy:
     path: Path
     project_root: Path
     minimum_free_bytes: int
     production_configs: tuple[ProductionConfigPolicy, ...]
     ollama_models: tuple[OllamaModelPolicy, ...]
+    local_artifacts: tuple[LocalArtifactPolicy, ...]
     scratch_policies: tuple[ScratchPolicy, ...]
 
 
@@ -84,8 +104,14 @@ def load_policy(
     path: Path = DEFAULT_POLICY_PATH,
     *,
     project_root: Path = PROJECT_ROOT,
+    application_support_root: Path | None = None,
 ) -> StoragePolicy:
     root = project_root.resolve(strict=True)
+    app_support = (
+        application_support_root
+        if application_support_root is not None
+        else (Path.home() / "Library" / "Application Support" / "MediaTranscribeStudio")
+    ).absolute()
     resolved = path.resolve(strict=True)
     value = _load_json_object(resolved, "storage policy")
     if value.get("schemaVersion") != POLICY_SCHEMA_VERSION:
@@ -155,6 +181,65 @@ def load_policy(
     if not any(item.status == "active" for item in models):
         raise StoragePolicyError("ollamaModels must retain at least one active model")
 
+    raw_artifacts = value.get("localArtifacts", [])
+    if not isinstance(raw_artifacts, list):
+        raise StoragePolicyError("localArtifacts must be an array")
+    local_artifacts: list[LocalArtifactPolicy] = []
+    for index, item in enumerate(raw_artifacts):
+        if not isinstance(item, Mapping):
+            raise StoragePolicyError(f"localArtifacts[{index}] must be an object")
+        artifact_id = item.get("id")
+        root_name = item.get("root")
+        status = item.get("status")
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise StoragePolicyError(
+                f"localArtifacts[{index}].id must be non-empty text"
+            )
+        if root_name not in ALLOWED_LOCAL_ARTIFACT_ROOTS:
+            raise StoragePolicyError(f"localArtifacts[{index}].root is unsupported")
+        if status not in ALLOWED_MODEL_STATUSES:
+            raise StoragePolicyError(
+                f"localArtifacts[{index}].status must be active or retired"
+            )
+        relative = _safe_project_relative_path(
+            item.get("path"),
+            f"localArtifacts[{index}].path",
+        )
+        if root_name == "project":
+            if (
+                len(relative.parts) < 3
+                or tuple(relative.parts[:2]) not in ALLOWED_PROJECT_ARTIFACT_PREFIXES
+            ):
+                raise StoragePolicyError(
+                    "project local artifacts must be specific children of "
+                    ".runtime_cache/production-models or .runtime_cache/venvs"
+                )
+            artifact_root = root
+        else:
+            if (
+                len(relative.parts) < 2
+                or relative.parts[0]
+                not in ALLOWED_APPLICATION_SUPPORT_ARTIFACT_PREFIXES
+            ):
+                raise StoragePolicyError(
+                    "applicationSupport local artifacts must be specific "
+                    "children of production-models or venvs"
+                )
+            artifact_root = app_support
+        local_artifacts.append(
+            LocalArtifactPolicy(
+                artifact_id=artifact_id.strip(),
+                root_name=str(root_name),
+                root=artifact_root,
+                path=artifact_root / Path(*relative.parts),
+                status=str(status),
+            )
+        )
+    if len({item.artifact_id for item in local_artifacts}) != len(local_artifacts):
+        raise StoragePolicyError("localArtifacts contains duplicate IDs")
+    if len({item.path for item in local_artifacts}) != len(local_artifacts):
+        raise StoragePolicyError("localArtifacts contains duplicate paths")
+
     raw_scratch = value.get("scratchPolicies")
     if not isinstance(raw_scratch, list):
         raise StoragePolicyError("scratchPolicies must be an array")
@@ -197,6 +282,7 @@ def load_policy(
         minimum_free_bytes=minimum_free_bytes,
         production_configs=tuple(config_policies),
         ollama_models=tuple(models),
+        local_artifacts=tuple(local_artifacts),
         scratch_policies=tuple(scratch_policies),
     )
 
@@ -221,9 +307,7 @@ def production_ollama_references(
             raise StoragePolicyError(f"production config has no speaker object: {path}")
         model = speaker.get("localLlmModel")
         if not isinstance(model, str) or not model.strip():
-            raise StoragePolicyError(
-                f"production config has no localLlmModel: {path}"
-            )
+            raise StoragePolicyError(f"production config has no localLlmModel: {path}")
         references.add(model.strip())
     if not inspected:
         raise StoragePolicyError("no production config was available for audit")
@@ -354,6 +438,56 @@ def _remove_ollama_model(
         )
 
 
+def _local_artifact_exists(policy: LocalArtifactPolicy) -> bool:
+    return policy.path.exists() or policy.path.is_symlink()
+
+
+def _remove_local_artifact(policy: LocalArtifactPolicy) -> None:
+    path = policy.path
+    try:
+        path.relative_to(policy.root)
+    except ValueError as exc:
+        raise StoragePolicyError(
+            f"local artifact escaped its registered root: {path}"
+        ) from exc
+    if path == policy.root:
+        raise StoragePolicyError("local artifact cannot equal its root")
+    if path.is_symlink():
+        path.unlink()
+        return
+    if not path.exists():
+        return
+    if not path.is_dir():
+        raise StoragePolicyError(
+            f"local artifact must be a directory or symlink: {path}"
+        )
+    resolved_root = policy.root.resolve(strict=True)
+    resolved_path = path.resolve(strict=True)
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise StoragePolicyError(
+            f"local artifact resolved outside its registered root: {path}"
+        ) from exc
+    shutil.rmtree(path)
+
+
+def _local_artifact_report(
+    policies: Sequence[LocalArtifactPolicy],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": item.artifact_id,
+            "root": item.root_name,
+            "path": str(item.path),
+            "status": item.status,
+            "allocatedBytes": _allocated_bytes(item.path),
+        }
+        for item in policies
+        if _local_artifact_exists(item)
+    ]
+
+
 def maintain_storage(
     policy: StoragePolicy,
     *,
@@ -382,6 +516,20 @@ def maintain_storage(
     retired = {item.name for item in policy.ollama_models if item.status == "retired"}
     retired_installed = sorted(installed & retired)
     missing_active = sorted((active & references) - installed)
+    local_installed_before = [
+        item for item in policy.local_artifacts if _local_artifact_exists(item)
+    ]
+    retired_local_before = [
+        item for item in local_installed_before if item.status == "retired"
+    ]
+    retired_local_reclaim_bytes = sum(
+        _allocated_bytes(item.path) for item in retired_local_before
+    )
+    missing_active_local = sorted(
+        item.artifact_id
+        for item in policy.local_artifacts
+        if item.status == "active" and not _local_artifact_exists(item)
+    )
     scratch = scratch_candidates(
         policy.scratch_policies,
         now_ns=time.time_ns() if now_ns is None else now_ns,
@@ -389,11 +537,15 @@ def maintain_storage(
     disk_before = shutil.disk_usage(policy.project_root)
 
     removed_models: list[str] = []
+    removed_local_artifacts: list[str] = []
     removed_scratch: list[str] = []
     if apply:
         for name in retired_installed:
             _remove_ollama_model(name, runner)
             removed_models.append(name)
+        for artifact in retired_local_before:
+            _remove_local_artifact(artifact)
+            removed_local_artifacts.append(artifact.artifact_id)
         for candidate in scratch:
             _remove_scratch_candidate(candidate, policy.scratch_policies)
             removed_scratch.append(str(candidate.path))
@@ -401,6 +553,12 @@ def maintain_storage(
     installed_after = installed - set(removed_models)
     managed_names = set(by_name)
     retired_installed_after = sorted(installed_after & retired)
+    local_installed_after = [
+        item for item in policy.local_artifacts if _local_artifact_exists(item)
+    ]
+    retired_local_after = [
+        item for item in local_installed_after if item.status == "retired"
+    ]
     remaining_scratch = (
         scratch_candidates(
             policy.scratch_policies,
@@ -418,9 +576,7 @@ def maintain_storage(
         "freeBytesBefore": disk_before.free,
         "freeBytesAfter": disk_after.free,
         "freeSpaceThresholdMet": disk_after.free >= policy.minimum_free_bytes,
-        "inspectedProductionConfigs": [
-            str(path) for path in inspected_configs
-        ],
+        "inspectedProductionConfigs": [str(path) for path in inspected_configs],
         "productionOllamaReferences": sorted(references),
         "installedOllamaModelsBefore": sorted(installed),
         "installedOllamaModels": sorted(installed_after),
@@ -428,6 +584,13 @@ def maintain_storage(
         "retiredInstalledModelsBefore": retired_installed,
         "retiredInstalledModels": retired_installed_after,
         "missingActiveModels": missing_active,
+        "installedLocalArtifactsBefore": _local_artifact_report(local_installed_before),
+        "installedLocalArtifacts": _local_artifact_report(local_installed_after),
+        "retiredLocalArtifactsBefore": [
+            item.artifact_id for item in retired_local_before
+        ],
+        "retiredLocalArtifacts": [item.artifact_id for item in retired_local_after],
+        "missingActiveLocalArtifacts": missing_active_local,
         "scratchCandidatesBefore": [
             {
                 "path": str(item.path),
@@ -444,13 +607,19 @@ def maintain_storage(
             }
             for item in remaining_scratch
         ],
-        "plannedReclaimBytes": sum(item.allocated_bytes for item in scratch),
+        "plannedLocalArtifactReclaimBytes": retired_local_reclaim_bytes,
+        "plannedReclaimBytes": (
+            retired_local_reclaim_bytes + sum(item.allocated_bytes for item in scratch)
+        ),
         "removedOllamaModels": removed_models,
+        "removedLocalArtifacts": removed_local_artifacts,
         "removedScratchPaths": removed_scratch,
         "actionRequired": bool(
             retired_installed_after
+            or retired_local_after
             or remaining_scratch
             or missing_active
+            or missing_active_local
             or disk_after.free < policy.minimum_free_bytes
         ),
     }
@@ -462,7 +631,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="remove only policy-retired Ollama models and expired scratch entries",
+        help=(
+            "remove only policy-retired Ollama/local artifacts and expired "
+            "scratch entries"
+        ),
     )
     parser.add_argument(
         "--report",

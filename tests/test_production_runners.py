@@ -282,6 +282,176 @@ class ProductionRunnerTests(unittest.TestCase):
                 item.evidence["candidateSetSha256"],
             )
 
+    def test_qwen3_runner_applies_and_restores_candidate_token_budget(
+        self,
+    ) -> None:
+        observed_limits: list[int] = []
+
+        class BoundedModel(FakeQwenModel):
+            def __init__(self) -> None:
+                super().__init__()
+                self.max_new_tokens = 512
+
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                observed_limits.append(self.max_new_tokens)
+                return super().transcribe(
+                    audio=audio,
+                    return_time_stamps=return_time_stamps,
+                    language=language,
+                )
+
+        model = BoundedModel()
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: model,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        results = adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+            max_generated_tokens=40,
+        )
+
+        self.assertEqual(observed_limits, [40])
+        self.assertEqual(model.max_new_tokens, 512)
+        self.assertEqual(
+            [item.evidence["maxGeneratedTokens"] for item in results],
+            [40, 40],
+        )
+        self.assertEqual(
+            [
+                item.evidence["generationBudgetPolicy"]
+                for item in results
+            ],
+            ["caller-bounded-v1", "caller-bounded-v1"],
+        )
+
+    def test_qwen3_runner_bounds_default_window_generation(self) -> None:
+        observed_limits: list[int] = []
+
+        class DefaultBoundedModel(FakeQwenModel):
+            def __init__(self) -> None:
+                super().__init__()
+                self.max_new_tokens = 512
+
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                observed_limits.append(self.max_new_tokens)
+                return super().transcribe(
+                    audio=audio,
+                    return_time_stamps=return_time_stamps,
+                    language=language,
+                )
+
+        model = DefaultBoundedModel()
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: model,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        results = adapter.transcribe_batch(
+            self.prepared(),
+            self.prepared().windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        self.assertEqual(observed_limits, [512])
+        self.assertEqual(model.max_new_tokens, 512)
+        self.assertEqual(
+            [item.evidence["maxGeneratedTokens"] for item in results],
+            [None, None],
+        )
+        self.assertEqual(
+            adapter.evidence_cache_identity()["generationBudgetPolicy"],
+            "provider-default-batched-v1",
+        )
+
+    def test_qwen3_runner_preserves_provider_batching_by_default(
+        self,
+    ) -> None:
+        calls: list[tuple[int, int]] = []
+
+        class GroupedModel:
+            def __init__(self) -> None:
+                self.max_new_tokens = 512
+
+            def transcribe(
+                self,
+                *,
+                audio,
+                return_time_stamps,
+                language=None,
+            ):
+                calls.append((self.max_new_tokens, len(audio)))
+                return [
+                    SimpleNamespace(
+                        text=f"limit-{self.max_new_tokens}",
+                        language="English",
+                        time_stamps=None,
+                    )
+                    for _item in audio
+                ]
+
+        prepared = PreparedAudio(
+            duration_ms=12_000,
+            source_fingerprint="c" * 64,
+            normalization_profile="mono-16khz-f32-v1",
+            windows=(
+                SpeechWindow("long", 0, 12_000),
+                SpeechWindow("short", 0, 1_000),
+            ),
+            stage_durations_ms={
+                "decode": 0.0,
+                "normalize": 0.0,
+                "vad": 0.0,
+                "boundary": 0.0,
+            },
+            audio_path=str(self.audio),
+        )
+        model = GroupedModel()
+        adapter = LocalQwen3AsrAdapter(
+            model_path=self.qwen_model,
+            model_factory=lambda **kwargs: model,
+            device_map="cpu",
+            torch_dtype="float32",
+        )
+
+        results = adapter.transcribe_batch(
+            prepared,
+            prepared.windows,
+            self.context,
+            requested_language="auto",
+        )
+
+        self.assertEqual(calls, [(512, 2)])
+        self.assertEqual(
+            [item.text for item in results],
+            ["limit-512", "limit-512"],
+        )
+        self.assertEqual(
+            [item.evidence["maxGeneratedTokens"] for item in results],
+            [None, None],
+        )
+        self.assertEqual(model.max_new_tokens, 512)
+
     def test_qwen3_candidate_evidence_binds_manifest_tokens_and_scores(self) -> None:
         manifest = {
             "modelId": "Qwen3-ASR-1.7B",
@@ -364,7 +534,10 @@ class ProductionRunnerTests(unittest.TestCase):
     def test_qwen3_retries_an_empty_batch_result_individually(self) -> None:
         class EmptyThenRecoveredModel:
             def __init__(self) -> None:
-                self.calls: list[int] = []
+                self.calls: list[
+                    tuple[int, int, list[str] | None]
+                ] = []
+                self.max_new_tokens = 512
 
             def transcribe(
                 self,
@@ -373,7 +546,13 @@ class ProductionRunnerTests(unittest.TestCase):
                 return_time_stamps,
                 language=None,
             ):
-                self.calls.append(len(audio))
+                self.calls.append(
+                    (
+                        len(audio),
+                        self.max_new_tokens,
+                        list(language) if language is not None else None,
+                    )
+                )
                 if len(audio) == 2:
                     return [
                         SimpleNamespace(
@@ -401,6 +580,7 @@ class ProductionRunnerTests(unittest.TestCase):
             model_factory=lambda **kwargs: model,
             device_map="cpu",
             torch_dtype="float32",
+            retry_empty_results=True,
         )
 
         results = adapter.transcribe_batch(
@@ -410,9 +590,26 @@ class ProductionRunnerTests(unittest.TestCase):
             requested_language="auto",
         )
 
-        self.assertEqual(model.calls, [2, 1])
+        self.assertEqual(
+            model.calls,
+            [
+                (2, 512, None),
+                (1, 32, ["Chinese"]),
+            ],
+        )
+        self.assertEqual(model.max_new_tokens, 512)
         self.assertEqual([item.text for item in results], ["第一段", "第二段恢复"])
         self.assertNotIn("disposition", results[1].evidence)
+        self.assertEqual(results[1].evidence["individualRetryCount"], 1)
+        self.assertEqual(results[1].evidence["maxGeneratedTokens"], 32)
+        self.assertEqual(
+            results[1].evidence["generationBudgetPolicy"],
+            "language-hint-max32-v1",
+        )
+        self.assertEqual(
+            results[1].evidence["qwenPromptLanguage"],
+            "Chinese",
+        )
 
     def test_qwen3_rejects_persistent_non_lexical_window_without_fabrication(
         self,
@@ -453,7 +650,7 @@ class ProductionRunnerTests(unittest.TestCase):
             requested_language="auto",
         )
 
-        self.assertEqual(model.calls, [2, 1])
+        self.assertEqual(model.calls, [2])
         self.assertEqual(results[1].text, "")
         self.assertEqual(results[1].confidence, 0.0)
         self.assertEqual(
@@ -462,7 +659,7 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             results[1].evidence["rejectionReason"],
-            "EMPTY_AFTER_INDIVIDUAL_RETRY",
+            "EMPTY_BATCH_RESULT",
         )
         restored = production_runners.AsrHypothesis.from_mapping(
             results[1].as_dict()

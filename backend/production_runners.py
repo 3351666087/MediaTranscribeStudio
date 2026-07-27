@@ -51,9 +51,11 @@ from .speaker_pipeline import (
     AsrHypothesis,
     EmbeddingRecord,
     OverlapDecision,
+    OverlapRecoveryInterval,
     PreparedAudio,
     ReviewCandidate,
     ReviewProposal,
+    SeparatedSpeechChannel,
     SpeakerIdentityWindow,
     SpeechWindow,
 )
@@ -1038,7 +1040,9 @@ class LocalQwen3AsrAdapter:
     """Qwen3-ASR-1.7B runner using explicit local model directories only."""
 
     adapter_id = "Qwen3-ASR-1.7B"
-    version = "1.5.0"
+    version = "1.12.0"
+    default_generation_budget_policy = "provider-default-batched-v1"
+    empty_retry_budget_policy = "language-hint-max32-v1"
 
     def __init__(
         self,
@@ -1048,6 +1052,7 @@ class LocalQwen3AsrAdapter:
         device_map: str = "cuda:0",
         torch_dtype: str = "bfloat16",
         max_inference_batch_size: int = 2,
+        retry_empty_results: bool = False,
         model_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.model_path = _local_model_path(model_path, "Qwen3-ASR model")
@@ -1064,6 +1069,9 @@ class LocalQwen3AsrAdapter:
         ):
             raise ValueError("max_inference_batch_size must be positive")
         self.max_inference_batch_size = int(max_inference_batch_size)
+        if not isinstance(retry_empty_results, bool):
+            raise ValueError("retry_empty_results must be a boolean")
+        self.retry_empty_results = retry_empty_results
         self._model_factory = model_factory
         self._model_identity = model_identity_from_manifest(
             self.model_path,
@@ -1086,6 +1094,15 @@ class LocalQwen3AsrAdapter:
 
         return {
             "candidateSetSchemaVersion": ASR_CANDIDATE_SET_SCHEMA_VERSION,
+            "generationBudgetPolicy": (
+                self.default_generation_budget_policy
+            ),
+            "emptyRetryBudgetPolicy": self.empty_retry_budget_policy,
+            "emptyResultRetryPolicy": (
+                self.empty_retry_budget_policy
+                if self.retry_empty_results
+                else "disabled-fail-closed-v1"
+            ),
             "asrModel": dict(self._model_identity),
             "forcedAlignerModel": (
                 dict(self._forced_aligner_identity)
@@ -1209,8 +1226,21 @@ class LocalQwen3AsrAdapter:
         context: AdapterContext,
         *,
         requested_language: str,
+        max_generated_tokens: int | None = None,
     ) -> list[AsrHypothesis]:
         context.raise_if_cancelled()
+        if (
+            max_generated_tokens is not None
+            and (
+                isinstance(max_generated_tokens, bool)
+                or not isinstance(max_generated_tokens, int)
+                or max_generated_tokens < 1
+                or max_generated_tokens > 512
+            )
+        ):
+            raise ValueError(
+                "max_generated_tokens must be between 1 and 512"
+            )
         normalized_request_language = self.validate_requested_language(
             requested_language
         )
@@ -1220,6 +1250,16 @@ class LocalQwen3AsrAdapter:
                 "PREPARED_AUDIO_MISSING",
                 "Qwen3-ASR requires a persisted normalized audio path",
             )
+        explicit_generation_budget = max_generated_tokens is not None
+        generation_budget_policy = (
+            "caller-bounded-v1"
+            if explicit_generation_budget
+            else self.default_generation_budget_policy
+        )
+        result_token_limits: list[int | None] = [None] * len(windows)
+        result_budget_policies = [generation_budget_policy] * len(windows)
+        result_prompt_languages = [qwen_language] * len(windows)
+        result_retry_counts = [0] * len(windows)
         with self._inference_lock:
             model = self._model()
             context.raise_if_cancelled()
@@ -1238,66 +1278,156 @@ class LocalQwen3AsrAdapter:
                 )
                 for window in windows
             ]
-            transcribe_kwargs: dict[str, Any] = {
-                "audio": audio_batch,
-                "return_time_stamps": self.forced_aligner_path is not None,
-            }
-            if qwen_language is not None:
-                transcribe_kwargs["language"] = [qwen_language] * len(
-                    audio_batch
+            original_max_new_tokens: int | None = None
+            raw_limit = getattr(model, "max_new_tokens", None)
+            runtime_limit_available = (
+                isinstance(raw_limit, int)
+                and not isinstance(raw_limit, bool)
+                and raw_limit > 0
+            )
+            if explicit_generation_budget and not runtime_limit_available:
+                raise WorkerError(
+                    "QWEN3_ASR_TOKEN_BUDGET_UNSUPPORTED",
+                    "Qwen3-ASR runtime does not expose a mutable generation limit",
                 )
-            try:
-                results = model.transcribe(**transcribe_kwargs)
-            except Exception as exc:
-                resource_error = _qwen_resource_error(
-                    exc,
-                    phase="inference",
-                    requested_device_map=self.device_map,
-                    max_inference_batch_size=(
-                        self.max_inference_batch_size
+            if runtime_limit_available:
+                original_max_new_tokens = raw_limit
+
+            def invoke(indices: Sequence[int]) -> list[Any]:
+                transcribe_kwargs: dict[str, Any] = {
+                    "audio": [audio_batch[index] for index in indices],
+                    "return_time_stamps": (
+                        self.forced_aligner_path is not None
                     ),
-                )
-                if resource_error is None:
-                    raise
-                _release_accelerator_memory()
-                raise resource_error from exc
-            if (
-                isinstance(results, Sequence)
-                and not isinstance(results, (str, bytes))
-                and len(results) == len(windows)
-            ):
-                results = list(results)
-                for index, result in enumerate(results):
-                    if str(getattr(result, "text", "") or "").strip():
-                        continue
-                    context.raise_if_cancelled()
-                    retry_kwargs: dict[str, Any] = {
-                        "audio": [audio_batch[index]],
-                        "return_time_stamps": (
-                            self.forced_aligner_path is not None
+                }
+                if qwen_language is not None:
+                    transcribe_kwargs["language"] = [
+                        qwen_language
+                    ] * len(indices)
+                try:
+                    raw_results = model.transcribe(**transcribe_kwargs)
+                except Exception as exc:
+                    resource_error = _qwen_resource_error(
+                        exc,
+                        phase="inference",
+                        requested_device_map=self.device_map,
+                        max_inference_batch_size=(
+                            self.max_inference_batch_size
                         ),
-                    }
-                    if qwen_language is not None:
-                        retry_kwargs["language"] = [qwen_language]
-                    try:
-                        retry_results = model.transcribe(**retry_kwargs)
-                    except Exception as exc:
-                        resource_error = _qwen_resource_error(
-                            exc,
-                            phase="inference-retry",
-                            requested_device_map=self.device_map,
-                            max_inference_batch_size=1,
+                    )
+                    if resource_error is None:
+                        raise
+                    _release_accelerator_memory()
+                    raise resource_error from exc
+                if (
+                    not isinstance(raw_results, Sequence)
+                    or isinstance(raw_results, (str, bytes))
+                    or len(raw_results) != len(indices)
+                ):
+                    raise WorkerError(
+                        "QWEN3_ASR_RESULT_INVALID",
+                        "Qwen3-ASR must return one result per speech window",
+                    )
+                return list(raw_results)
+
+            try:
+                if explicit_generation_budget:
+                    assert runtime_limit_available
+                    assert max_generated_tokens is not None
+                    applied_limit = min(raw_limit, max_generated_tokens)
+                    model.max_new_tokens = applied_limit
+                    result_token_limits = [applied_limit] * len(windows)
+                results = invoke(tuple(range(len(windows))))
+                if (
+                    isinstance(results, Sequence)
+                    and not isinstance(results, (str, bytes))
+                    and len(results) == len(windows)
+                ):
+                    results = list(results)
+                    for index, result in enumerate(results):
+                        if str(getattr(result, "text", "") or "").strip():
+                            continue
+                        if not self.retry_empty_results:
+                            continue
+                        context.raise_if_cancelled()
+                        retry_kwargs: dict[str, Any] = {
+                            "audio": [audio_batch[index]],
+                            "return_time_stamps": (
+                                self.forced_aligner_path is not None
+                            ),
+                        }
+                        retry_language = qwen_language
+                        if retry_language is None:
+                            for candidate in (
+                                normalize_qwen_language_candidates(
+                                    getattr(result, "language", None)
+                                )
+                            ):
+                                if candidate == "und":
+                                    continue
+                                try:
+                                    retry_language = (
+                                        qwen_language_for_request(candidate)
+                                    )
+                                except ValueError:
+                                    continue
+                                if retry_language is not None:
+                                    break
+                        if retry_language is not None:
+                            retry_kwargs["language"] = [retry_language]
+                        retry_model_limit = getattr(
+                            model,
+                            "max_new_tokens",
+                            None,
                         )
-                        if resource_error is None:
-                            raise
-                        _release_accelerator_memory()
-                        raise resource_error from exc
-                    if (
-                        isinstance(retry_results, Sequence)
-                        and not isinstance(retry_results, (str, bytes))
-                        and len(retry_results) == 1
-                    ):
-                        results[index] = retry_results[0]
+                        retry_applied_limit: int | None = None
+                        if (
+                            isinstance(retry_model_limit, int)
+                            and not isinstance(retry_model_limit, bool)
+                            and retry_model_limit > 0
+                        ):
+                            retry_applied_limit = min(
+                                retry_model_limit,
+                                32,
+                            )
+                            model.max_new_tokens = retry_applied_limit
+                        result_retry_counts[index] = 1
+                        result_token_limits[index] = retry_applied_limit
+                        result_budget_policies[index] = (
+                            self.empty_retry_budget_policy
+                        )
+                        result_prompt_languages[index] = retry_language
+                        try:
+                            try:
+                                retry_results = model.transcribe(
+                                    **retry_kwargs
+                                )
+                            finally:
+                                if retry_applied_limit is not None:
+                                    model.max_new_tokens = retry_model_limit
+                        except Exception as exc:
+                            resource_error = _qwen_resource_error(
+                                exc,
+                                phase="inference-retry",
+                                requested_device_map=self.device_map,
+                                max_inference_batch_size=1,
+                            )
+                            if resource_error is None:
+                                raise
+                            _release_accelerator_memory()
+                            raise resource_error from exc
+                        if (
+                            isinstance(retry_results, Sequence)
+                            and not isinstance(
+                                retry_results,
+                                (str, bytes),
+                            )
+                            and len(retry_results) == 1
+                        ):
+                            results[index] = retry_results[0]
+            finally:
+                if original_max_new_tokens is not None:
+                    model.max_new_tokens = original_max_new_tokens
         context.raise_if_cancelled()
         if (
             not isinstance(results, Sequence)
@@ -1309,7 +1439,9 @@ class LocalQwen3AsrAdapter:
                 "Qwen3-ASR must return one result per speech window",
             )
         output: list[AsrHypothesis] = []
-        for window, result in zip(windows, results):
+        for result_index, (window, result) in enumerate(
+            zip(windows, results)
+        ):
             text = str(getattr(result, "text", "") or "").strip()
             if not text:
                 output.append(
@@ -1322,12 +1454,24 @@ class LocalQwen3AsrAdapter:
                             "pcmBufferId": pcm_buffer_id,
                             "confidenceAvailable": False,
                             "requestedLanguage": normalized_request_language,
-                            "qwenPromptLanguage": qwen_language,
+                            "qwenPromptLanguage": (
+                                result_prompt_languages[result_index]
+                            ),
                             "disposition": "rejected-non-lexical",
                             "rejectionReason": (
                                 "EMPTY_AFTER_INDIVIDUAL_RETRY"
+                                if result_retry_counts[result_index]
+                                else "EMPTY_BATCH_RESULT"
                             ),
-                            "individualRetryCount": 1,
+                            "individualRetryCount": (
+                                result_retry_counts[result_index]
+                            ),
+                            "maxGeneratedTokens": (
+                                result_token_limits[result_index]
+                            ),
+                            "generationBudgetPolicy": (
+                                result_budget_policies[result_index]
+                            ),
                             "windowDurationMs": (
                                 window.end_ms - window.start_ms
                             ),
@@ -1470,7 +1614,18 @@ class LocalQwen3AsrAdapter:
                         "pcmBufferId": pcm_buffer_id,
                         "confidenceAvailable": False,
                         "requestedLanguage": normalized_request_language,
-                        "qwenPromptLanguage": qwen_language,
+                        "qwenPromptLanguage": (
+                            result_prompt_languages[result_index]
+                        ),
+                        "individualRetryCount": (
+                            result_retry_counts[result_index]
+                        ),
+                        "maxGeneratedTokens": (
+                            result_token_limits[result_index]
+                        ),
+                        "generationBudgetPolicy": (
+                            result_budget_policies[result_index]
+                        ),
                         "rawLanguage": (
                             raw_language
                             if isinstance(
@@ -2966,6 +3121,264 @@ class LocalERes2NetV2Verifier:
         ]
 
 
+class LocalMossFormer2SeparationAdapter:
+    """Bounded two-speaker separation for model-detected overlap only."""
+
+    adapter_id = "MossFormer2_SS_16K"
+    version = "1.0.0"
+
+    def __init__(
+        self,
+        *,
+        model_path: str | Path,
+        separator_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self.model_path = _local_model_path(
+            model_path,
+            "MossFormer2 separation model",
+        )
+        self._separator_factory = separator_factory
+        self._model_instance: Any = None
+        self._load_lock = threading.Lock()
+        self._inference_lock = threading.Lock()
+        manifest_path = self.model_path / ".mts-model-manifest.json"
+        try:
+            raw_manifest = manifest_path.read_bytes()
+            manifest = json.loads(raw_manifest.decode("utf-8"))
+            revision = str(manifest.get("revision") or "").strip()
+            if not revision:
+                raise ValueError("model revision is missing")
+            self._model_revision = revision
+            self._model_manifest_sha256 = hashlib.sha256(
+                raw_manifest
+            ).hexdigest()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            self._model_revision = "unverified-local"
+            self._model_manifest_sha256 = hashlib.sha256(
+                str(self.model_path).encode("utf-8")
+            ).hexdigest()
+
+    def _model(self) -> Any:
+        with self._load_lock:
+            if self._model_instance is not None:
+                return self._model_instance
+            if self._separator_factory is not None:
+                self._model_instance = self._separator_factory(
+                    model_path=self.model_path,
+                )
+                return self._model_instance
+            try:
+                from clearvoice.network_wrapper import network_wrapper
+                from clearvoice.networks import CLS_MossFormer2_SS_16K
+            except ImportError as exc:
+                raise WorkerError(
+                    "MOSSFORMER2_RUNTIME_MISSING",
+                    "clearvoice is required for overlap separation",
+                ) from exc
+            wrapper = network_wrapper()
+            wrapper.model_name = self.adapter_id
+            wrapper.load_args_ss()
+            wrapper.args.task = "speech_separation"
+            wrapper.args.network = self.adapter_id
+            wrapper.args.checkpoint_dir = str(self.model_path)
+            try:
+                self._model_instance = CLS_MossFormer2_SS_16K(
+                    wrapper.args
+                )
+            except Exception as exc:
+                raise WorkerError(
+                    "MOSSFORMER2_MODEL_LOAD_FAILED",
+                    "MossFormer2 could not load its locked local checkpoint",
+                    details={"exceptionType": type(exc).__name__},
+                ) from exc
+            return self._model_instance
+
+    def release_resources(self) -> None:
+        with self._load_lock:
+            self._model_instance = None
+        gc.collect()
+        try:
+            import torch
+        except ImportError:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if _mps_is_available():
+            torch.mps.empty_cache()
+
+    @staticmethod
+    def _decode(model: Any, samples: Any) -> Any:
+        decode = getattr(model, "decode_data", None)
+        if callable(decode):
+            return decode(samples)
+        if callable(model):
+            return model(samples)
+        raise TypeError("separator model is not callable")
+
+    def separate_batch(
+        self,
+        prepared: PreparedAudio,
+        intervals: Sequence[OverlapRecoveryInterval],
+        context: AdapterContext,
+    ) -> list[SeparatedSpeechChannel]:
+        if not intervals:
+            return []
+        if not prepared.audio_path:
+            raise WorkerError(
+                "PREPARED_AUDIO_MISSING",
+                "overlap separation requires normalized audio",
+            )
+        try:
+            import numpy as np
+            import soundfile as sf
+        except ImportError as exc:
+            raise WorkerError(
+                "MOSSFORMER2_RUNTIME_MISSING",
+                "numpy and soundfile are required for overlap separation",
+            ) from exc
+        try:
+            samples, sample_rate = sf.read(
+                prepared.audio_path,
+                dtype="float32",
+                always_2d=False,
+            )
+        except Exception as exc:
+            raise WorkerError(
+                "MOSSFORMER2_AUDIO_READ_FAILED",
+                "normalized audio could not be read for separation",
+                details={"exceptionType": type(exc).__name__},
+            ) from exc
+        samples = np.asarray(samples, dtype=np.float32)
+        if (
+            sample_rate != 16_000
+            or samples.ndim != 1
+            or samples.size < 1
+            or not np.isfinite(samples).all()
+        ):
+            raise WorkerError(
+                "MOSSFORMER2_AUDIO_INVALID",
+                "separator input must be finite mono 16 kHz PCM",
+            )
+        output_root = (
+            context.output_directory
+            / ".pipeline"
+            / "overlap-recovery"
+        )
+        output_root.mkdir(parents=True, exist_ok=True)
+        model = self._model()
+        output: list[SeparatedSpeechChannel] = []
+        for interval in intervals:
+            context.raise_if_cancelled()
+            start_sample = round(
+                interval.context_start_ms * sample_rate / 1000
+            )
+            end_sample = round(
+                interval.context_end_ms * sample_rate / 1000
+            )
+            mixture = samples[start_sample:end_sample]
+            if mixture.size < 1:
+                raise WorkerError(
+                    "MOSSFORMER2_AUDIO_INVALID",
+                    "overlap recovery context is empty",
+                    details={"intervalId": interval.interval_id},
+                )
+            try:
+                with self._inference_lock:
+                    separated = self._decode(
+                        model,
+                        mixture.reshape(1, -1),
+                    )
+            except WorkerError:
+                raise
+            except Exception as exc:
+                raise WorkerError(
+                    "MOSSFORMER2_INFERENCE_FAILED",
+                    "MossFormer2 failed on a bounded overlap interval",
+                    details={
+                        "intervalId": interval.interval_id,
+                        "exceptionType": type(exc).__name__,
+                    },
+                ) from exc
+            separated = np.asarray(separated, dtype=np.float32)
+            if separated.ndim == 3 and separated.shape[1] == 1:
+                separated = separated[:, 0, :]
+            if (
+                separated.ndim != 2
+                or separated.shape != (2, mixture.size)
+                or not np.isfinite(separated).all()
+            ):
+                raise WorkerError(
+                    "MOSSFORMER2_RESULT_INVALID",
+                    "separator output must contain two finite full-length channels",
+                    details={
+                        "intervalId": interval.interval_id,
+                        "shape": list(separated.shape),
+                    },
+                )
+            for channel_index, channel_samples in enumerate(
+                separated,
+                start=1,
+            ):
+                rms = float(np.sqrt(np.mean(channel_samples ** 2)))
+                if not math.isfinite(rms) or rms <= 1e-8:
+                    raise WorkerError(
+                        "MOSSFORMER2_RESULT_INVALID",
+                        "separator returned an empty speech channel",
+                        details={
+                            "intervalId": interval.interval_id,
+                            "channelIndex": channel_index,
+                        },
+                    )
+                candidate_id = (
+                    f"overlap-recovery.{interval.interval_id}."
+                    f"ch{channel_index}"
+                )
+                target = output_root / f"{candidate_id}.wav"
+                temporary = output_root / (
+                    f".{candidate_id}.{uuid.uuid4().hex}.tmp.wav"
+                )
+                try:
+                    sf.write(
+                        temporary,
+                        channel_samples,
+                        sample_rate,
+                        subtype="PCM_16",
+                        format="WAV",
+                    )
+                    os.replace(temporary, target)
+                finally:
+                    try:
+                        temporary.unlink()
+                    except FileNotFoundError:
+                        pass
+                output.append(
+                    SeparatedSpeechChannel(
+                        candidate_id=candidate_id,
+                        interval_id=interval.interval_id,
+                        channel_index=channel_index,
+                        audio_path=str(target),
+                        audio_sha256=_sha256_file(target),
+                        duration_ms=round(
+                            mixture.size * 1000 / sample_rate
+                        ),
+                        evidence={
+                            "modelRevision": self._model_revision,
+                            "modelManifestSha256": (
+                                self._model_manifest_sha256
+                            ),
+                            "contextStartMs": interval.context_start_ms,
+                            "contextEndMs": interval.context_end_ms,
+                            "detectedStartMs": (
+                                interval.detected_start_ms
+                            ),
+                            "detectedEndMs": interval.detected_end_ms,
+                            "rms": rms,
+                        },
+                    )
+                )
+        return output
+
+
 class LocalPyannoteAuditAdapter:
     """Local pyannote overlap detector and candidate-only audit.
 
@@ -3879,6 +4292,7 @@ __all__ = [
     "FfmpegFunAsrPreparationAdapter",
     "LocalERes2NetV2Verifier",
     "LocalFunAsrCamPlusAdapter",
+    "LocalMossFormer2SeparationAdapter",
     "LocalPyannoteAuditAdapter",
     "LocalQwen3AsrAdapter",
 ]

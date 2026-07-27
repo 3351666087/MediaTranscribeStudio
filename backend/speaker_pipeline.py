@@ -746,6 +746,62 @@ class OverlapDecision:
 
 
 @dataclass(frozen=True)
+class OverlapRecoveryInterval:
+    interval_id: str
+    detected_start_ms: int
+    detected_end_ms: int
+    context_start_ms: int
+    context_end_ms: int
+    local_speakers: tuple[str, str]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.interval_id, str)
+            or not self.interval_id.strip()
+            or isinstance(self.detected_start_ms, bool)
+            or isinstance(self.detected_end_ms, bool)
+            or isinstance(self.context_start_ms, bool)
+            or isinstance(self.context_end_ms, bool)
+            or self.context_start_ms < 0
+            or self.detected_start_ms < self.context_start_ms
+            or self.detected_end_ms <= self.detected_start_ms
+            or self.context_end_ms < self.detected_end_ms
+            or len(self.local_speakers) != 2
+            or len(set(self.local_speakers)) != 2
+            or any(not str(item).strip() for item in self.local_speakers)
+        ):
+            raise ValueError("overlap recovery interval is invalid")
+
+
+@dataclass(frozen=True)
+class SeparatedSpeechChannel:
+    candidate_id: str
+    interval_id: str
+    channel_index: int
+    audio_path: str
+    audio_sha256: str
+    duration_ms: int
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.candidate_id, str)
+            or not self.candidate_id.strip()
+            or not isinstance(self.interval_id, str)
+            or not self.interval_id.strip()
+            or isinstance(self.channel_index, bool)
+            or self.channel_index not in {1, 2}
+            or not isinstance(self.audio_path, str)
+            or not self.audio_path.strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", self.audio_sha256)
+            or isinstance(self.duration_ms, bool)
+            or self.duration_ms < 1
+            or not isinstance(self.evidence, Mapping)
+        ):
+            raise ValueError("separated speech channel is invalid")
+
+
+@dataclass(frozen=True)
 class ReviewCandidate:
     segment_id: str
     reasons: tuple[str, ...]
@@ -885,6 +941,7 @@ class BatchAsrAdapter(Protocol):
         context: AdapterContext,
         *,
         requested_language: str,
+        max_generated_tokens: int | None = None,
     ) -> Sequence[AsrHypothesis | Mapping[str, Any]]:
         """Transcribe all cache misses in one model batch."""
 
@@ -917,6 +974,20 @@ class OverlapDetectionAdapter(Protocol):
         speaker_count_constraints: Mapping[str, int] | None = None,
     ) -> Sequence[OverlapDecision | Mapping[str, Any]]:
         """Detect overlap only for cache misses."""
+
+
+@runtime_checkable
+class SpeechSeparationAdapter(Protocol):
+    adapter_id: str
+    version: str
+
+    def separate_batch(
+        self,
+        prepared: PreparedAudio,
+        intervals: Sequence[OverlapRecoveryInterval],
+        context: AdapterContext,
+    ) -> Sequence[SeparatedSpeechChannel]:
+        """Separate bounded two-speaker overlap intervals without ASR."""
 
 
 @runtime_checkable
@@ -1157,6 +1228,12 @@ class SpeakerPipelineConfig:
     pyannote_mapping_margin_threshold: float = 0.05
     pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
+    overlap_recovery_mode: str = "disabled"
+    overlap_recovery_margin_threshold: float = 0.18
+    overlap_recovery_padding_ms: int = 600
+    overlap_recovery_max_intervals: int = 4
+    overlap_recovery_max_interval_ms: int = 12_000
+    overlap_recovery_asr_max_new_tokens: int = 96
     local_llm_mode: str = "disabled"
     local_llm_model: str = "qwen3.5:9b"
     model_residency: str = "stage"
@@ -1200,6 +1277,30 @@ class SpeakerPipelineConfig:
             raise ValueError("pyannote_primary_dominance_threshold is invalid")
         if self.pyannote_mode not in {"disabled", "fallback"}:
             raise ValueError("pyannote_mode must be disabled or fallback")
+        if self.overlap_recovery_mode not in {"disabled", "guarded"}:
+            raise ValueError(
+                "overlap_recovery_mode must be disabled or guarded"
+            )
+        if not 0.0 <= self.overlap_recovery_margin_threshold <= 1.0:
+            raise ValueError(
+                "overlap_recovery_margin_threshold is invalid"
+            )
+        if self.overlap_recovery_padding_ms < 0:
+            raise ValueError(
+                "overlap_recovery_padding_ms must not be negative"
+            )
+        if self.overlap_recovery_max_intervals < 1:
+            raise ValueError(
+                "overlap_recovery_max_intervals must be positive"
+            )
+        if self.overlap_recovery_max_interval_ms < 1:
+            raise ValueError(
+                "overlap_recovery_max_interval_ms must be positive"
+            )
+        if not 24 <= self.overlap_recovery_asr_max_new_tokens <= 512:
+            raise ValueError(
+                "overlap_recovery_asr_max_new_tokens must be between 24 and 512"
+            )
         if self.local_llm_mode not in {"disabled", "suggestion-only"}:
             raise ValueError(
                 "local_llm_mode must be disabled or suggestion-only; auto_apply is forbidden"
@@ -1239,6 +1340,20 @@ class SpeakerPipelineConfig:
             ),
             "pyannoteMode": self.pyannote_mode,
             "pyannoteTelemetryEnabled": False,
+            "overlapRecoveryMode": self.overlap_recovery_mode,
+            "overlapRecoveryMarginThreshold": (
+                self.overlap_recovery_margin_threshold
+            ),
+            "overlapRecoveryPaddingMs": self.overlap_recovery_padding_ms,
+            "overlapRecoveryMaxIntervals": (
+                self.overlap_recovery_max_intervals
+            ),
+            "overlapRecoveryMaxIntervalMs": (
+                self.overlap_recovery_max_interval_ms
+            ),
+            "overlapRecoveryAsrMaxNewTokens": (
+                self.overlap_recovery_asr_max_new_tokens
+            ),
             "localLlmMode": self.local_llm_mode,
             "localLlmModel": self.local_llm_model,
             "localLlmAutoApply": False,
@@ -4375,7 +4490,7 @@ class SpeakerPipeline:
     """High-throughput cascade with quality-preserving selective escalation."""
 
     adapter_id = "offline-dynamic-speaker-cascade"
-    version = "2.13.0"
+    version = "2.15.0"
 
     def __init__(
         self,
@@ -4384,6 +4499,7 @@ class SpeakerPipeline:
         asr_adapter: BatchAsrAdapter,
         embedding_adapter: BatchEmbeddingAdapter,
         overlap_adapter: OverlapDetectionAdapter | None = None,
+        separation_adapter: SpeechSeparationAdapter | None = None,
         secondary_adapter: EscalationAdapter | None = None,
         review_adapter: EscalationAdapter | None = None,
         pyannote_adapter: EscalationAdapter | None = None,
@@ -4398,6 +4514,7 @@ class SpeakerPipeline:
         self.asr_adapter = asr_adapter
         self.embedding_adapter = embedding_adapter
         self.overlap_adapter = overlap_adapter or UnavailableOverlapAdapter()
+        self.separation_adapter = separation_adapter
         self.secondary_adapter = secondary_adapter or review_adapter
         self.pyannote_adapter = pyannote_adapter
         self.cache = cache or InMemoryStageCache()
@@ -4412,6 +4529,13 @@ class SpeakerPipeline:
         ):
             raise ValueError(
                 "secondary_adapter is required when pyannote_mode is fallback"
+            )
+        if (
+            self.config.overlap_recovery_mode == "guarded"
+            and self.separation_adapter is None
+        ):
+            raise ValueError(
+                "separation_adapter is required when overlap recovery is guarded"
             )
         if self.pyannote_adapter is not None and getattr(
             self.pyannote_adapter, "telemetry_enabled", False
@@ -4430,6 +4554,7 @@ class SpeakerPipeline:
             self.asr_adapter,
             self.embedding_adapter,
             self.overlap_adapter,
+            self.separation_adapter,
             self.secondary_adapter,
             self.pyannote_adapter,
         )
@@ -7797,7 +7922,9 @@ class SpeakerPipeline:
     ) -> list[ReviewCandidate]:
         reasons_by_segment: dict[str, list[str]] = {}
         protected_by_segment: dict[str, bool] = {}
-        for segment, window in zip(segments, windows):
+        windows_by_id = {window.window_id: window for window in windows}
+        for segment in segments:
+            window = windows_by_id.get(segment.segment_id)
             reasons: list[str] = []
             temporal = segment.evidence.get("temporalStabilization")
             if (
@@ -7867,7 +7994,14 @@ class SpeakerPipeline:
                 reasons.append(_OVERLAP_DETECTOR_UNAVAILABLE_REASON)
             if segment.speaker_margin < self.config.low_margin_threshold:
                 reasons.append("LOW_MARGIN")
-            if window.boundary_conflict:
+            boundary_evidence = segment.evidence.get("boundary")
+            if (
+                (window is not None and window.boundary_conflict)
+                or (
+                    isinstance(boundary_evidence, Mapping)
+                    and boundary_evidence.get("conflict") is True
+                )
+            ):
                 reasons.append("BOUNDARY_CONFLICT")
             if max(score.score for score in segment.speaker_scores) < (
                 self.config.outlier_score_threshold
@@ -8806,6 +8940,627 @@ class SpeakerPipeline:
         )
         return tuple(output)
 
+    def _overlap_recovery_intervals(
+        self,
+        prepared: PreparedAudio,
+        overlap: Sequence[OverlapDecision],
+    ) -> tuple[OverlapRecoveryInterval, ...]:
+        observed: dict[
+            tuple[int, int, tuple[str, str]],
+            OverlapRecoveryInterval,
+        ] = {}
+        for decision in overlap:
+            raw_intervals = decision.evidence.get("overlapIntervals")
+            if not isinstance(raw_intervals, Sequence) or isinstance(
+                raw_intervals,
+                (str, bytes, bytearray),
+            ):
+                continue
+            for raw in raw_intervals:
+                if not isinstance(raw, Mapping):
+                    continue
+                start_ms = raw.get("startMs")
+                end_ms = raw.get("endMs")
+                raw_speakers = raw.get("localSpeakers")
+                if (
+                    isinstance(start_ms, bool)
+                    or not isinstance(start_ms, int)
+                    or isinstance(end_ms, bool)
+                    or not isinstance(end_ms, int)
+                    or start_ms < 0
+                    or end_ms <= start_ms
+                    or end_ms > prepared.duration_ms
+                    or end_ms - start_ms
+                    > self.config.overlap_recovery_max_interval_ms
+                    or not isinstance(raw_speakers, Sequence)
+                    or isinstance(raw_speakers, (str, bytes, bytearray))
+                ):
+                    continue
+                local_speakers = tuple(
+                    sorted(
+                        {
+                            str(item).strip()
+                            for item in raw_speakers
+                            if str(item).strip()
+                        }
+                    )
+                )
+                if len(local_speakers) != 2:
+                    continue
+                pair = (local_speakers[0], local_speakers[1])
+                key = (start_ms, end_ms, pair)
+                padding = self.config.overlap_recovery_padding_ms
+                observed[key] = OverlapRecoveryInterval(
+                    interval_id=(
+                        f"overlap-{start_ms:08d}-{end_ms:08d}"
+                    ),
+                    detected_start_ms=start_ms,
+                    detected_end_ms=end_ms,
+                    context_start_ms=max(0, start_ms - padding),
+                    context_end_ms=min(
+                        prepared.duration_ms,
+                        end_ms + padding,
+                    ),
+                    local_speakers=pair,
+                )
+        return tuple(
+            sorted(
+                observed.values(),
+                key=lambda item: (
+                    item.detected_start_ms,
+                    item.detected_end_ms,
+                    item.local_speakers,
+                ),
+            )[: self.config.overlap_recovery_max_intervals]
+        )
+
+    @staticmethod
+    def _canonical_centroids(
+        embeddings: Sequence[EmbeddingRecord],
+        clusters: _ClusterResult,
+    ) -> tuple[tuple[float, ...], ...]:
+        if (
+            not embeddings
+            or len(embeddings) != len(clusters.assignments)
+            or clusters.count < 1
+        ):
+            raise WorkerError(
+                "OVERLAP_RECOVERY_IDENTITY_INVALID",
+                "overlap recovery requires complete canonical voiceprints",
+            )
+        vectors = tuple(_normalize(item.vector) for item in embeddings)
+        dimension = len(vectors[0])
+        if any(len(vector) != dimension for vector in vectors):
+            raise WorkerError(
+                "OVERLAP_RECOVERY_IDENTITY_INVALID",
+                "canonical voiceprints have inconsistent dimensions",
+            )
+        members: list[list[tuple[float, ...]]] = [
+            [] for _ in range(clusters.count)
+        ]
+        for vector, assignment in zip(vectors, clusters.assignments):
+            members[assignment].append(vector)
+        if any(not items for items in members):
+            raise WorkerError(
+                "OVERLAP_RECOVERY_IDENTITY_INVALID",
+                "a canonical speaker has no enrollment voiceprint",
+            )
+        return tuple(
+            _mean_vector(items, dimension)
+            for items in members
+        )
+
+    @staticmethod
+    def _separated_prepared_audio(
+        channel: SeparatedSpeechChannel,
+    ) -> tuple[PreparedAudio, SpeechWindow]:
+        window = SpeechWindow(
+            window_id=f"{channel.candidate_id}.source",
+            start_ms=0,
+            end_ms=channel.duration_ms,
+            metadata={"overlapRecoveryCandidateId": channel.candidate_id},
+        )
+        return (
+            PreparedAudio(
+                duration_ms=channel.duration_ms,
+                source_fingerprint=channel.audio_sha256,
+                normalization_profile="mossformer2-separated-16khz-v1",
+                windows=(window,),
+                stage_durations_ms={
+                    "decode": 0.0,
+                    "normalize": 0.0,
+                    "vad": 0.0,
+                    "boundary": 0.0,
+                },
+                audio_path=channel.audio_path,
+            ),
+            window,
+        )
+
+    def _overlap_recovery_asr_token_budget(self, duration_ms: int) -> int:
+        """Bound separated-channel decoding by speech duration.
+
+        The fixed allowance covers Qwen's language metadata and short lexical
+        bursts. Eight tokens per second is intentionally generous for fast
+        multilingual speech while preventing non-EOS noise from consuming the
+        general 512-token ASR ceiling.
+        """
+
+        duration_seconds = max(0.001, duration_ms / 1000.0)
+        estimated = 16 + math.ceil(duration_seconds * 8.0)
+        return min(
+            self.config.overlap_recovery_asr_max_new_tokens,
+            max(24, estimated),
+        )
+
+    def _recover_overlap_speech(
+        self,
+        *,
+        prepared: PreparedAudio,
+        overlap: Sequence[OverlapDecision],
+        embeddings: Sequence[EmbeddingRecord],
+        clusters: _ClusterResult,
+        segments: Sequence[TranscriptSegment],
+        requested_language: str,
+        context: AdapterContext,
+        metrics: PipelineMetricsCollector,
+    ) -> tuple[TranscriptSegment, ...]:
+        if self.config.overlap_recovery_mode != "guarded":
+            metrics.set_policy(
+                overlapRecoveryMode="disabled",
+                overlapRecoveryIntervalCount=0,
+                overlapRecoveryPublishedCount=0,
+            )
+            return tuple(segments)
+        if self.separation_adapter is None:
+            raise WorkerError(
+                "OVERLAP_RECOVERY_ADAPTER_MISSING",
+                "guarded overlap recovery requires a separation adapter",
+            )
+        intervals = self._overlap_recovery_intervals(prepared, overlap)
+        metrics.set_policy(
+            overlapRecoveryMode="guarded",
+            overlapRecoveryIntervalCount=len(intervals),
+            overlapRecoveryMarginThreshold=(
+                self.config.overlap_recovery_margin_threshold
+            ),
+        )
+        if not intervals:
+            metrics.set_policy(overlapRecoveryPublishedCount=0)
+            return tuple(segments)
+
+        started = time.perf_counter()
+        try:
+            raw_channels = self.separation_adapter.separate_batch(
+                prepared,
+                intervals,
+                context,
+            )
+        except Exception:
+            _release_adapter_resources(
+                self.separation_adapter,
+                suppress_errors=True,
+            )
+            raise
+        self._release_after_success(self.separation_adapter)
+        channels = tuple(raw_channels)
+        expected = {
+            (interval.interval_id, channel_index)
+            for interval in intervals
+            for channel_index in (1, 2)
+        }
+        observed = {
+            (channel.interval_id, channel.channel_index)
+            for channel in channels
+            if isinstance(channel, SeparatedSpeechChannel)
+        }
+        if (
+            len(channels) != len(expected)
+            or any(
+                not isinstance(channel, SeparatedSpeechChannel)
+                for channel in channels
+            )
+            or observed != expected
+        ):
+            raise WorkerError(
+                "OVERLAP_RECOVERY_RESULT_INVALID",
+                "separator must return exactly two channels per interval",
+            )
+        separation_elapsed_ms = (
+            time.perf_counter() - started
+        ) * 1000.0
+        metrics.record_stage(
+            "overlap-recovery-separation",
+            separation_elapsed_ms,
+        )
+        metrics.record_cascade_stage(
+            stage="overlap-recovery-separation",
+            provider=_adapter_identity(self.separation_adapter)["id"],
+            trigger_reason="EXACT_TWO_SPEAKER_OVERLAP",
+            candidate_ids=[interval.interval_id for interval in intervals],
+            candidate_scope="pyannote-exact-two-speaker-overlap",
+            source_count=len(intervals),
+            max_candidates=self.config.overlap_recovery_max_intervals,
+            candidate_start_ms=min(
+                item.detected_start_ms for item in intervals
+            ),
+            candidate_end_ms=max(
+                item.detected_end_ms for item in intervals
+            ),
+            invoked=True,
+            cache_stage="overlap-recovery-separation",
+            latency_ms=separation_elapsed_ms,
+            resource=None,
+            confidence=None,
+            exit_reason="COMPLETED",
+        )
+
+        interval_by_id = {
+            interval.interval_id: interval for interval in intervals
+        }
+        centroids = self._canonical_centroids(embeddings, clusters)
+        gated: list[
+            tuple[
+                SeparatedSpeechChannel,
+                OverlapRecoveryInterval,
+                PreparedAudio,
+                SpeechWindow,
+                EmbeddingRecord,
+                tuple[float, ...],
+                int,
+                float,
+            ]
+        ] = []
+        voiceprint_started = time.perf_counter()
+        try:
+            for channel in channels:
+                context.raise_if_cancelled()
+                separated, window = self._separated_prepared_audio(channel)
+                raw = self.embedding_adapter.embed_batch(
+                    separated,
+                    (window,),
+                    context,
+                )
+                if len(raw) != 1:
+                    raise WorkerError(
+                        "OVERLAP_RECOVERY_IDENTITY_INVALID",
+                        "CAM++ must return one voiceprint per separated channel",
+                    )
+                embedding = (
+                    raw[0]
+                    if isinstance(raw[0], EmbeddingRecord)
+                    else EmbeddingRecord.from_mapping(raw[0])
+                )
+                vector = _normalize(embedding.vector)
+                if any(len(vector) != len(item) for item in centroids):
+                    raise WorkerError(
+                        "OVERLAP_RECOVERY_IDENTITY_INVALID",
+                        "separated and canonical voiceprints have different dimensions",
+                    )
+                scores = tuple(
+                    max(-1.0, min(1.0, _dot(vector, centroid)))
+                    for centroid in centroids
+                )
+                ranked = sorted(
+                    enumerate(scores),
+                    key=lambda item: (-item[1], item[0]),
+                )
+                assigned = ranked[0][0]
+                margin = (
+                    ranked[0][1] - ranked[1][1]
+                    if len(ranked) > 1
+                    else 2.0
+                )
+                interval = interval_by_id[channel.interval_id]
+                active_primary = {
+                    segment.speaker_id
+                    for segment in segments
+                    if segment.start_ms < interval.detected_end_ms
+                    and segment.end_ms > interval.detected_start_ms
+                }
+                speaker_id = f"speaker-{assigned + 1}"
+                if (
+                    margin
+                    < self.config.overlap_recovery_margin_threshold
+                    or speaker_id in active_primary
+                ):
+                    continue
+                gated.append(
+                    (
+                        channel,
+                        interval,
+                        separated,
+                        window,
+                        embedding,
+                        scores,
+                        assigned,
+                        margin,
+                    )
+                )
+        finally:
+            self._release_after_success(self.embedding_adapter)
+        voiceprint_elapsed_ms = (
+            time.perf_counter() - voiceprint_started
+        ) * 1000.0
+        metrics.record_stage(
+            "overlap-recovery-voiceprint",
+            voiceprint_elapsed_ms,
+        )
+
+        token_budgets = {
+            channel.candidate_id: self._overlap_recovery_asr_token_budget(
+                channel.duration_ms
+            )
+            for channel, *_rest in gated
+        }
+        metrics.set_policy(
+            overlapRecoveryAsrCandidateCount=len(gated),
+            overlapRecoveryAsrMaxNewTokens=(
+                self.config.overlap_recovery_asr_max_new_tokens
+            ),
+            overlapRecoveryAsrMinTokenBudgetApplied=(
+                min(token_budgets.values()) if token_budgets else None
+            ),
+            overlapRecoveryAsrMaxTokenBudgetApplied=(
+                max(token_budgets.values()) if token_budgets else None
+            ),
+        )
+        recovered: list[TranscriptSegment] = []
+        asr_started = time.perf_counter()
+        try:
+            for (
+                channel,
+                interval,
+                separated,
+                window,
+                embedding,
+                scores,
+                assigned,
+                margin,
+            ) in gated:
+                context.raise_if_cancelled()
+                raw_hypotheses = self.asr_adapter.transcribe_batch(
+                    separated,
+                    (window,),
+                    context,
+                    requested_language=requested_language,
+                    max_generated_tokens=token_budgets[
+                        channel.candidate_id
+                    ],
+                )
+                if len(raw_hypotheses) != 1:
+                    raise WorkerError(
+                        "OVERLAP_RECOVERY_ASR_INVALID",
+                        "Qwen ASR must return one result per separated channel",
+                    )
+                hypothesis = (
+                    raw_hypotheses[0]
+                    if isinstance(raw_hypotheses[0], AsrHypothesis)
+                    else AsrHypothesis.from_mapping(raw_hypotheses[0])
+                )
+                raw_timestamps = hypothesis.evidence.get("timestamps")
+                if not isinstance(raw_timestamps, Sequence) or isinstance(
+                    raw_timestamps,
+                    (str, bytes, bytearray),
+                ):
+                    continue
+                local_start = (
+                    interval.detected_start_ms
+                    - interval.context_start_ms
+                )
+                local_end = (
+                    interval.detected_end_ms
+                    - interval.context_start_ms
+                )
+                timestamps: list[dict[str, Any]] = []
+                for item in raw_timestamps:
+                    if (
+                        not isinstance(item, Mapping)
+                        or isinstance(item.get("startMs"), bool)
+                        or not isinstance(item.get("startMs"), int)
+                        or isinstance(item.get("endMs"), bool)
+                        or not isinstance(item.get("endMs"), int)
+                        or item["endMs"] < item["startMs"]
+                    ):
+                        continue
+                    midpoint = (item["startMs"] + item["endMs"]) // 2
+                    if not local_start <= midpoint < local_end:
+                        continue
+                    timestamps.append(
+                        {
+                            "text": item.get("text"),
+                            "startMs": max(
+                                interval.detected_start_ms,
+                                interval.context_start_ms
+                                + item["startMs"],
+                            ),
+                            "endMs": min(
+                                interval.detected_end_ms,
+                                interval.context_start_ms
+                                + item["endMs"],
+                            ),
+                        }
+                    )
+                text = self._join_aligned_token_text(timestamps)
+                if not text or not timestamps:
+                    continue
+                try:
+                    candidate_set = project_asr_candidate_set(
+                        hypothesis.evidence,
+                        source_text=hypothesis.text,
+                        target_text=text,
+                        target_tokens=timestamps,
+                        target_window_id=channel.candidate_id,
+                        target_start_ms=interval.detected_start_ms,
+                        target_end_ms=interval.detected_end_ms,
+                    )
+                except AsrEvidenceError:
+                    continue
+                speaker_id = f"speaker-{assigned + 1}"
+                recovered.append(
+                    TranscriptSegment(
+                        segment_id=channel.candidate_id,
+                        start_ms=interval.detected_start_ms,
+                        end_ms=interval.detected_end_ms,
+                        speaker_id=speaker_id,
+                        raw_text=text,
+                        normalized_text=text,
+                        display_text=text,
+                        confidence=hypothesis.confidence,
+                        speaker_scores=tuple(
+                            SpeakerScore(
+                                f"speaker-{index + 1}",
+                                score,
+                            )
+                            for index, score in enumerate(scores)
+                        ),
+                        speaker_margin=margin,
+                        overlapping=True,
+                        evidence={
+                            "preparation": {
+                                "provider": _adapter_identity(
+                                    self.separation_adapter
+                                ),
+                                "audioPath": channel.audio_path,
+                            },
+                            "boundary": {
+                                "provider": _adapter_identity(
+                                    self.overlap_adapter
+                                ),
+                                "conflict": False,
+                            },
+                            "asr": {
+                                "provider": _adapter_identity(
+                                    self.asr_adapter
+                                ),
+                                **dict(hypothesis.evidence),
+                                "timestamps": timestamps,
+                                **candidate_set,
+                            },
+                            "voiceprint": {
+                                "provider": _adapter_identity(
+                                    self.embedding_adapter
+                                ),
+                                "confidence": embedding.confidence,
+                                **dict(embedding.evidence),
+                            },
+                            "overlap": {
+                                "provider": _adapter_identity(
+                                    self.overlap_adapter
+                                ),
+                                "detectorStatus": "EVALUATED",
+                                "overlapDetectorRun": True,
+                                "reviewStatus": "REVIEW_REQUIRED",
+                                "reasonCode": (
+                                    "SEPARATED_SECONDARY_SPEECH_RECOVERED"
+                                ),
+                                "overlapIntervals": [
+                                    {
+                                        "startMs": (
+                                            interval.detected_start_ms
+                                        ),
+                                        "endMs": interval.detected_end_ms,
+                                        "localSpeakers": list(
+                                            interval.local_speakers
+                                        ),
+                                    }
+                                ],
+                            },
+                            "overlapRecovery": {
+                                "provider": _adapter_identity(
+                                    self.separation_adapter
+                                ),
+                                "candidateId": channel.candidate_id,
+                                "channelIndex": channel.channel_index,
+                                "audioSha256": channel.audio_sha256,
+                                "contextStartMs": interval.context_start_ms,
+                                "contextEndMs": interval.context_end_ms,
+                                "detectedStartMs": (
+                                    interval.detected_start_ms
+                                ),
+                                "detectedEndMs": interval.detected_end_ms,
+                                "contextPublishedAsSpeech": False,
+                                "speakerMargin": margin,
+                                "marginThreshold": (
+                                    self.config
+                                    .overlap_recovery_margin_threshold
+                                ),
+                                "tokenProjection": (
+                                    "forced-alignment-midpoint-v1"
+                                ),
+                                "asrMaxNewTokens": token_budgets[
+                                    channel.candidate_id
+                                ],
+                                "asrTokenBudgetPolicy": (
+                                    "duration-8tps-plus16-v1"
+                                ),
+                                **dict(channel.evidence),
+                            },
+                        },
+                        language=(
+                            str(hypothesis.evidence["language"])
+                            if isinstance(
+                                hypothesis.evidence.get("language"),
+                                str,
+                            )
+                            else None
+                        ),
+                    )
+                )
+        finally:
+            self._release_after_success(self.asr_adapter)
+        asr_elapsed_ms = (time.perf_counter() - asr_started) * 1000.0
+        metrics.record_stage("overlap-recovery-asr", asr_elapsed_ms)
+        metrics.set_policy(
+            overlapRecoverySeparatedChannelCount=len(channels),
+            overlapRecoveryVoiceprintQualifiedCount=len(gated),
+            overlapRecoveryPublishedCount=len(recovered),
+            overlapRecoveryRejectedCount=len(channels) - len(recovered),
+        )
+        metrics.record_cascade_stage(
+            stage="overlap-recovery-publish",
+            provider=_adapter_identity(self.asr_adapter)["id"],
+            trigger_reason="CAMPP_SECONDARY_MARGIN_AND_TOKEN_ALIGNMENT",
+            candidate_ids=[item.segment_id for item in recovered],
+            candidate_scope="separated-secondary-speech-only",
+            source_count=len(channels),
+            max_candidates=len(channels),
+            candidate_start_ms=(
+                min(item.start_ms for item in recovered)
+                if recovered
+                else None
+            ),
+            candidate_end_ms=(
+                max(item.end_ms for item in recovered)
+                if recovered
+                else None
+            ),
+            invoked=bool(gated),
+            cache_stage="overlap-recovery-asr",
+            latency_ms=asr_elapsed_ms,
+            resource=None,
+            confidence=(
+                min(item.speaker_margin for item in recovered)
+                if recovered
+                else None
+            ),
+            exit_reason=(
+                "PUBLISHED_REVIEW_REQUIRED"
+                if recovered
+                else "NO_TOKEN_ALIGNED_SECONDARY_SPEECH"
+            ),
+        )
+        return tuple(
+            sorted(
+                [*segments, *recovered],
+                key=lambda item: (
+                    item.start_ms,
+                    item.end_ms,
+                    item.segment_id,
+                ),
+            )
+        )
+
     def transcribe(
         self,
         request: StartJobRequest,
@@ -8826,6 +9581,7 @@ class SpeakerPipeline:
             localLlmAutoApply=False,
             maxSecondaryFraction=self.config.max_secondary_fraction,
             speakerCountMode=request.speaker_policy.mode.value,
+            overlapRecoveryMode=self.config.overlap_recovery_mode,
         )
         context.raise_if_cancelled()
         language_validator = getattr(
@@ -9213,6 +9969,16 @@ class SpeakerPipeline:
         )
         segments = self._decode_global_speaker_sequence(segments)
         segments = self._apply_pyannote_canonical_mapping(segments)
+        segments = self._recover_overlap_speech(
+            prepared=prepared,
+            overlap=overlap,
+            embeddings=embeddings,
+            clusters=clusters,
+            segments=segments,
+            requested_language=request.language,
+            context=context,
+            metrics=metrics,
+        )
         self._assert_speaker_cardinality(
             segments=segments,
             clusters=clusters,
@@ -9298,6 +10064,21 @@ class SpeakerPipeline:
                     "offline": True,
                 }
             )
+        if self.separation_adapter is not None:
+            models.append(
+                {
+                    "role": "overlap-separation",
+                    "name": _adapter_identity(
+                        self.separation_adapter
+                    )["id"],
+                    "version": _adapter_identity(
+                        self.separation_adapter
+                    )["version"],
+                    "mode": self.config.overlap_recovery_mode,
+                    "scope": "exact-two-speaker-overlap-only",
+                    "offline": True,
+                }
+            )
         models.append(
             {
                 "role": "semantic",
@@ -9364,12 +10145,15 @@ __all__ = [
     "JsonStageCache",
     "NoOverlapAdapter",
     "OverlapDecision",
+    "OverlapRecoveryInterval",
     "OverlapDetectionAdapter",
     "PreparedAudio",
     "PyannoteReviewAdapter",
     "Qwen3AsrAdapter",
     "ReviewCandidate",
     "ReviewProposal",
+    "SeparatedSpeechChannel",
+    "SpeechSeparationAdapter",
     "SpeakerPipeline",
     "SpeakerPipelineConfig",
     "SpeechWindow",

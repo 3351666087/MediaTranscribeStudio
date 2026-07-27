@@ -15,7 +15,8 @@
     "qwen3ForcedAligner": "D:/models/qwen/Qwen3-ForcedAligner-0.6B",
     "camPlus": "D:/models/funasr/campplus",
     "eres2netV2": "D:/models/modelscope/eres2netv2",
-    "pyannote": "D:/models/pyannote/speaker-diarization-community-1"
+    "pyannote": "D:/models/pyannote/speaker-diarization-community-1",
+    "mossformer2Separation": null
   },
   "executables": {
     "ffmpeg": "ffmpeg",
@@ -53,6 +54,12 @@
     "languageSplitSearchMs": 1000,
     "eres2netDecisionMargin": 0.05,
     "pyannoteMode": "fallback",
+    "overlapRecoveryMode": "disabled",
+    "overlapRecoveryMarginThreshold": 0.18,
+    "overlapRecoveryPaddingMs": 600,
+    "overlapRecoveryMaxIntervals": 4,
+    "overlapRecoveryMaxIntervalMs": 12000,
+    "overlapRecoveryAsrMaxNewTokens": 96,
     "localLlmMode": "suggestion-only",
     "localLlmModel": "qwen3.5:9b"
   },

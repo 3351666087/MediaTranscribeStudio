@@ -24,6 +24,7 @@ from .production_runners import (
     FfmpegFunAsrPreparationAdapter,
     LocalERes2NetV2Verifier,
     LocalFunAsrCamPlusAdapter,
+    LocalMossFormer2SeparationAdapter,
     LocalPyannoteAuditAdapter,
     LocalQwen3AsrAdapter,
 )
@@ -46,6 +47,7 @@ class ProductionFactories:
     embedding: Callable[..., Any] = LocalFunAsrCamPlusAdapter
     secondary: Callable[..., Any] = LocalERes2NetV2Verifier
     pyannote: Callable[..., Any] = LocalPyannoteAuditAdapter
+    separation: Callable[..., Any] = LocalMossFormer2SeparationAdapter
     cache: Callable[..., Any] = JsonStageCache
     pipeline: Callable[..., Any] = SpeakerPipeline
     assembler: Callable[..., Any] = ReportDocumentAssembler
@@ -109,6 +111,12 @@ def build_production_composition(
             device=config.runtime.pyannote_device,
             python_executable=config.executables.pyannote_python,
         )
+    separation = None
+    if config.speaker.overlap_recovery_mode == "guarded":
+        assert config.models.mossformer2_separation is not None
+        separation = factories.separation(
+            model_path=config.models.mossformer2_separation,
+        )
 
     pipeline_config = SpeakerPipelineConfig(
         normalization_profile=config.speaker.normalization_profile,
@@ -139,6 +147,22 @@ def build_production_composition(
             config.speaker.pyannote_primary_dominance_threshold
         ),
         pyannote_mode=config.speaker.pyannote_mode,
+        overlap_recovery_mode=config.speaker.overlap_recovery_mode,
+        overlap_recovery_margin_threshold=(
+            config.speaker.overlap_recovery_margin_threshold
+        ),
+        overlap_recovery_padding_ms=(
+            config.speaker.overlap_recovery_padding_ms
+        ),
+        overlap_recovery_max_intervals=(
+            config.speaker.overlap_recovery_max_intervals
+        ),
+        overlap_recovery_max_interval_ms=(
+            config.speaker.overlap_recovery_max_interval_ms
+        ),
+        overlap_recovery_asr_max_new_tokens=(
+            config.speaker.overlap_recovery_asr_max_new_tokens
+        ),
         local_llm_mode=config.speaker.local_llm_mode,
         local_llm_model=config.speaker.local_llm_model,
         model_residency=config.runtime.model_residency,
@@ -148,6 +172,7 @@ def build_production_composition(
         asr_adapter=asr,
         embedding_adapter=embedding,
         overlap_adapter=pyannote,
+        separation_adapter=separation,
         secondary_adapter=secondary,
         pyannote_adapter=pyannote,
         cache=factories.cache(config.paths.cache_root),

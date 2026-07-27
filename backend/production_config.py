@@ -212,6 +212,7 @@ class ProductionModels:
     cam_plus: Path
     eres2net_v2: Path
     pyannote: Path | None
+    mossformer2_separation: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,12 @@ class ProductionSpeakerPolicy:
     pyannote_mapping_margin_threshold: float = 0.05
     pyannote_primary_dominance_threshold: float = 0.60
     pyannote_mode: str = "disabled"
+    overlap_recovery_mode: str = "disabled"
+    overlap_recovery_margin_threshold: float = 0.18
+    overlap_recovery_padding_ms: int = 600
+    overlap_recovery_max_intervals: int = 4
+    overlap_recovery_max_interval_ms: int = 12_000
+    overlap_recovery_asr_max_new_tokens: int = 96
     local_llm_mode: str = "suggestion-only"
     local_llm_model: str = "qwen3.5:9b"
 
@@ -432,6 +439,7 @@ class ProductionConfig:
                 "camPlus",
                 "eres2netV2",
                 "pyannote",
+                "mossformer2Separation",
             },
             required={
                 "funasrVad",
@@ -469,6 +477,11 @@ class ProductionConfig:
             pyannote=_optional_local_path(
                 raw_models.get("pyannote"),
                 field="models.pyannote",
+                base_directory=base_directory,
+            ),
+            mossformer2_separation=_optional_local_path(
+                raw_models.get("mossformer2Separation"),
+                field="models.mossformer2Separation",
                 base_directory=base_directory,
             ),
         )
@@ -616,6 +629,12 @@ class ProductionConfig:
                 "pyannoteMappingMarginThreshold",
                 "pyannotePrimaryDominanceThreshold",
                 "pyannoteMode",
+                "overlapRecoveryMode",
+                "overlapRecoveryMarginThreshold",
+                "overlapRecoveryPaddingMs",
+                "overlapRecoveryMaxIntervals",
+                "overlapRecoveryMaxIntervalMs",
+                "overlapRecoveryAsrMaxNewTokens",
                 "localLlmMode",
                 "localLlmModel",
             },
@@ -771,6 +790,44 @@ class ProductionConfig:
                 field="speaker.pyannoteMode",
                 choices={"disabled", "fallback"},
             ),
+            overlap_recovery_mode=_choice(
+                raw_speaker.get("overlapRecoveryMode", "disabled"),
+                field="speaker.overlapRecoveryMode",
+                choices={"disabled", "guarded"},
+            ),
+            overlap_recovery_margin_threshold=_number(
+                raw_speaker.get("overlapRecoveryMarginThreshold", 0.18),
+                field="speaker.overlapRecoveryMarginThreshold",
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            overlap_recovery_padding_ms=_integer(
+                raw_speaker.get("overlapRecoveryPaddingMs", 600),
+                field="speaker.overlapRecoveryPaddingMs",
+                minimum=0,
+                maximum=10_000,
+            ),
+            overlap_recovery_max_intervals=_integer(
+                raw_speaker.get("overlapRecoveryMaxIntervals", 4),
+                field="speaker.overlapRecoveryMaxIntervals",
+                minimum=1,
+                maximum=64,
+            ),
+            overlap_recovery_max_interval_ms=_integer(
+                raw_speaker.get("overlapRecoveryMaxIntervalMs", 12_000),
+                field="speaker.overlapRecoveryMaxIntervalMs",
+                minimum=100,
+                maximum=120_000,
+            ),
+            overlap_recovery_asr_max_new_tokens=_integer(
+                raw_speaker.get(
+                    "overlapRecoveryAsrMaxNewTokens",
+                    96,
+                ),
+                field="speaker.overlapRecoveryAsrMaxNewTokens",
+                minimum=24,
+                maximum=512,
+            ),
             local_llm_mode=_choice(
                 raw_speaker.get("localLlmMode", "suggestion-only"),
                 field="speaker.localLlmMode",
@@ -812,6 +869,29 @@ class ProductionConfig:
         if speaker.pyannote_mode == "disabled" and models.pyannote is not None:
             raise ProductionConfigError(
                 "models.pyannote must be null or omitted when pyannote is disabled"
+            )
+        if (
+            speaker.overlap_recovery_mode == "guarded"
+            and models.mossformer2_separation is None
+        ):
+            raise ProductionConfigError(
+                "models.mossformer2Separation is required when guarded "
+                "overlap recovery is enabled"
+            )
+        if (
+            speaker.overlap_recovery_mode == "guarded"
+            and speaker.pyannote_mode == "disabled"
+        ):
+            raise ProductionConfigError(
+                "guarded overlap recovery requires pyannote overlap evidence"
+            )
+        if (
+            speaker.overlap_recovery_mode == "disabled"
+            and models.mossformer2_separation is not None
+        ):
+            raise ProductionConfigError(
+                "models.mossformer2Separation must be null or omitted when "
+                "overlap recovery is disabled"
             )
 
         raw_pdf = _object(
@@ -972,6 +1052,22 @@ class ProductionConfig:
             "offline": self.offline,
             "inputRootCount": len(self.paths.allowed_input_roots),
             "pyannoteMode": self.speaker.pyannote_mode,
+            "overlapRecoveryMode": self.speaker.overlap_recovery_mode,
+            "overlapRecoveryMarginThreshold": (
+                self.speaker.overlap_recovery_margin_threshold
+            ),
+            "overlapRecoveryPaddingMs": (
+                self.speaker.overlap_recovery_padding_ms
+            ),
+            "overlapRecoveryMaxIntervals": (
+                self.speaker.overlap_recovery_max_intervals
+            ),
+            "overlapRecoveryMaxIntervalMs": (
+                self.speaker.overlap_recovery_max_interval_ms
+            ),
+            "overlapRecoveryAsrMaxNewTokens": (
+                self.speaker.overlap_recovery_asr_max_new_tokens
+            ),
             "maxWorkers": self.runtime.max_workers,
             "modelResidency": self.runtime.model_residency,
             "heartbeatIntervalSeconds": (
@@ -1425,6 +1521,16 @@ def run_production_preflight(
                 True,
             )
         )
+    if config.speaker.overlap_recovery_mode == "guarded":
+        assert config.models.mossformer2_separation is not None
+        model_paths.append(
+            (
+                "mossformer2-separation-model",
+                "mossformer2Separation",
+                config.models.mossformer2_separation,
+                True,
+            )
+        )
     for check_id, model_key, path, required in model_paths:
         add(
             check_id,
@@ -1506,6 +1612,10 @@ def run_production_preflight(
         ("runtime-soundfile", "soundfile", True),
         ("runtime-numpy", "numpy", True),
     ]
+    if config.speaker.overlap_recovery_mode == "guarded":
+        runtime_modules.append(
+            ("runtime-clearvoice", "clearvoice", True)
+        )
     for check_id, module, required in runtime_modules:
         passed = True if not probe_runtime_imports else runtime_probe(module)
         add(
@@ -1579,6 +1689,20 @@ def production_diagnostics(
                 "scope": "unresolved-segments-only",
                 "mode": config.speaker.pyannote_mode,
                 "telemetry": "disabled",
+            }
+        )
+    if config.speaker.overlap_recovery_mode == "guarded":
+        stages.append(
+            {
+                "stage": "overlap-recovery",
+                "component": "MossFormer2_SS_16K + CAM++ + Qwen3-ASR",
+                "scope": "exact-two-speaker-overlap-only",
+                "mode": "guarded",
+                "marginThreshold": (
+                    config.speaker.overlap_recovery_margin_threshold
+                ),
+                "contextPublishedAsSpeech": False,
+                "tokenAlignmentRequired": True,
             }
         )
     return {

@@ -158,6 +158,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 "pyannoteMappingMarginThreshold": 0.07,
                 "pyannotePrimaryDominanceThreshold": 0.65,
                 "pyannoteMode": pyannote_mode,
+                "overlapRecoveryAsrMaxNewTokens": 72,
                 "localLlmMode": "suggestion-only",
             },
             "pdf": {
@@ -190,6 +191,10 @@ class ProductionCompositionTests(unittest.TestCase):
             0.65,
         )
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
+        self.assertEqual(
+            config.speaker.overlap_recovery_asr_max_new_tokens,
+            72,
+        )
         self.assertEqual(config.runtime.vad_device, "cpu")
         self.assertEqual(config.runtime.model_residency, "worker")
         self.assertEqual(config.runtime.heartbeat_interval_seconds, 7.5)
@@ -494,6 +499,10 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(
             pipeline.config.pyannote_primary_dominance_threshold,
             0.65,
+        )
+        self.assertEqual(
+            pipeline.config.overlap_recovery_asr_max_new_tokens,
+            72,
         )
         self.assertIsNotNone(pipeline.pyannote_adapter)
         self.assertIs(

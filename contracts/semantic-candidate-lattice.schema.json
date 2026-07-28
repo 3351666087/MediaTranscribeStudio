@@ -405,7 +405,34 @@
         "endMs": {
           "type": "integer",
           "minimum": 1
+        },
+        "speechDurationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "speechRatio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "speechWindowCount": {
+          "type": "integer",
+          "minimum": 0
         }
+      },
+      "dependentRequired": {
+        "speechDurationMs": [
+          "speechRatio",
+          "speechWindowCount"
+        ],
+        "speechRatio": [
+          "speechDurationMs",
+          "speechWindowCount"
+        ],
+        "speechWindowCount": [
+          "speechDurationMs",
+          "speechRatio"
+        ]
       }
     },
     "timelinePayload": {
@@ -482,6 +509,11 @@
         },
         "overlap": {
           "type": "boolean"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
         }
       }
     },
@@ -555,6 +587,9 @@
           ],
           "minimum": 0,
           "maximum": 1
+        },
+        "evidenceSha256": {
+          "$ref": "#/$defs/sha256"
         }
       }
     },

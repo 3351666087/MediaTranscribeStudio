@@ -1,10 +1,11 @@
 """Strict, offline-first local language-model boundary.
 
 The production worker deliberately treats a local model as an untrusted
-semantic or business-output provider. It may propose evidence-bound transcript
-repairs, translate, or summarize text, but
-it cannot mutate acoustic evidence, timestamps, speaker identities, review
-locks, or the immutable raw transcript.
+semantic or business-output provider. A semantic model may rank hash-bound
+candidate IDs spanning speech disposition, complete speaker timelines,
+speaker assignments, language spans, and ASR text, or request bounded
+challenger generation. It cannot mutate acoustic evidence, candidate identity,
+human locks, or the immutable raw transcript.
 
 The default provider is Ollama-compatible and is restricted to loopback
 addresses.  This module uses only the Python standard library so that the

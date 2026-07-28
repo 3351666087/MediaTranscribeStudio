@@ -183,7 +183,10 @@ def _normalize_turns(
     for index, raw in enumerate(value):
         if not isinstance(raw, Mapping):
             raise _fail(f"{field}[{index}] must be an object")
-        if set(raw) != {"startMs", "endMs", "speakerId", "overlap"}:
+        if set(raw) not in (
+            {"startMs", "endMs", "speakerId", "overlap"},
+            {"startMs", "endMs", "speakerId", "overlap", "text"},
+        ):
             raise _fail(f"{field}[{index}] fields do not match the turn contract")
         start, end = _time_range(
             raw,
@@ -196,14 +199,19 @@ def _normalize_turns(
         overlap = raw.get("overlap")
         if not isinstance(overlap, bool):
             raise _fail(f"{field}[{index}].overlap must be boolean")
-        turns.append(
-            {
-                "startMs": start,
-                "endMs": end,
-                "speakerId": speaker_id,
-                "overlap": overlap,
-            }
-        )
+        turn = {
+            "startMs": start,
+            "endMs": end,
+            "speakerId": speaker_id,
+            "overlap": overlap,
+        }
+        if "text" in raw:
+            turn["text"] = _text(
+                raw.get("text"),
+                f"{field}[{index}].text",
+                maximum=20_000,
+            )
+        turns.append(turn)
     canonical = sorted(
         turns,
         key=lambda item: (
@@ -229,7 +237,12 @@ def _payload(
         raise _fail(f"{field} must be an object")
     if domain == "speech-disposition":
         required = {"classification", "startMs", "endMs"}
-        if set(value) != required:
+        evidence_fields = {
+            "speechDurationMs",
+            "speechRatio",
+            "speechWindowCount",
+        }
+        if set(value) not in (required, required | evidence_fields):
             raise _fail(f"{field} fields do not match speech-disposition")
         classification = value.get("classification")
         if classification not in {
@@ -240,11 +253,40 @@ def _payload(
         start, end = _time_range(value, field=field, duration_ms=duration_ms)
         if start != 0 or end != duration_ms:
             raise _fail(f"{field} must cover the complete source media")
-        return {
+        payload = {
             "classification": classification,
             "startMs": start,
             "endMs": end,
         }
+        if evidence_fields.issubset(value):
+            speech_duration = _integer(
+                value.get("speechDurationMs"),
+                f"{field}.speechDurationMs",
+            )
+            speech_window_count = _integer(
+                value.get("speechWindowCount"),
+                f"{field}.speechWindowCount",
+            )
+            speech_ratio = _optional_score(
+                value.get("speechRatio"),
+                f"{field}.speechRatio",
+            )
+            if (
+                speech_duration > duration_ms
+                or speech_ratio is None
+                or not 0.0 <= speech_ratio <= 1.0
+                or abs(speech_ratio - speech_duration / duration_ms) > 1e-9
+                or (speech_duration == 0) != (speech_window_count == 0)
+            ):
+                raise _fail(f"{field} speech evidence metrics are inconsistent")
+            payload.update(
+                {
+                    "speechDurationMs": speech_duration,
+                    "speechRatio": speech_ratio,
+                    "speechWindowCount": speech_window_count,
+                }
+            )
+        return payload
     if domain == "speaker-cardinality-timeline":
         required = {
             "speakerCount",
@@ -316,7 +358,7 @@ def _payload(
             "language",
             "confidence",
         }
-        if set(value) != required:
+        if set(value) not in (required, required | {"evidenceSha256"}):
             raise _fail(f"{field} fields do not match language-span")
         start, end = _time_range(value, field=field, duration_ms=duration_ms)
         try:
@@ -329,7 +371,7 @@ def _payload(
         confidence = _optional_score(value.get("confidence"), f"{field}.confidence")
         if confidence is not None and not 0.0 <= confidence <= 1.0:
             raise _fail(f"{field}.confidence must be between 0 and 1")
-        return {
+        payload = {
             "segmentId": _text(
                 value.get("segmentId"),
                 f"{field}.segmentId",
@@ -340,6 +382,12 @@ def _payload(
             "language": language,
             "confidence": confidence,
         }
+        if "evidenceSha256" in value:
+            payload["evidenceSha256"] = _sha256(
+                value.get("evidenceSha256"),
+                f"{field}.evidenceSha256",
+            )
+        return payload
     if domain == "asr-text":
         required = {
             "segmentId",
@@ -1331,6 +1379,150 @@ def validate_semantic_candidate_lattice(
     return rebuilt
 
 
+def extend_semantic_candidate_lattice(
+    lattice: Mapping[str, Any],
+    *,
+    supplemental_groups: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Append bound challenger candidates without changing existing identities."""
+
+    validated = validate_semantic_candidate_lattice(lattice)
+    if (
+        not isinstance(supplemental_groups, Sequence)
+        or isinstance(supplemental_groups, (str, bytes, bytearray))
+        or not supplemental_groups
+    ):
+        raise _fail("supplementalGroups must be a non-empty array")
+    if len(supplemental_groups) > 128:
+        raise _fail("supplementalGroups exceeds the bounded maximum of 128")
+
+    group_index = {
+        str(group["groupId"]): {
+            "domain": str(domain["domain"]),
+            "scopeId": str(group["scopeId"]),
+            "group": group,
+        }
+        for domain in validated["domains"]
+        for group in domain["groups"]
+    }
+    candidate_groups: dict[str, list[dict[str, Any]]] = {
+        domain: [] for domain in SEMANTIC_CANDIDATE_DOMAINS
+    }
+    mutable_groups: dict[str, dict[str, Any]] = {}
+    for domain in validated["domains"]:
+        domain_name = str(domain["domain"])
+        for group in domain["groups"]:
+            rebuilt_input = {
+                "scopeId": group["scopeId"],
+                "candidates": [
+                    {
+                        "payload": candidate["payload"],
+                        "producers": candidate["producers"],
+                        "selectionEligible": candidate["selectionEligible"],
+                        "eligibilityReason": candidate["eligibilityReason"],
+                        "isCurrent": (
+                            candidate["candidateId"]
+                            == group["currentCandidateId"]
+                        ),
+                    }
+                    for candidate in group["candidates"]
+                ],
+            }
+            candidate_groups[domain_name].append(rebuilt_input)
+            mutable_groups[str(group["groupId"])] = rebuilt_input
+
+    seen_groups: set[str] = set()
+    supplemental_candidate_count = 0
+    for index, raw in enumerate(supplemental_groups):
+        field = f"supplementalGroups[{index}]"
+        if not isinstance(raw, Mapping):
+            raise _fail(f"{field} must be an object")
+        if set(raw) != {"domain", "groupId", "scopeId", "candidates"}:
+            raise _fail(f"{field} fields do not match the supplement contract")
+        group_id = _text(raw.get("groupId"), f"{field}.groupId", maximum=200)
+        existing = group_index.get(group_id)
+        if existing is None:
+            raise _fail(f"{field}.groupId is unknown")
+        if group_id in seen_groups:
+            raise _fail(f"{field}.groupId is duplicated")
+        seen_groups.add(group_id)
+        if (
+            raw.get("domain") != existing["domain"]
+            or raw.get("scopeId") != existing["scopeId"]
+        ):
+            raise _fail(f"{field} is rebound to another domain or scope")
+        raw_candidates = raw.get("candidates")
+        if not isinstance(raw_candidates, list) or not raw_candidates:
+            raise _fail(f"{field}.candidates must be a non-empty array")
+        if len(raw_candidates) > 8:
+            raise _fail(f"{field}.candidates exceeds the bounded maximum of 8")
+        supplemental_candidate_count += len(raw_candidates)
+        if supplemental_candidate_count > 256:
+            raise _fail("supplemental candidates exceed the bounded maximum of 256")
+        for candidate_index, candidate in enumerate(raw_candidates):
+            candidate_field = f"{field}.candidates[{candidate_index}]"
+            if not isinstance(candidate, Mapping):
+                raise _fail(f"{candidate_field} must be an object")
+            if set(candidate) != {
+                "payload",
+                "producers",
+                "selectionEligible",
+                "eligibilityReason",
+            }:
+                raise _fail(
+                    f"{candidate_field} fields do not match the challenger "
+                    "candidate contract"
+                )
+            try:
+                validate_strict_json(dict(candidate))
+            except ValueError as exc:
+                raise _fail(
+                    f"{candidate_field} must contain strict finite JSON"
+                ) from exc
+            mutable_groups[group_id]["candidates"].append(
+                {
+                    **dict(candidate),
+                    "isCurrent": False,
+                }
+            )
+
+    binding = validated["binding"]
+    extended = build_semantic_candidate_lattice(
+        source_media_sha256=binding["sourceMediaSha256"],
+        transcript_sha256=binding["transcriptSha256"],
+        transcript_schema_version=binding["transcriptSchemaVersion"],
+        source_duration_ms=binding["sourceDurationMs"],
+        candidate_groups=candidate_groups,
+    )
+    extended_groups = {
+        str(group["groupId"]): group
+        for domain in extended["domains"]
+        for group in domain["groups"]
+    }
+    for group_id, previous in group_index.items():
+        current = extended_groups.get(group_id)
+        if current is None:
+            raise _fail("candidate lattice extension removed an existing group")
+        if current["currentCandidateId"] != previous["group"]["currentCandidateId"]:
+            raise _fail(
+                "candidate lattice extension changed the current candidate identity"
+            )
+        previous_ids = {
+            candidate["candidateId"]
+            for candidate in previous["group"]["candidates"]
+        }
+        current_ids = {
+            candidate["candidateId"] for candidate in current["candidates"]
+        }
+        if not previous_ids.issubset(current_ids):
+            raise _fail(
+                "candidate lattice extension replaced an existing candidate identity"
+            )
+    if extended["latticeSha256"] == validated["latticeSha256"]:
+        raise _fail("candidate lattice extension did not add a distinct candidate")
+    return extended
+
+
 def compact_candidate_lattice_context(
     lattice: Mapping[str, Any],
     *,
@@ -1422,5 +1614,6 @@ __all__ = [
     "build_semantic_candidate_lattice",
     "build_semantic_candidate_lattice_from_document",
     "compact_candidate_lattice_context",
+    "extend_semantic_candidate_lattice",
     "validate_semantic_candidate_lattice",
 ]

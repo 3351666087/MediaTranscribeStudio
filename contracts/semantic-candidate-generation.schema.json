@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/semantic-candidate-generation/1.0.0",
+  "title": "Bounded semantic candidate generation",
+  "description": "Registered challenger results and the deterministically extended candidate lattice produced for job-level arbitration requests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "artifactType",
+    "artifactId",
+    "generationSha256",
+    "jobId",
+    "generatedAt",
+    "binding",
+    "status",
+    "fulfilledRequests",
+    "unfulfilledRequests",
+    "supplementalGroups",
+    "outputLattice",
+    "metrics"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "artifactType": {
+      "const": "semantic-candidate-generation"
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^semantic-generation-[a-f0-9]{24}$"
+    },
+    "generationSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "generatedAt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceMediaSha256",
+        "transcriptSha256",
+        "inputLatticeSha256",
+        "arbitrationArtifactSha256",
+        "arbitrationDecisionSha256",
+        "outputLatticeSha256"
+      ],
+      "properties": {
+        "sourceMediaSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "transcriptSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "inputLatticeSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "arbitrationArtifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "arbitrationDecisionSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "outputLatticeSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "partial"
+      ]
+    },
+    "fulfilledRequests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/fulfilledRequest"
+      }
+    },
+    "unfulfilledRequests": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "supplementalGroups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/supplementalGroup"
+      }
+    },
+    "outputLattice": {
+      "type": "object"
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestCount",
+        "fulfilledRequestCount",
+        "unfulfilledRequestCount",
+        "generatedCandidateCount",
+        "inputAvailableGroupCount",
+        "outputAvailableGroupCount"
+      ],
+      "properties": {
+        "requestCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fulfilledRequestCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "unfulfilledRequestCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "generatedCandidateCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "inputAvailableGroupCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputAvailableGroupCount": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "domain": {
+      "enum": [
+        "speech-disposition",
+        "speaker-cardinality-timeline",
+        "speaker-assignment",
+        "language-span",
+        "asr-text"
+      ]
+    },
+    "groupId": {
+      "type": "string",
+      "pattern": "^group-[a-f0-9]{24}$"
+    },
+    "candidateId": {
+      "type": "string",
+      "pattern": "^candidate-[a-f0-9]{24}$"
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "producerType",
+        "systemId",
+        "revision",
+        "artifactSha256",
+        "modelManifestSha256",
+        "identityStatus"
+      ],
+      "properties": {
+        "producerType": {
+          "enum": [
+            "model",
+            "deterministic",
+            "human"
+          ]
+        },
+        "systemId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "artifactSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "modelManifestSha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identityStatus": {
+          "enum": [
+            "manifest-bound",
+            "artifact-bound",
+            "human-attested",
+            "unverified"
+          ]
+        }
+      }
+    },
+    "fulfilledRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "domain",
+        "groupId",
+        "scopeId",
+        "requestKind",
+        "minimumAlternativeCount",
+        "generatedCandidateIds",
+        "outputGroupStatus",
+        "outputEligibleCandidateCount"
+      ],
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/domain"
+        },
+        "groupId": {
+          "$ref": "#/$defs/groupId"
+        },
+        "scopeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "requestKind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "minimumAlternativeCount": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 8
+        },
+        "producer": {
+          "$ref": "#/$defs/producer"
+        },
+        "producers": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/producer"
+          }
+        },
+        "generatedCandidateIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/candidateId"
+          }
+        },
+        "outputGroupStatus": {
+          "const": "available"
+        },
+        "outputEligibleCandidateCount": {
+          "type": "integer",
+          "minimum": 2
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "producer"
+          ]
+        },
+        {
+          "required": [
+            "producers"
+          ]
+        }
+      ]
+    },
+    "supplementalCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload",
+        "producers",
+        "selectionEligible",
+        "eligibilityReason"
+      ],
+      "properties": {
+        "payload": {
+          "type": "object"
+        },
+        "producers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/producer"
+          }
+        },
+        "selectionEligible": {
+          "const": true
+        },
+        "eligibilityReason": {
+          "const": "eligible"
+        }
+      }
+    },
+    "supplementalGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "domain",
+        "groupId",
+        "scopeId",
+        "candidates"
+      ],
+      "properties": {
+        "domain": {
+          "$ref": "#/$defs/domain"
+        },
+        "groupId": {
+          "$ref": "#/$defs/groupId"
+        },
+        "scopeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/supplementalCandidate"
+          }
+        }
+      }
+    }
+  }
+}

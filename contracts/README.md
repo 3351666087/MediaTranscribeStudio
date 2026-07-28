@@ -62,8 +62,8 @@ JSON Schema alone:
    ordinary segments.
 4. Source recognition evidence is preserved; derived text requires explicit
    provenance and versioning.
-5. Local LLM output cannot override locked acoustic or human speaker
-   decisions.
+5. Local LLM output cannot override human locks or fabricate acoustic
+   evidence; it may select any eligible bound candidate.
 6. Semantic arbitration suggestions, translation, and summary outputs remain
    separate from the source transcript.
 7. Summary evidence references valid segment IDs and time ranges.
@@ -77,6 +77,11 @@ JSON Schema alone:
     producer-revision-, payload-, candidate-, group-, and lattice-hash-bound
     candidate space. A missing or single-candidate domain is explicitly
     unavailable and cannot be reported as semantically repaired.
+12. Job-level semantic arbitration must decide every group exactly once by
+    ranking all eligible candidate IDs or requesting a bounded domain
+    challenger. Composition remains isolated, recomputes the selected lattice,
+    and rejects unresolved requests, cross-domain inconsistencies, human-lock
+    changes, and hash rebinding.
 
 ## Contract inventory
 
@@ -93,7 +98,10 @@ JSON Schema alone:
 | `pdf-render-request.schema.json` | Request sent to the Java PDF sidecar. |
 | `pdf-render-result.schema.json` | Renderer outcome and generated artifact paths. |
 | `report-document.schema.json` | Canonical transcript and report document with a dynamic speaker set. |
+| `semantic-candidate-generation.schema.json` | Registered bounded challenger results and the deterministically extended lattice used for the next arbitration round. |
 | `semantic-candidate-lattice.schema.json` | Hash-bound speech disposition, complete speaker timeline/cardinality, per-turn speaker, language-span, and ASR-text candidate groups with explicit domain availability. |
+| `semantic-composition.schema.json` | Deterministically recomputed, isolated post-arbitration speech, complete timeline, speaker, language, and final-text state. |
+| `semantic-job-arbitration.schema.json` | Complete-job candidate rankings and bounded candidate-generation requests from the mandatory local semantic model. |
 | `semantic-arbitration.schema.json` | Constrained semantic proposal for human or deterministic arbitration. |
 | `summary-output.schema.json` | Evidence-grounded summary artifact. |
 | `translation-output.schema.json` | Versioned translation artifact with validated language metadata. |

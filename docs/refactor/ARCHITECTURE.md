@@ -106,11 +106,13 @@ flowchart LR
 4. `language span`：支持集语言、开放集 `und`、逐段/逐词语言和代码切换边界 candidate。
 5. `text`：provider 原生 N-best、token 时间、强制对齐和术语证据；没有真实候选时禁止内容词修复。
 
-`semantic-candidate-lattice.v1` 已实现上述五域的统一表示、源媒体/transcript/model revision/payload/candidate/group/lattice 多层 SHA-256 绑定、运行时全量重建和 `available / partial / candidate-domain-unavailable` 状态；`semantic-candidate-lattice-v9` 会把有界候选摘要送入每次强制语义请求，并把完整格绑定到语义工件。旧 `v8` 工件只读兼容，但未绑定的旧 N-best 即使自报可修改，也不再能授权内容词变化。
+`semantic-candidate-lattice.v1` 已实现上述五域的统一表示、源媒体/transcript/model revision/payload/candidate/group/lattice 多层 SHA-256 绑定、运行时全量重建和 `available / partial / candidate-domain-unavailable` 状态；`semantic-candidate-lattice-v9` 会把有界候选摘要送入旧逐段强制语义请求，并把完整格绑定到兼容工件。旧 `v8` 工件只读兼容，但未绑定的旧 N-best 即使自报可修改，也不再能授权内容词变化。
 
 LLM 对**可验证候选空间**拥有完整终态仲裁权限：可选择人声 disposition、人数/整段时间线、turn split/merge、角色归属、语言 span、代码切换边界和文本候选，也可要求针对缺失域执行有界局部重算或挑战模型补候选；不得用固定的“禁止改人数/边界/语言”规则削弱语义校准。硬边界只保护源媒体、原始 ASR、人工锁和证据身份：LLM 只能输出 candidate ID、排序、abstention、补候选请求和证据引用，不能把未执行的模型结果或自由生成的 speaker、语言、文本、时间点伪装成已有证据。确定性 composer 重算全部哈希后组合终态；一个域只有单一候选时必须触发候选生成或明确 `candidate-domain-unavailable`，不能声称该域已由语义层修复。任何自动应用权限只由同一版本组合在统一后语义 held-out 的各硬域结果授予，不由单条禁止规则或模型自报 confidence 决定。
 
-当前实现完成了候选格、可用性、prompt/工件绑定和篡改门禁，尚未完成 job-level 五域 candidate-ID 选择、补候选调度和确定性 composer。对 AISHELL-4 `N=5`、Liva `en/sw N=3`、Liva `en/tl N=5` 三份真实 transcript 的 v9 审计表明：只有逐段 `speaker-assignment` 有多候选，人声 disposition、完整人数/时间线、语言 span 和 ASR text 都仍是单候选；因此下一阶段必须接入 Community/Pyannote/MOSS 时间线挑战、开放集 LID 与 provider 原生 N-best，不能再次仅重跑 9B 后把 abstain 当作进展。
+`semantic-job-arbitration.v1` 现已把高权限落实为完整 job 协议：每个候选组必须恰好执行一次“精确排序全部 eligible candidate ID”或“请求域匹配的有界 challenger”，空域也必须请求补算；候选 ID、group/domain/scope、evidence ref、request kind、状态和计数均由运行时重建。`semantic-composition.v1` 只在补算请求为零时执行，重算以所选 candidate 为 current 的新格，并生成隔离的 speech disposition、完整人数/时间线、逐段角色、语言和 N-best 文本终态；完整时间线可以改变人数并携带 split/merge，跨域语言/文本冲突、时间线不支持的角色、人工锁变化和任意哈希篡改均 fail closed。旧逐段 suggestion runner 仍只读兼容，不再代表高权限终态。
+
+仍未完成的是候选生成调度及真实模型接入。对 AISHELL-4 `N=5`、Liva `en/sw N=3`、Liva `en/tl N=5` 三份真实 transcript 的 v9 审计表明：只有逐段 `speaker-assignment` 有多候选，人声 disposition、完整人数/时间线、语言 span 和 ASR text 都仍是单候选；下一阶段必须把 Community/Pyannote/MOSS 时间线挑战、开放集 LID/`und`、provider 原生 N-best 和局部重算结果写回新格，再由 job-level arbitrator 重跑，不能仅把“已请求补候选”误报为最终质量提升。
 
 候选格和 LLM 组合只以强制语义后的完整 `speaker + language span + time + finalText` 终态晋级。前级模型指标用于候选召回、路由和诊断，不单独决定发布；终态人数、DER/JER、边界、cp/tcp/SA-WER/CER、语言/切换、overlap、事实、复核量和资源域仍不可互相抵消。
 

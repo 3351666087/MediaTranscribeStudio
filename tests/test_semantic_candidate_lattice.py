@@ -15,6 +15,7 @@ from backend import (
     build_semantic_candidate_lattice,
     build_semantic_candidate_lattice_from_document,
     compact_candidate_lattice_context,
+    extend_semantic_candidate_lattice,
     validate_semantic_candidate_lattice,
     validate_semantic_suggestions_artifact,
 )
@@ -355,3 +356,105 @@ def test_provided_lattice_cannot_be_rebound_to_another_transcript() -> None:
             provider=MappingLocalLLMProvider([]),
             model="fixture",
         ).run(rebound, candidate_lattice=lattice)
+
+
+def test_lattice_extension_adds_challenger_without_replacing_current_identity() -> None:
+    lattice = build_semantic_candidate_lattice_from_document(_document())
+    timeline = _domain(lattice, "speaker-cardinality-timeline")["groups"][0]
+    current_id = timeline["currentCandidateId"]
+    challenger = {
+        "speakerCount": 2,
+        "speakerIds": ["speaker-1", "speaker-2"],
+        "timelineKind": "challenger",
+        "startMs": 0,
+        "endMs": 2_000,
+        "turns": [
+            {
+                "startMs": 0,
+                "endMs": 800,
+                "speakerId": "speaker-1",
+                "overlap": False,
+            },
+            {
+                "startMs": 800,
+                "endMs": 2_000,
+                "speakerId": "speaker-2",
+                "overlap": False,
+            },
+        ],
+    }
+
+    extended = extend_semantic_candidate_lattice(
+        lattice,
+        supplemental_groups=[
+            {
+                "domain": "speaker-cardinality-timeline",
+                "groupId": timeline["groupId"],
+                "scopeId": "media",
+                "candidates": [
+                    {
+                        "payload": challenger,
+                        "producers": [
+                            {
+                                "producerType": "model",
+                                "systemId": "timeline-challenger",
+                                "revision": "revision-1",
+                                "artifactSha256": "f" * 64,
+                                "modelManifestSha256": "e" * 64,
+                                "identityStatus": "manifest-bound",
+                            }
+                        ],
+                        "selectionEligible": True,
+                        "eligibilityReason": "eligible",
+                    }
+                ],
+            }
+        ],
+    )
+
+    extended_timeline = _domain(
+        extended,
+        "speaker-cardinality-timeline",
+    )["groups"][0]
+    assert extended_timeline["status"] == "available"
+    assert extended_timeline["currentCandidateId"] == current_id
+    assert extended_timeline["candidateCount"] == 2
+    assert extended["latticeSha256"] != lattice["latticeSha256"]
+
+
+def test_lattice_extension_rejects_duplicate_payload_identity_rewrite() -> None:
+    lattice = build_semantic_candidate_lattice_from_document(_document())
+    timeline = _domain(lattice, "speaker-cardinality-timeline")["groups"][0]
+    current = timeline["candidates"][0]
+
+    with pytest.raises(
+        SemanticCandidateLatticeError,
+        match="current candidate identity",
+    ):
+        extend_semantic_candidate_lattice(
+            lattice,
+            supplemental_groups=[
+                {
+                    "domain": "speaker-cardinality-timeline",
+                    "groupId": timeline["groupId"],
+                    "scopeId": timeline["scopeId"],
+                    "candidates": [
+                        {
+                            "payload": current["payload"],
+                            "producers": [
+                                {
+                                    "producerType": "model",
+                                    "systemId": "identity-rewriter",
+                                    "revision": "revision-1",
+                                    "artifactSha256": "f" * 64,
+                                    "modelManifestSha256": "e" * 64,
+                                    "identityStatus": "manifest-bound",
+                                }
+                            ],
+                            "selectionEligible": True,
+                            "eligibilityReason": "eligible",
+                        }
+                    ],
+                }
+            ],
+        )

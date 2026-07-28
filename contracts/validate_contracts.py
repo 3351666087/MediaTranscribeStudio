@@ -25,7 +25,10 @@ REQUIRED_SCHEMAS = frozenset(
         "pdf-render-request.schema.json",
         "pdf-render-result.schema.json",
         "report-document.schema.json",
+        "semantic-candidate-generation.schema.json",
         "semantic-candidate-lattice.schema.json",
+        "semantic-composition.schema.json",
+        "semantic-job-arbitration.schema.json",
         "voice-activity.schema.json",
     }
 )

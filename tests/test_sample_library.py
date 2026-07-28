@@ -21,15 +21,21 @@ from tools.sample_library import (
     word_error_rate,
 )
 from tools.evaluate_sample_library import (
+    AcceptanceThresholdProfile,
     _align_language_tokens,
     _bucket_summary,
+    _content_integrity_quality,
+    _evaluate_acceptance_thresholds,
     _final_language_quality,
     _joint_metric_labels,
     _joint_transcription_quality,
     _scoring_unit,
     _subtitle_quality,
+    _threshold_profile_coverage,
     _value_counts,
     evaluate_case,
+    load_acceptance_threshold_profile,
+    main as evaluate_sample_library_main,
 )
 
 
@@ -162,6 +168,31 @@ def _write_adjudicated_fixture(
     }
     transcript_path = output / "transcript-document.v2.json"
     transcript_path.write_text(json.dumps(document), encoding="utf-8")
+    (output / "pipeline-metrics.v1.json").write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "elapsedMs": 1_000,
+                    "rtf": 0.5,
+                    "stages": {},
+                },
+                "cache": {
+                    "hitRate": 0.0,
+                    "recomputationRate": 1.0,
+                },
+                "routing": {
+                    "escalationRate": 0.0,
+                    "escalated": 0,
+                    "segments": 2,
+                },
+                "resources": {
+                    "peakRamMb": 512.0,
+                    "peakVramMb": 0.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     (output / "review" / "review-queue.json").write_text(
         json.dumps(review),
         encoding="utf-8",
@@ -222,6 +253,31 @@ def _write_no_speech_adjudicated_fixture(
     final_path = output / "final-adjudicated-transcript.v1.json"
     voice_path.write_text(json.dumps(voice), encoding="utf-8")
     final_path.write_text(json.dumps(final), encoding="utf-8")
+    (output / "pipeline-metrics.v1.json").write_text(
+        json.dumps(
+            {
+                "runtime": {
+                    "elapsedMs": 100,
+                    "rtf": 0.02,
+                    "stages": {},
+                },
+                "cache": {
+                    "hitRate": 0.0,
+                    "recomputationRate": 1.0,
+                },
+                "routing": {
+                    "escalationRate": 0.0,
+                    "escalated": 0,
+                    "segments": 0,
+                },
+                "resources": {
+                    "peakRamMb": 64.0,
+                    "peakVramMb": 0.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     result_path = tmp_path / "no-speech-result.json"
     result_path.write_text(
         json.dumps(
@@ -242,6 +298,215 @@ def _write_no_speech_adjudicated_fixture(
         encoding="utf-8",
     )
     return result_path, output
+
+
+def _adjudicated_case() -> dict[str, object]:
+    return {
+        "id": "adjudicated",
+        "sourceId": "fixture",
+        "language": "mul",
+        "evaluationSplit": "held-out",
+        "scenario": ["two-speaker-turns", "code-switch"],
+        "expectedSpeakerCount": 2,
+        "speakerSet": ["truth-a", "truth-b"],
+        "scoringTranscript": "alpha beta",
+        "turns": [
+            {
+                "startSeconds": 0.0,
+                "endSeconds": 1.0,
+                "speakerId": "truth-a",
+            },
+            {
+                "startSeconds": 1.0,
+                "endSeconds": 2.0,
+                "speakerId": "truth-b",
+            },
+        ],
+        "referenceTranscriptTurns": [
+            {
+                "startSeconds": 0.0,
+                "endSeconds": 1.0,
+                "speakerId": "truth-a",
+                "transcript": "alpha",
+            },
+            {
+                "startSeconds": 1.0,
+                "endSeconds": 2.0,
+                "speakerId": "truth-b",
+                "transcript": "beta",
+            },
+        ],
+        "languageTruth": {
+            "qualification": "exact-fixture",
+            "expectedLanguages": ["en", "es"],
+            "timeScoringEligible": True,
+            "wordScoringEligible": True,
+            "intervals": [
+                {
+                    "language": "en",
+                    "startSeconds": 0.0,
+                    "endSeconds": 1.0,
+                    "speakerId": "truth-a",
+                    "transcript": "alpha",
+                },
+                {
+                    "language": "es",
+                    "startSeconds": 1.0,
+                    "endSeconds": 2.0,
+                    "speakerId": "truth-b",
+                    "transcript": "beta",
+                },
+            ],
+        },
+        "factualTruth": {
+            "requiredLiterals": ["alpha", "beta"],
+            "forbiddenLiterals": ["gamma"],
+        },
+        "truthEligibility": {
+            "voiceActivity": True,
+            "speakerCount": True,
+            "turnBoundaries": True,
+            "derJer": True,
+            "asr": True,
+        },
+    }
+
+
+def _positive_threshold_rules() -> list[dict[str, object]]:
+    definitions = [
+        ("speech", "speech-presence", ["speechPresence", "match"], "eq", True),
+        (
+            "speaker-count",
+            "speaker-count",
+            ["speakerCount", "speakerCountMatch"],
+            "eq",
+            True,
+        ),
+        ("diarization", "diarization", ["diarization", "der"], "lte", 0.0),
+        (
+            "boundary",
+            "boundary",
+            ["boundary", "maxAbsoluteErrorMs"],
+            "lte",
+            0.0,
+        ),
+        (
+            "final-text",
+            "final-text",
+            ["finalText", "werOrCer"],
+            "lte",
+            0.0,
+        ),
+        (
+            "speaker-text",
+            "speaker-attributed-text",
+            ["jointTranscription", "speakerAttributedWer", "errorRate"],
+            "lte",
+            0.0,
+        ),
+        (
+            "language",
+            "language",
+            ["language", "durationWeighted", "accuracy"],
+            "gte",
+            1.0,
+        ),
+        (
+            "code-switch",
+            "code-switch",
+            ["codeSwitch", "lexicalTokenWeightedAccuracy"],
+            "gte",
+            1.0,
+        ),
+        ("overlap", "overlap", ["overlap", "f1"], "gte", 1.0),
+        (
+            "factual",
+            "factual-integrity",
+            ["factualIntegrity", "passed"],
+            "eq",
+            True,
+        ),
+        (
+            "content",
+            "content-integrity",
+            ["contentIntegrity", "tokenErrorRate"],
+            "lte",
+            0.0,
+        ),
+        ("review", "review", ["review", "openCount"], "lte", 0),
+        (
+            "runtime",
+            "runtime-resources",
+            ["runtimeResources", "rtf"],
+            "lte",
+            1.0,
+        ),
+    ]
+    return [
+        {
+            "id": f"fixture-{rule_id}",
+            "domain": domain,
+            "dispositions": ["transcribable-speech"],
+            "metricPath": metric_path,
+            "operator": operator,
+            "threshold": threshold,
+        }
+        for rule_id, domain, metric_path, operator, threshold in definitions
+    ]
+
+
+def _no_speech_threshold_rules() -> list[dict[str, object]]:
+    return [
+        {
+            "id": "fixture-no-speech-presence",
+            "domain": "speech-presence",
+            "dispositions": ["no-transcribable-speech"],
+            "metricPath": ["speechPresence", "match"],
+            "operator": "eq",
+            "threshold": True,
+        },
+        {
+            "id": "fixture-no-speech-runtime",
+            "domain": "runtime-resources",
+            "dispositions": ["no-transcribable-speech"],
+            "metricPath": ["runtimeResources", "rtf"],
+            "operator": "lte",
+            "threshold": 1.0,
+        },
+    ]
+
+
+def _write_threshold_profile(
+    tmp_path: Path,
+    *,
+    library_id: str = "fixture-library",
+    rules: list[dict[str, object]] | None = None,
+    coverage_requirements: list[dict[str, object]] | None = None,
+) -> AcceptanceThresholdProfile:
+    document = {
+        "schemaVersion": "1.0.0",
+        "profileId": "fixture-post-semantic-v1",
+        "status": "frozen",
+        "frozenAt": "2026-07-28T00:00:00Z",
+        "scope": {
+            "libraryId": library_id,
+            "evaluationSplits": ["held-out"],
+        },
+        "rules": rules or _positive_threshold_rules(),
+        "coverageRequirements": coverage_requirements
+        or [
+            {
+                "id": "fixture-adjudicated-coverage",
+                "selector": {"caseIds": ["adjudicated"]},
+            }
+        ],
+    }
+    path = tmp_path / "post-semantic-profile.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return load_acceptance_threshold_profile(
+        path,
+        expected_library_id=library_id,
+    )
 
 
 def test_manifest_covers_languages_and_scenarios() -> None:
@@ -421,9 +686,275 @@ def test_formal_acceptance_scores_only_hash_bound_final_segments(
     assert metrics["codeSwitch"]["durationWeightedAccuracy"] == 1.0
     assert metrics["codeSwitch"]["lexicalTokenWeightedAccuracy"] == 1.0
     assert metrics["factualIntegrity"]["passed"] is True
+    assert metrics["contentIntegrity"]["exactTokenMatch"] is True
+    assert metrics["contentIntegrity"]["hallucinatedTokenCount"] == 0
+    assert metrics["contentIntegrity"]["deletedTokenCount"] == 0
     assert acceptance["artifactPath"] == str(
         output / "final-adjudicated-transcript.v1.json"
     )
+
+
+def test_frozen_post_semantic_profile_approves_exact_fixture(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(tmp_path)
+    profile = _write_threshold_profile(tmp_path)
+
+    report = evaluate_case(
+        case=_adjudicated_case(),
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+        threshold_profile=profile,
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["status"] == "approved"
+    assert acceptance["releaseApproved"] is True
+    assert acceptance["blockingReasons"] == []
+    assert acceptance["thresholdEvaluation"]["passed"] is True
+    assert acceptance["thresholdEvaluation"]["missingDomains"] == []
+    assert acceptance["thresholdEvaluation"]["failedDomains"] == []
+    assert len(acceptance["thresholdEvaluation"]["checks"]) == 13
+    assert report["qualityPolicy"]["frontModelReleaseGate"] is False
+
+
+def test_post_semantic_profile_fails_one_hard_domain_without_averaging(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(tmp_path)
+    rules = _positive_threshold_rules()
+    content_rule = next(
+        rule for rule in rules if rule["domain"] == "content-integrity"
+    )
+    content_rule["threshold"] = -0.01
+    profile = _write_threshold_profile(tmp_path, rules=rules)
+
+    report = evaluate_case(
+        case=_adjudicated_case(),
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+        threshold_profile=profile,
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["status"] == "not-approved-hard-domain-failure"
+    assert acceptance["releaseApproved"] is False
+    assert acceptance["blockingReasons"] == [
+        "threshold-domain-failure:content-integrity"
+    ]
+    assert acceptance["thresholdEvaluation"]["failedDomains"] == [
+        "content-integrity"
+    ]
+    assert acceptance["thresholdEvaluation"]["nonCompensating"] is True
+
+
+@pytest.mark.parametrize("failure_mode", ["missing-domain", "missing-metric"])
+def test_post_semantic_profile_fails_closed_on_incomplete_rules(
+    tmp_path: Path,
+    failure_mode: str,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(tmp_path)
+    rules = _positive_threshold_rules()
+    if failure_mode == "missing-domain":
+        rules = [rule for rule in rules if rule["domain"] != "boundary"]
+    else:
+        boundary = next(
+            rule for rule in rules if rule["domain"] == "boundary"
+        )
+        boundary["metricPath"] = ["boundary", "notARealMetric"]
+    profile = _write_threshold_profile(tmp_path, rules=rules)
+
+    report = evaluate_case(
+        case=_adjudicated_case(),
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+        threshold_profile=profile,
+    )
+
+    evaluation = report["postSemanticAcceptance"]["thresholdEvaluation"]
+    assert evaluation["passed"] is False
+    assert evaluation["failedDomains"] == ["boundary"]
+    if failure_mode == "missing-domain":
+        assert evaluation["missingDomains"] == ["boundary"]
+    else:
+        failed_check = next(
+            check
+            for check in evaluation["checks"]
+            if check["domain"] == "boundary"
+        )
+        assert failed_check["failureReason"] == "metric-missing"
+
+
+def test_post_semantic_profile_selector_rules_do_not_leak_between_buckets(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_adjudicated_fixture(tmp_path)
+    rules = _positive_threshold_rules()
+    rules.append(
+        {
+            "id": "fixture-five-speaker-only",
+            "domain": "final-text",
+            "dispositions": ["transcribable-speech"],
+            "metricPath": ["finalText", "werOrCer"],
+            "operator": "gte",
+            "threshold": 1.0,
+            "selector": {"speakerCounts": [5]},
+        }
+    )
+    profile = _write_threshold_profile(tmp_path, rules=rules)
+    report = evaluate_case(
+        case=_adjudicated_case(),
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="adjudicated",
+        threshold_profile=profile,
+    )
+    acceptance = report["postSemanticAcceptance"]
+
+    assert acceptance["releaseApproved"] is True
+    assert "fixture-five-speaker-only" not in {
+        check["ruleId"]
+        for check in acceptance["thresholdEvaluation"]["checks"]
+    }
+    five_speaker_evaluation = _evaluate_acceptance_thresholds(
+        case={**_adjudicated_case(), "expectedSpeakerCount": 5},
+        metrics=acceptance["metrics"],
+        disposition="transcribable-speech",
+        profile=profile,
+    )
+    assert five_speaker_evaluation["failedDomains"] == ["final-text"]
+
+
+def test_threshold_profile_schema_and_scope_fail_closed(
+    tmp_path: Path,
+) -> None:
+    profile = _write_threshold_profile(tmp_path)
+    assert profile.document["status"] == "frozen"
+    assert len(profile.file_sha256) == 64
+    assert len(profile.canonical_sha256) == 64
+
+    with pytest.raises(ValueError, match="libraryId does not match"):
+        load_acceptance_threshold_profile(
+            profile.path,
+            expected_library_id="different-library",
+        )
+
+    duplicate = json.loads(profile.path.read_text(encoding="utf-8"))
+    duplicate["rules"].append(dict(duplicate["rules"][0]))
+    profile.path.write_text(json.dumps(duplicate), encoding="utf-8")
+    with pytest.raises(ValueError, match="rule IDs must be unique"):
+        load_acceptance_threshold_profile(profile.path)
+
+    malformed = json.loads(profile.path.read_text(encoding="utf-8"))
+    malformed["rules"] = _positive_threshold_rules()
+    malformed["rules"][0]["operator"] = "lte"
+    malformed["rules"][0]["threshold"] = True
+    profile.path.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(ValueError, match="boolean.*eq"):
+        load_acceptance_threshold_profile(profile.path)
+
+
+def test_no_speech_uses_same_post_semantic_profile_gate(
+    tmp_path: Path,
+) -> None:
+    result_path, _ = _write_no_speech_adjudicated_fixture(tmp_path)
+    profile = _write_threshold_profile(
+        tmp_path,
+        rules=_no_speech_threshold_rules(),
+        coverage_requirements=[
+            {
+                "id": "fixture-no-speech-coverage",
+                "selector": {"caseIds": ["no-speech"]},
+            }
+        ],
+    )
+
+    report = evaluate_case(
+        case={
+            "id": "no-speech",
+            "evaluationSplit": "held-out",
+            "expectedLexicalSpeech": False,
+            "truthEligibility": {"voiceActivity": True},
+        },
+        result_path=result_path,
+        results_root=tmp_path,
+        worker_output_root=tmp_path / "outputs",
+        artifact_id="no-speech",
+        threshold_profile=profile,
+    )
+
+    acceptance = report["postSemanticAcceptance"]
+    assert acceptance["status"] == "approved"
+    assert acceptance["releaseApproved"] is True
+    assert acceptance["thresholdEvaluation"]["requiredDomains"] == [
+        "runtime-resources",
+        "speech-presence",
+    ]
+
+
+def test_report_release_requires_profile_coverage(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_adjudicated_fixture(tmp_path)
+    profile = _write_threshold_profile(
+        tmp_path,
+        coverage_requirements=[
+            {
+                "id": "fixture-missing-coverage",
+                "selector": {
+                    "caseIds": ["adjudicated", "missing-case"]
+                },
+            }
+        ],
+    )
+    manifest_path = tmp_path / "resolved-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "libraryId": "fixture-library",
+                "cases": [_adjudicated_case()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "quality-report.v1.json"
+
+    exit_code = evaluate_sample_library_main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--results-root",
+            str(tmp_path),
+            "--worker-output-root",
+            str(tmp_path / "outputs"),
+            "--threshold-profile",
+            str(profile.path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    capsys.readouterr()
+    report = json.loads(output_path.read_text(encoding="utf-8"))
+    assert report["schemaVersion"] == "1.7.0"
+    assert report["cases"][0]["postSemanticAcceptance"][
+        "releaseApproved"
+    ] is True
+    assert report["acceptanceCoverage"]["passed"] is False
+    assert report["acceptanceCoverage"]["requirements"][0][
+        "missingCaseIds"
+    ] == ["missing-case"]
+    assert report["summary"]["releaseApproved"] is False
 
 
 def test_formal_acceptance_preserves_one_speaker_across_language_spans(
@@ -923,6 +1454,25 @@ def test_language_token_alignment_counts_insertions_and_deletions() -> None:
     assert quality["accuracy"] == pytest.approx(3 / 4)
 
 
+def test_content_integrity_separates_hallucination_deletion_and_substitution() -> None:
+    quality = _content_integrity_quality(
+        reference_text="alpha beta gamma delta omega theta",
+        hypothesis_text="alpha gamma changed omega theta extra",
+        eligible=True,
+    )
+
+    assert quality["referenceTokenCount"] == 6
+    assert quality["hypothesisTokenCount"] == 6
+    assert quality["hallucinatedTokenCount"] == 1
+    assert quality["deletedTokenCount"] == 1
+    assert quality["substitutedTokenCount"] == 1
+    assert quality["tokenErrorRate"] == pytest.approx(3 / 6)
+    assert quality["hallucinationRate"] == pytest.approx(1 / 6)
+    assert quality["deletionRate"] == pytest.approx(1 / 6)
+    assert quality["substitutionRate"] == pytest.approx(1 / 6)
+    assert quality["exactTokenMatch"] is False
+
+
 def test_document_language_truth_does_not_imply_time_or_word_truth() -> None:
     language, code_switch = _final_language_quality(
         case={
@@ -1232,6 +1782,8 @@ def test_evaluator_preserves_source_and_split_buckets() -> None:
             "meanLanguageSegmentAccuracy": None,
             "meanDurationWeightedLanguageAccuracy": None,
             "meanLexicalTokenWeightedLanguageAccuracy": None,
+            "meanHallucinationRate": None,
+            "meanDeletionRate": None,
             "meanCpWer": None,
             "meanTcpWer": None,
             "meanSpeakerAttributedWer": None,
@@ -1247,6 +1799,8 @@ def test_evaluator_preserves_source_and_split_buckets() -> None:
             "meanLanguageSegmentAccuracy": None,
             "meanDurationWeightedLanguageAccuracy": None,
             "meanLexicalTokenWeightedLanguageAccuracy": None,
+            "meanHallucinationRate": None,
+            "meanDeletionRate": None,
             "meanCpWer": None,
             "meanTcpWer": None,
             "meanSpeakerAttributedWer": None,

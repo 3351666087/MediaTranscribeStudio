@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import importlib.metadata
 import json
+import math
 import re
 import statistics
 import sys
@@ -28,6 +29,7 @@ from backend.final_adjudication import (
     validate_final_adjudicated_transcript,
     validate_final_no_speech_adjudication,
 )
+from backend.persistence import canonical_json_sha256, sha256_file
 from backend.pipeline_metrics import (
     ReferenceTurn,
     evaluate_reference_quality,
@@ -44,6 +46,34 @@ _MEETEVAL_VERSION = "0.4.3"
 _MEETEVAL_REVISION = "badcd3c7cf82f98d2ac1f292801fbe6e9093ee2f"
 _MEETEVAL_MAX_SPEAKER_STREAMS = 20
 _TCPWER_COLLAR_SECONDS = 5.0
+_ACCEPTANCE_PROFILE_SCHEMA = (
+    PROJECT_ROOT
+    / "contracts"
+    / "post-semantic-acceptance-profile.schema.json"
+)
+_POSITIVE_THRESHOLD_DOMAINS = frozenset(
+    {
+        "speech-presence",
+        "speaker-count",
+        "diarization",
+        "boundary",
+        "final-text",
+        "speaker-attributed-text",
+        "language",
+        "code-switch",
+        "overlap",
+        "factual-integrity",
+        "content-integrity",
+        "review",
+        "runtime-resources",
+    }
+)
+_NO_SPEECH_THRESHOLD_DOMAINS = frozenset(
+    {
+        "speech-presence",
+        "runtime-resources",
+    }
+)
 _SRT_TIMESTAMP = re.compile(
     r"^\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}$"
 )
@@ -51,6 +81,367 @@ _VTT_TIMESTAMP = re.compile(
     r"^\d{2}:\d{2}(?::\d{2})?\.\d{3}\s+-->\s+"
     r"\d{2}:\d{2}(?::\d{2})?\.\d{3}$"
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class AcceptanceThresholdProfile:
+    document: Mapping[str, Any]
+    path: Path
+    file_sha256: str
+    canonical_sha256: str
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "profileId": self.document["profileId"],
+            "status": self.document["status"],
+            "frozenAt": self.document["frozenAt"],
+            "path": str(self.path),
+            "fileSha256": self.file_sha256,
+            "canonicalSha256": self.canonical_sha256,
+            "scope": dict(self.document["scope"]),
+        }
+
+
+def load_acceptance_threshold_profile(
+    path: Path,
+    *,
+    expected_library_id: str | None = None,
+) -> AcceptanceThresholdProfile:
+    from jsonschema import Draft202012Validator
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    schema = json.loads(
+        _ACCEPTANCE_PROFILE_SCHEMA.read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(
+        schema,
+        format_checker=Draft202012Validator.FORMAT_CHECKER,
+    )
+    errors = sorted(
+        validator.iter_errors(document),
+        key=lambda error: list(error.absolute_path),
+    )
+    if errors:
+        first = errors[0]
+        location = ".".join(str(item) for item in first.absolute_path)
+        raise ValueError(
+            "acceptance threshold profile is invalid at "
+            f"{location or '$'}: {first.message}"
+        )
+    if not isinstance(document, Mapping):
+        raise ValueError("acceptance threshold profile must be an object")
+    scope = document["scope"]
+    if (
+        expected_library_id is not None
+        and scope["libraryId"] != expected_library_id
+    ):
+        raise ValueError(
+            "acceptance threshold profile libraryId does not match "
+            f"{expected_library_id!r}"
+        )
+    rule_ids = [str(rule["id"]) for rule in document["rules"]]
+    coverage_ids = [
+        str(requirement["id"])
+        for requirement in document["coverageRequirements"]
+    ]
+    if len(rule_ids) != len(set(rule_ids)):
+        raise ValueError(
+            "acceptance threshold profile rule IDs must be unique"
+        )
+    if len(coverage_ids) != len(set(coverage_ids)):
+        raise ValueError(
+            "acceptance threshold profile coverage IDs must be unique"
+        )
+    for rule in document["rules"]:
+        threshold = rule["threshold"]
+        operator = str(rule["operator"])
+        if isinstance(threshold, bool) and operator != "eq":
+            raise ValueError(
+                "boolean acceptance thresholds require the eq operator"
+            )
+        if (
+            isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+            and not math.isfinite(float(threshold))
+        ):
+            raise ValueError(
+                "numeric acceptance thresholds must be finite"
+            )
+    return AcceptanceThresholdProfile(
+        document=document,
+        path=path.resolve(),
+        file_sha256=sha256_file(path),
+        canonical_sha256=canonical_json_sha256(document),
+    )
+
+
+def _selector_languages(value: Mapping[str, Any]) -> set[str]:
+    truth = value.get("languageTruth")
+    expected = (
+        truth.get("expectedLanguages")
+        if isinstance(truth, Mapping)
+        else value.get("expectedLanguages")
+    )
+    if not isinstance(expected, list):
+        acceptance = value.get("postSemanticAcceptance")
+        metrics = (
+            acceptance.get("metrics")
+            if isinstance(acceptance, Mapping)
+            else None
+        )
+        language = (
+            metrics.get("language")
+            if isinstance(metrics, Mapping)
+            else None
+        )
+        expected = (
+            language.get("expectedLanguages")
+            if isinstance(language, Mapping)
+            else None
+        )
+    roots = (
+        {
+            root
+            for item in expected
+            if (root := _language_root(item)) is not None
+        }
+        if isinstance(expected, list)
+        else set()
+    )
+    direct = _language_root(value.get("language"))
+    if direct not in {None, "auto", "mul", "und"}:
+        roots.add(direct)
+    return roots
+
+
+def _selector_speaker_count(value: Mapping[str, Any]) -> int | None:
+    direct = value.get("expectedSpeakerCount")
+    if isinstance(direct, int) and not isinstance(direct, bool):
+        return direct
+    evidence = value.get("evidence")
+    nested = (
+        evidence.get("expectedSpeakerCount")
+        if isinstance(evidence, Mapping)
+        else None
+    )
+    return (
+        nested
+        if isinstance(nested, int) and not isinstance(nested, bool)
+        else None
+    )
+
+
+def _matches_threshold_selector(
+    value: Mapping[str, Any],
+    selector: Mapping[str, Any] | None,
+) -> bool:
+    if selector is None:
+        return True
+    case_ids = selector.get("caseIds")
+    if isinstance(case_ids, list) and value.get("id") not in case_ids:
+        return False
+    splits = selector.get("evaluationSplits")
+    if (
+        isinstance(splits, list)
+        and value.get("evaluationSplit") not in splits
+    ):
+        return False
+    languages = selector.get("languagesAny")
+    if isinstance(languages, list):
+        required = {
+            root
+            for item in languages
+            if (root := _language_root(item)) is not None
+        }
+        if not (_selector_languages(value) & required):
+            return False
+    counts = selector.get("speakerCounts")
+    if (
+        isinstance(counts, list)
+        and _selector_speaker_count(value) not in counts
+    ):
+        return False
+    scenarios = selector.get("scenariosAny")
+    if isinstance(scenarios, list):
+        observed = value.get("scenario")
+        observed_set = (
+            {str(item) for item in observed}
+            if isinstance(observed, list)
+            else {str(observed)} if observed is not None else set()
+        )
+        if not (observed_set & set(scenarios)):
+            return False
+    return True
+
+
+_MISSING_METRIC = object()
+
+
+def _threshold_metric(
+    metrics: Mapping[str, Any],
+    path: Sequence[str],
+) -> Any:
+    value: Any = metrics
+    for field in path:
+        if not isinstance(value, Mapping) or field not in value:
+            return _MISSING_METRIC
+        value = value[field]
+    return value
+
+
+def _threshold_comparison(
+    observed: Any,
+    *,
+    operator: str,
+    threshold: Any,
+) -> bool:
+    if isinstance(threshold, bool):
+        return (
+            operator == "eq"
+            and isinstance(observed, bool)
+            and observed is threshold
+        )
+    if (
+        not isinstance(threshold, (int, float))
+        or isinstance(observed, bool)
+        or not isinstance(observed, (int, float))
+    ):
+        return False
+    if operator == "lte":
+        return float(observed) <= float(threshold)
+    if operator == "gte":
+        return float(observed) >= float(threshold)
+    if operator == "eq":
+        return float(observed) == float(threshold)
+    raise ValueError(f"unsupported threshold operator: {operator}")
+
+
+def _evaluate_acceptance_thresholds(
+    *,
+    case: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    disposition: str,
+    profile: AcceptanceThresholdProfile,
+) -> dict[str, Any]:
+    required_domains = (
+        _POSITIVE_THRESHOLD_DOMAINS
+        if disposition == "transcribable-speech"
+        else _NO_SPEECH_THRESHOLD_DOMAINS
+    )
+    checks: list[dict[str, Any]] = []
+    applied_domains: set[str] = set()
+    for rule in profile.document["rules"]:
+        if disposition not in rule["dispositions"]:
+            continue
+        selector = rule.get("selector")
+        if not _matches_threshold_selector(
+            case,
+            selector if isinstance(selector, Mapping) else None,
+        ):
+            continue
+        domain = str(rule["domain"])
+        applied_domains.add(domain)
+        metric_path = [str(item) for item in rule["metricPath"]]
+        observed = _threshold_metric(metrics, metric_path)
+        missing = observed is _MISSING_METRIC or observed is None
+        passed = (
+            False
+            if missing
+            else _threshold_comparison(
+                observed,
+                operator=str(rule["operator"]),
+                threshold=rule["threshold"],
+            )
+        )
+        checks.append(
+            {
+                "ruleId": rule["id"],
+                "domain": domain,
+                "metricPath": metric_path,
+                "operator": rule["operator"],
+                "threshold": rule["threshold"],
+                "observed": None if missing else observed,
+                "passed": passed,
+                "failureReason": (
+                    "metric-missing"
+                    if missing
+                    else "threshold-not-met" if not passed else None
+                ),
+            }
+        )
+    missing_domains = sorted(required_domains - applied_domains)
+    failed_domains = sorted(
+        {
+            str(check["domain"])
+            for check in checks
+            if check["passed"] is not True
+        }
+        | set(missing_domains)
+    )
+    return {
+        "profile": profile.evidence(),
+        "requiredDomains": sorted(required_domains),
+        "appliedDomains": sorted(applied_domains),
+        "missingDomains": missing_domains,
+        "checks": checks,
+        "failedDomains": failed_domains,
+        "passed": not failed_domains,
+        "nonCompensating": True,
+    }
+
+
+def _threshold_profile_coverage(
+    *,
+    reports: Sequence[Mapping[str, Any]],
+    profile: AcceptanceThresholdProfile,
+) -> dict[str, Any]:
+    requirements = []
+    for requirement in profile.document["coverageRequirements"]:
+        selector = requirement["selector"]
+        matches = [
+            report
+            for report in reports
+            if _matches_threshold_selector(report, selector)
+        ]
+        approved = [
+            report
+            for report in matches
+            if isinstance(report.get("postSemanticAcceptance"), Mapping)
+            and report["postSemanticAcceptance"].get("releaseApproved")
+            is True
+        ]
+        required_case_ids = (
+            {str(item) for item in selector["caseIds"]}
+            if isinstance(selector.get("caseIds"), list)
+            else set()
+        )
+        matched_case_ids = {
+            str(report["id"])
+            for report in matches
+            if report.get("id") is not None
+        }
+        missing_case_ids = sorted(required_case_ids - matched_case_ids)
+        requirements.append(
+            {
+                "id": requirement["id"],
+                "selector": selector,
+                "matchedCaseCount": len(matches),
+                "approvedCaseCount": len(approved),
+                "matchedCaseIds": sorted(matched_case_ids),
+                "missingCaseIds": missing_case_ids,
+                "passed": bool(matches)
+                and not missing_case_ids
+                and len(approved) == len(matches),
+            }
+        )
+    return {
+        "requirements": requirements,
+        "passed": all(
+            requirement["passed"] is True
+            for requirement in requirements
+        ),
+    }
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -1993,6 +2384,60 @@ def _factual_integrity_quality(
     }
 
 
+def _content_integrity_quality(
+    *,
+    reference_text: str,
+    hypothesis_text: str,
+    eligible: bool,
+) -> dict[str, Any]:
+    if not eligible or not reference_text.strip():
+        return {
+            "eligible": False,
+            "scored": False,
+            "reason": "serialized-text-truth-ineligible",
+        }
+    reference_tokens = tokenize_for_score(reference_text)
+    if not reference_tokens:
+        raise ValueError(
+            "content integrity reference has no scoring tokens"
+        )
+    hypothesis_tokens = tokenize_for_score(hypothesis_text)
+    edit_counts = {
+        "insert": 0,
+        "delete": 0,
+        "replace": 0,
+    }
+    for edit in Levenshtein.editops(
+        reference_tokens,
+        hypothesis_tokens,
+    ):
+        edit_counts[edit.tag] += 1
+    reference_count = len(reference_tokens)
+    insertions = edit_counts["insert"]
+    deletions = edit_counts["delete"]
+    substitutions = edit_counts["replace"]
+    errors = insertions + deletions + substitutions
+    return {
+        "authority": "final-adjudicated-finalText",
+        "eligible": True,
+        "scored": True,
+        "tokenization": "mts-language-aware-nfkc-v1",
+        "alignmentEngine": "rapidfuzz-levenshtein-editops",
+        "scoringUnit": _scoring_unit([reference_text]),
+        "referenceTokenCount": reference_count,
+        "hypothesisTokenCount": len(hypothesis_tokens),
+        "errorTokenCount": errors,
+        "tokenErrorRate": errors / reference_count,
+        "hallucinatedTokenCount": insertions,
+        "hallucinationRate": insertions / reference_count,
+        "deletedTokenCount": deletions,
+        "deletionRate": deletions / reference_count,
+        "substitutedTokenCount": substitutions,
+        "substitutionRate": substitutions / reference_count,
+        "exactTokenMatch": errors == 0,
+    }
+
+
 def _scoring_unit(texts: Sequence[str]) -> str:
     uses_character_tokens = [
         any("\u3400" <= char <= "\u9fff" for char in text)
@@ -2578,6 +3023,7 @@ def _post_semantic_acceptance(
     result: Mapping[str, Any],
     transcript_path: Path,
     transcript: Mapping[str, Any],
+    threshold_profile: AcceptanceThresholdProfile | None = None,
 ) -> dict[str, Any]:
     final_path = _final_adjudication_path(result, transcript_path.parent)
     review_path = transcript_path.parent / "review" / "review-queue.json"
@@ -2738,6 +3184,11 @@ def _post_semantic_acceptance(
         case=case,
         final_text=final_text,
     )
+    content_integrity = _content_integrity_quality(
+        reference_text=reference,
+        hypothesis_text=final_text,
+        eligible=text_eligible,
+    )
     speech_presence = _speech_presence_quality(
         case=case,
         detected=True,
@@ -2764,6 +3215,8 @@ def _post_semantic_acceptance(
         missing_truth.append("code-switch-truth")
     if factual.get("scored") is not True:
         missing_truth.append("annotated-factual-truth")
+    if content_integrity.get("scored") is not True:
+        missing_truth.append("general-content-integrity-truth")
     runtime = _runtime_quality(transcript_path)
     metrics = {
         "speechPresence": speech_presence,
@@ -2775,6 +3228,7 @@ def _post_semantic_acceptance(
         "language": language,
         "codeSwitch": code_switch,
         "factualIntegrity": factual,
+        "contentIntegrity": content_integrity,
         "overlap": (
             {
                 "f1": diarization.get("overlapF1"),
@@ -2792,17 +3246,42 @@ def _post_semantic_acceptance(
         and speech_presence["match"] is False
         else []
     )
+    threshold_evaluation = (
+        _evaluate_acceptance_thresholds(
+            case=case,
+            metrics=metrics,
+            disposition=validated["disposition"],
+            profile=threshold_profile,
+        )
+        if not hard_failures
+        and not missing_truth
+        and threshold_profile is not None
+        else None
+    )
+    threshold_failed_domains = (
+        threshold_evaluation["failedDomains"]
+        if isinstance(threshold_evaluation, Mapping)
+        else []
+    )
+    approved = (
+        isinstance(threshold_evaluation, Mapping)
+        and threshold_evaluation["passed"] is True
+    )
     status = (
         "not-approved-hard-domain-failure"
         if hard_failures
         else "not-scored-missing-reference-truth"
         if missing_truth
+        else "approved"
+        if approved
+        else "not-approved-hard-domain-failure"
+        if threshold_evaluation is not None
         else "not-approved-threshold-profile-missing"
     )
     return {
         "authority": "final-adjudicated-transcript.v1",
         "status": status,
-        "releaseApproved": False,
+        "releaseApproved": approved,
         "artifactPath": str(final_path),
         "artifactValid": True,
         "disposition": validated["disposition"],
@@ -2816,9 +3295,17 @@ def _post_semantic_acceptance(
             or (
                 ["missing-reference-truth"]
                 if missing_truth
-                else ["acceptance-threshold-profile-missing"]
+                else (
+                    [
+                        f"threshold-domain-failure:{domain}"
+                        for domain in threshold_failed_domains
+                    ]
+                    if threshold_evaluation is not None
+                    else ["acceptance-threshold-profile-missing"]
+                )
             )
         ),
+        "thresholdEvaluation": threshold_evaluation,
         "metrics": metrics,
     }
 
@@ -2828,6 +3315,7 @@ def _no_speech_post_semantic_acceptance(
     case: Mapping[str, Any],
     result: Mapping[str, Any],
     output_directory: Path,
+    threshold_profile: AcceptanceThresholdProfile | None = None,
 ) -> dict[str, Any]:
     final_path = _final_adjudication_path(result, output_directory)
     voice_path = _voice_activity_path(result, output_directory)
@@ -2887,13 +3375,6 @@ def _no_speech_post_semantic_acceptance(
         and speech_presence["match"] is False
         else []
     )
-    status = (
-        "not-approved-hard-domain-failure"
-        if hard_failures
-        else "not-scored-missing-reference-truth"
-        if missing_truth
-        else "not-approved-threshold-profile-missing"
-    )
     metrics = {
         "speechPresence": speech_presence,
         "speakerCount": None,
@@ -2904,6 +3385,7 @@ def _no_speech_post_semantic_acceptance(
         "language": None,
         "codeSwitch": None,
         "factualIntegrity": None,
+        "contentIntegrity": None,
         "overlap": None,
         "review": {
             "status": "not-applicable-no-speech",
@@ -2913,10 +3395,42 @@ def _no_speech_post_semantic_acceptance(
             output_directory / "transcript-document.v2.json"
         ),
     }
+    threshold_evaluation = (
+        _evaluate_acceptance_thresholds(
+            case=case,
+            metrics=metrics,
+            disposition=validated["disposition"],
+            profile=threshold_profile,
+        )
+        if not hard_failures
+        and not missing_truth
+        and threshold_profile is not None
+        else None
+    )
+    threshold_failed_domains = (
+        threshold_evaluation["failedDomains"]
+        if isinstance(threshold_evaluation, Mapping)
+        else []
+    )
+    approved = (
+        isinstance(threshold_evaluation, Mapping)
+        and threshold_evaluation["passed"] is True
+    )
+    status = (
+        "not-approved-hard-domain-failure"
+        if hard_failures
+        else "not-scored-missing-reference-truth"
+        if missing_truth
+        else "approved"
+        if approved
+        else "not-approved-hard-domain-failure"
+        if threshold_evaluation is not None
+        else "not-approved-threshold-profile-missing"
+    )
     return {
         "authority": "final-adjudicated-transcript.v1",
         "status": status,
-        "releaseApproved": False,
+        "releaseApproved": approved,
         "artifactPath": str(final_path),
         "artifactValid": True,
         "disposition": validated["disposition"],
@@ -2930,9 +3444,17 @@ def _no_speech_post_semantic_acceptance(
             or (
                 ["missing-reference-truth"]
                 if missing_truth
-                else ["acceptance-threshold-profile-missing"]
+                else (
+                    [
+                        f"threshold-domain-failure:{domain}"
+                        for domain in threshold_failed_domains
+                    ]
+                    if threshold_evaluation is not None
+                    else ["acceptance-threshold-profile-missing"]
+                )
             )
         ),
+        "thresholdEvaluation": threshold_evaluation,
         "metrics": metrics,
     }
 
@@ -2944,6 +3466,7 @@ def evaluate_case(
     results_root: Path,
     worker_output_root: Path,
     artifact_id: str,
+    threshold_profile: AcceptanceThresholdProfile | None = None,
 ) -> dict[str, Any]:
     result = _read_json(result_path)
     output_directory = worker_output_root / artifact_id
@@ -2959,6 +3482,7 @@ def evaluate_case(
         "qualityPolicy": {
             "formalAuthority": "postSemanticAcceptance",
             "frontModelMetricsRole": "diagnostic-only",
+            "frontModelReleaseGate": False,
             "nonCompensatingDomains": True,
         },
         "postSemanticAcceptance": _blocked_post_semantic_acceptance(
@@ -2985,6 +3509,7 @@ def evaluate_case(
             case=case,
             result=result,
             output_directory=output_directory,
+            threshold_profile=threshold_profile,
         )
         base["evidence"] = {
             "transcript": (
@@ -3186,6 +3711,7 @@ def evaluate_case(
         result=result,
         transcript_path=transcript_path,
         transcript=transcript,
+        threshold_profile=threshold_profile,
     )
     return base
 
@@ -3289,6 +3815,34 @@ def _bucket_summary(
                 (int, float),
             )
         ]
+        hallucination_rate_values = [
+            value
+            for item in items
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "contentIntegrity",
+                        "hallucinationRate",
+                    )
+                ),
+                (int, float),
+            )
+        ]
+        deletion_rate_values = [
+            value
+            for item in items
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "contentIntegrity",
+                        "deletionRate",
+                    )
+                ),
+                (int, float),
+            )
+        ]
         cp_wer_values = [
             value
             for item in items
@@ -3375,6 +3929,16 @@ def _bucket_summary(
                 if lexical_language_accuracy_values
                 else None
             ),
+            "meanHallucinationRate": (
+                statistics.fmean(hallucination_rate_values)
+                if hallucination_rate_values
+                else None
+            ),
+            "meanDeletionRate": (
+                statistics.fmean(deletion_rate_values)
+                if deletion_rate_values
+                else None
+            ),
             "meanCpWer": (
                 statistics.fmean(cp_wer_values) if cp_wer_values else None
             ),
@@ -3416,6 +3980,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="suffix between the case id and -result.json, e.g. -manual",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--threshold-profile",
+        type=Path,
+        help=(
+            "frozen post-semantic acceptance profile; without one, "
+            "release approval is always disabled"
+        ),
+    )
     return parser
 
 
@@ -3450,14 +4022,60 @@ def _select_result(
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     resolved = json.loads(args.manifest.read_text(encoding="utf-8"))
+    if not isinstance(resolved, Mapping):
+        raise SystemExit("resolved manifest must be an object")
     rows = resolved.get("cases", [])
     if not isinstance(rows, list) or not rows:
         raise SystemExit("resolved manifest is missing non-empty cases")
+    library_id = resolved.get("libraryId")
+    if not isinstance(library_id, str) or not library_id:
+        raise SystemExit("resolved manifest is missing libraryId")
+    threshold_profile = (
+        load_acceptance_threshold_profile(
+            args.threshold_profile,
+            expected_library_id=library_id,
+        )
+        if args.threshold_profile is not None
+        else None
+    )
+    if threshold_profile is not None:
+        expected_manifest_hash = threshold_profile.document["scope"].get(
+            "sourceManifestCanonicalSha256"
+        )
+        actual_manifest_hash = canonical_json_sha256(resolved)
+        if (
+            expected_manifest_hash is not None
+            and expected_manifest_hash != actual_manifest_hash
+        ):
+            raise SystemExit(
+                "acceptance threshold profile source manifest hash "
+                "does not match the resolved manifest"
+            )
     selected = set(args.case)
+    available_ids = {
+        str(case["id"])
+        for case in rows
+        if isinstance(case, Mapping) and case.get("id") is not None
+    }
+    missing_selected = sorted(selected - available_ids)
+    if missing_selected:
+        raise SystemExit(
+            "requested cases are absent from the resolved manifest: "
+            + ", ".join(missing_selected)
+        )
     reports = []
     for case in rows:
         if not isinstance(case, dict) or (selected and case.get("id") not in selected):
             continue
+        if (
+            threshold_profile is not None
+            and case.get("evaluationSplit")
+            not in threshold_profile.document["scope"]["evaluationSplits"]
+        ):
+            raise SystemExit(
+                "case evaluationSplit is outside the acceptance threshold "
+                f"profile scope: {case.get('id')!r}"
+            )
         result_path, artifact_id = _select_result(
             args.results_root,
             str(case["id"]),
@@ -3470,11 +4088,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 results_root=args.results_root,
                 worker_output_root=args.worker_output_root,
                 artifact_id=artifact_id,
+                threshold_profile=threshold_profile,
             )
         )
+    coverage = (
+        _threshold_profile_coverage(
+            reports=reports,
+            profile=threshold_profile,
+        )
+        if threshold_profile is not None
+        else None
+    )
+    cases_approved = bool(reports) and all(
+        isinstance(item.get("postSemanticAcceptance"), Mapping)
+        and item["postSemanticAcceptance"].get("releaseApproved") is True
+        for item in reports
+    )
+    release_approved = (
+        cases_approved
+        and isinstance(coverage, Mapping)
+        and coverage.get("passed") is True
+    )
     report = {
-        "schemaVersion": "1.5.0",
-        "libraryId": resolved.get("libraryId"),
+        "schemaVersion": "1.7.0",
+        "libraryId": library_id,
+        "acceptanceThresholdProfile": (
+            threshold_profile.evidence()
+            if threshold_profile is not None
+            else None
+        ),
+        "acceptanceCoverage": coverage,
         "cases": reports,
         "summary": {
             "total": len(reports),
@@ -3571,6 +4214,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _post_metric(item, "jointTranscription", "scored") is True
                 for item in reports
             ),
+            "contentIntegrityScored": sum(
+                _post_metric(item, "contentIntegrity", "scored") is True
+                for item in reports
+            ),
             "postSemanticAcceptanceStatuses": {
                 status: sum(
                     item.get("postSemanticAcceptance", {}).get("status")
@@ -3612,18 +4259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Mapping,
                 )
             ),
-            "releaseApproved": bool(reports)
-            and all(
-                item.get("postSemanticAcceptance", {}).get(
-                    "releaseApproved"
-                )
-                is True
-                for item in reports
-                if isinstance(
-                    item.get("postSemanticAcceptance"),
-                    Mapping,
-                )
-            ),
+            "releaseApproved": release_approved,
             "releaseApprovedCases": sum(
                 item.get("postSemanticAcceptance", {}).get(
                     "releaseApproved"

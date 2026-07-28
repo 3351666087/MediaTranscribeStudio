@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/post-semantic-acceptance-profile.schema.json",
+  "title": "Post-semantic acceptance threshold profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "profileId",
+    "status",
+    "frozenAt",
+    "scope",
+    "rules",
+    "coverageRequirements"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+    },
+    "status": {
+      "const": "frozen"
+    },
+    "frozenAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "libraryId",
+        "evaluationSplits"
+      ],
+      "properties": {
+        "libraryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evaluationSplits": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "sourceManifestCanonicalSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "domain",
+          "dispositions",
+          "metricPath",
+          "operator",
+          "threshold"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+          },
+          "domain": {
+            "enum": [
+              "speech-presence",
+              "speaker-count",
+              "diarization",
+              "boundary",
+              "final-text",
+              "speaker-attributed-text",
+              "language",
+              "code-switch",
+              "overlap",
+              "factual-integrity",
+              "content-integrity",
+              "review",
+              "runtime-resources"
+            ]
+          },
+          "dispositions": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "transcribable-speech",
+                "no-transcribable-speech"
+              ]
+            }
+          },
+          "metricPath": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "operator": {
+            "enum": [
+              "lte",
+              "gte",
+              "eq"
+            ]
+          },
+          "threshold": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "selector": {
+            "$ref": "#/$defs/selector"
+          }
+        }
+      }
+    },
+    "coverageRequirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "selector"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$"
+          },
+          "selector": {
+            "$ref": "#/$defs/selector"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "caseIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "evaluationSplits": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "languagesAny": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$"
+          }
+        },
+        "speakerCounts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "scenariosAny": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

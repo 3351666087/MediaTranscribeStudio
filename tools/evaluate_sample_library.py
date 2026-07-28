@@ -16,6 +16,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
+from rapidfuzz.distance import Levenshtein
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -304,44 +306,1177 @@ def _language_quality(
     }
 
 
+def _language_intervals(
+    *,
+    case: Mapping[str, Any],
+    duration_ms: int,
+) -> tuple[
+    list[dict[str, Any]],
+    list[str],
+    str | None,
+    bool,
+    bool,
+]:
+    truth = case.get("languageTruth")
+    if isinstance(truth, Mapping):
+        expected_raw = truth.get(
+            "expectedLanguages",
+            case.get("expectedLanguages"),
+        )
+        if not isinstance(expected_raw, list):
+            raise ValueError(
+                "language truth expectedLanguages must be an array"
+            )
+        qualification = (
+            str(truth["qualification"])
+            if isinstance(truth.get("qualification"), str)
+            else None
+        )
+        if (
+            "timeScoringEligible" in truth
+            and not isinstance(truth.get("timeScoringEligible"), bool)
+        ):
+            raise ValueError(
+                "language truth timeScoringEligible must be boolean"
+            )
+        if (
+            "wordScoringEligible" in truth
+            and not isinstance(truth.get("wordScoringEligible"), bool)
+        ):
+            raise ValueError(
+                "language truth wordScoringEligible must be boolean"
+            )
+        time_eligible = truth.get("timeScoringEligible") is True
+        explicit_word_eligibility = truth.get("wordScoringEligible")
+        raw_intervals = truth.get("intervals")
+    else:
+        expected_raw = [case.get("language")]
+        qualification = "whole-media-single-language-without-time-alignment"
+        time_eligible = False
+        explicit_word_eligibility = None
+        raw_intervals = [
+            {
+                "language": case.get("language"),
+                "startSeconds": 0.0,
+                "endSeconds": duration_ms / 1000.0,
+                "transcript": (
+                    case.get("scoringTranscript")
+                    or case.get("expectedTranscript")
+                ),
+            }
+        ]
+    expected_languages = sorted(
+        {
+            root
+            for value in (
+                expected_raw if isinstance(expected_raw, list) else []
+            )
+            if (root := _language_root(value))
+            not in {None, "auto", "mul", "und"}
+        }
+    )
+    if not expected_languages:
+        return [], [], qualification, False, False
+    if not isinstance(raw_intervals, list) or not raw_intervals:
+        if time_eligible or explicit_word_eligibility is True:
+            raise ValueError(
+                "scored language truth requires non-empty intervals"
+            )
+        return (
+            [],
+            expected_languages,
+            qualification,
+            False,
+            False,
+        )
+    intervals: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_intervals):
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"language truth interval {index} must be an object"
+            )
+        language = _language_root(raw.get("language"))
+        start = raw.get("startSeconds")
+        end = raw.get("endSeconds")
+        speaker_id = raw.get("speakerId")
+        transcript = raw.get("transcript")
+        if (
+            language in {None, "auto", "mul", "und"}
+            or language not in expected_languages
+            or isinstance(start, bool)
+            or not isinstance(start, (int, float))
+            or isinstance(end, bool)
+            or not isinstance(end, (int, float))
+        ):
+            raise ValueError(
+                f"language truth interval {index} has invalid identity"
+            )
+        start_ms = round(float(start) * 1000)
+        end_ms = round(float(end) * 1000)
+        if start_ms < 0 or end_ms <= start_ms or end_ms > duration_ms:
+            raise ValueError(
+                f"language truth interval {index} is outside the media"
+            )
+        if speaker_id is not None and (
+            not isinstance(speaker_id, str) or not speaker_id.strip()
+        ):
+            raise ValueError(
+                f"language truth interval {index}.speakerId is invalid"
+            )
+        text = transcript.strip() if isinstance(transcript, str) else ""
+        intervals.append(
+            {
+                "startMs": start_ms,
+                "endMs": end_ms,
+                "language": language,
+                "speakerId": (
+                    speaker_id.strip()
+                    if isinstance(speaker_id, str)
+                    else None
+                ),
+                "transcript": text,
+                "tokens": tokenize_for_score(text) if text else [],
+            }
+        )
+    speaker_modes = {
+        interval["speakerId"] is not None for interval in intervals
+    }
+    if len(speaker_modes) != 1:
+        raise ValueError(
+            "language truth intervals must either all declare speakerId "
+            "or all omit it"
+        )
+    streams: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for interval in intervals:
+        streams[str(interval["speakerId"] or "__global__")].append(interval)
+    for stream, items in streams.items():
+        ordered = sorted(
+            items,
+            key=lambda item: (item["startMs"], item["endMs"]),
+        )
+        for previous, current in zip(ordered, ordered[1:]):
+            if current["startMs"] < previous["endMs"]:
+                raise ValueError(
+                    f"language truth intervals overlap within {stream}"
+                )
+    if isinstance(truth, Mapping) and "switchPointsSeconds" in truth:
+        raw_switch_points = truth.get("switchPointsSeconds")
+        if not isinstance(raw_switch_points, list) or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            for value in raw_switch_points
+        ):
+            raise ValueError("language switch point truth is invalid")
+        switch_points = [
+            round(float(value) * 1000) for value in raw_switch_points
+        ]
+        if (
+            switch_points != sorted(set(switch_points))
+            or any(
+                value <= 0 or value >= duration_ms
+                for value in switch_points
+            )
+        ):
+            raise ValueError("language switch point truth is invalid")
+        reference_speakers = {
+            str(interval["speakerId"])
+            for interval in intervals
+            if interval["speakerId"] is not None
+        }
+        if len(reference_speakers) > 1 and switch_points:
+            raise ValueError(
+                "multi-speaker language truth cannot declare global "
+                "switch points"
+            )
+        if len(reference_speakers) <= 1:
+            ordered = sorted(
+                intervals,
+                key=lambda item: (item["startMs"], item["endMs"]),
+            )
+            derived_switch_points = [
+                int(current["startMs"])
+                for previous, current in zip(ordered, ordered[1:])
+                if previous["language"] != current["language"]
+            ]
+            if switch_points != derived_switch_points:
+                raise ValueError(
+                    "language switch points do not match interval truth"
+                )
+    lexical_available = all(interval["tokens"] for interval in intervals)
+    word_eligible = (
+        explicit_word_eligibility is True
+        or explicit_word_eligibility is None
+        and lexical_available
+    )
+    if explicit_word_eligibility is True and not lexical_available:
+        raise ValueError(
+            "word-scored language truth requires transcript tokens "
+            "for every interval"
+        )
+    return (
+        intervals,
+        expected_languages,
+        qualification,
+        time_eligible,
+        word_eligible,
+    )
+
+
+def _language_speaker_mapping(
+    *,
+    reference: Sequence[Mapping[str, Any]],
+    hypothesis: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    reference_speakers = sorted(
+        {
+            str(interval["speakerId"])
+            for interval in reference
+            if interval.get("speakerId") is not None
+        }
+    )
+    if not reference_speakers:
+        return []
+    hypothesis_speakers = sorted(
+        {str(segment["speakerId"]) for segment in hypothesis}
+    )
+    weights = [
+        [0.0 for _ in hypothesis_speakers]
+        for _ in reference_speakers
+    ]
+    reference_index = {
+        speaker: index for index, speaker in enumerate(reference_speakers)
+    }
+    hypothesis_index = {
+        speaker: index for index, speaker in enumerate(hypothesis_speakers)
+    }
+    for interval in reference:
+        reference_speaker = str(interval["speakerId"])
+        for segment in hypothesis:
+            overlap = max(
+                0,
+                min(int(interval["endMs"]), int(segment["endMs"]))
+                - max(
+                    int(interval["startMs"]),
+                    int(segment["startMs"]),
+                ),
+            )
+            if overlap:
+                weights[reference_index[reference_speaker]][
+                    hypothesis_index[str(segment["speakerId"])]
+                ] += float(overlap)
+    mapping: list[dict[str, Any]] = []
+    for reference_row, hypothesis_column in maximum_weight_assignment(weights):
+        overlap_ms = weights[reference_row][hypothesis_column]
+        if overlap_ms <= 0:
+            continue
+        mapping.append(
+            {
+                "referenceSpeaker": reference_speakers[reference_row],
+                "hypothesisSpeaker": hypothesis_speakers[hypothesis_column],
+                "overlapMs": round(overlap_ms, 6),
+            }
+        )
+    return mapping
+
+
+def _empty_language_counts() -> dict[str, int]:
+    return {
+        "reference": 0,
+        "covered": 0,
+        "correct": 0,
+        "ambiguous": 0,
+        "undetermined": 0,
+    }
+
+
+def _interval_union_duration(
+    intervals: Sequence[tuple[int, int]],
+) -> int:
+    ordered = sorted(
+        (start, end)
+        for start, end in intervals
+        if end > start
+    )
+    if not ordered:
+        return 0
+    total = 0
+    current_start, current_end = ordered[0]
+    for start, end in ordered[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+        else:
+            total += current_end - current_start
+            current_start, current_end = start, end
+    return total + current_end - current_start
+
+
+def _duration_language_quality(
+    *,
+    reference: Sequence[Mapping[str, Any]],
+    hypothesis: Sequence[Mapping[str, Any]],
+    speaker_mapping: Sequence[Mapping[str, Any]],
+    eligible: bool,
+) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "eligible": eligible,
+        "scored": False,
+        "referenceDurationMs": 0,
+        "coveredDurationMs": 0,
+        "correctDurationMs": 0,
+        "incorrectDurationMs": 0,
+        "uncoveredDurationMs": 0,
+        "ambiguousDurationMs": 0,
+        "undeterminedDurationMs": 0,
+        "falseAlarmDurationMs": 0,
+        "accuracy": None,
+        "coverage": None,
+        "perLanguage": {},
+        "perSpeaker": {},
+    }
+    if not eligible or not reference:
+        base["reason"] = "time-language-truth-ineligible"
+        return base
+    reference_has_speakers = reference[0].get("speakerId") is not None
+    reference_to_hypothesis = {
+        str(item["referenceSpeaker"]): str(item["hypothesisSpeaker"])
+        for item in speaker_mapping
+    }
+    per_language: dict[str, dict[str, int]] = defaultdict(
+        _empty_language_counts
+    )
+    per_speaker: dict[str, dict[str, int]] = defaultdict(
+        _empty_language_counts
+    )
+    totals = _empty_language_counts()
+    for interval in reference:
+        reference_speaker = str(
+            interval.get("speakerId") or "__global__"
+        )
+        expected_hypothesis_speaker = (
+            reference_to_hypothesis.get(reference_speaker)
+            if reference_has_speakers
+            else None
+        )
+        candidates = [
+            segment
+            for segment in hypothesis
+            if (
+                not reference_has_speakers
+                or str(segment["speakerId"])
+                == expected_hypothesis_speaker
+            )
+            and int(segment["endMs"]) > int(interval["startMs"])
+            and int(segment["startMs"]) < int(interval["endMs"])
+        ]
+        boundaries = {
+            int(interval["startMs"]),
+            int(interval["endMs"]),
+        }
+        for segment in candidates:
+            boundaries.add(
+                max(int(interval["startMs"]), int(segment["startMs"]))
+            )
+            boundaries.add(
+                min(int(interval["endMs"]), int(segment["endMs"]))
+            )
+        ordered = sorted(boundaries)
+        for start_ms, end_ms in zip(ordered, ordered[1:]):
+            duration = end_ms - start_ms
+            if duration <= 0:
+                continue
+            active_languages = {
+                str(segment["language"])
+                for segment in candidates
+                if int(segment["startMs"]) < end_ms
+                and int(segment["endMs"]) > start_ms
+            }
+            expected_language = str(interval["language"])
+            covered = bool(active_languages)
+            correct = active_languages == {expected_language}
+            ambiguous = len(active_languages) > 1
+            undetermined = "und" in active_languages
+            for target in (
+                totals,
+                per_language[expected_language],
+                per_speaker[reference_speaker],
+            ):
+                target["reference"] += duration
+                target["covered"] += duration if covered else 0
+                target["correct"] += duration if correct else 0
+                target["ambiguous"] += duration if ambiguous else 0
+                target["undetermined"] += duration if undetermined else 0
+    hypothesis_to_reference = {
+        str(item["hypothesisSpeaker"]): str(item["referenceSpeaker"])
+        for item in speaker_mapping
+    }
+    hypothesis_groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    if reference_has_speakers:
+        for segment in hypothesis:
+            hypothesis_groups[str(segment["speakerId"])].append(segment)
+    else:
+        hypothesis_groups["__global__"] = list(hypothesis)
+    false_alarm_ms = 0
+    for hypothesis_speaker, items in hypothesis_groups.items():
+        hypothesis_intervals = [
+            (int(item["startMs"]), int(item["endMs"])) for item in items
+        ]
+        reference_speaker = (
+            hypothesis_to_reference.get(hypothesis_speaker)
+            if reference_has_speakers
+            else "__global__"
+        )
+        matching_reference = [
+            interval
+            for interval in reference
+            if (
+                not reference_has_speakers
+                or str(interval["speakerId"]) == reference_speaker
+            )
+        ]
+        intersections = [
+            (
+                max(int(segment["startMs"]), int(interval["startMs"])),
+                min(int(segment["endMs"]), int(interval["endMs"])),
+            )
+            for segment in items
+            for interval in matching_reference
+            if int(segment["endMs"]) > int(interval["startMs"])
+            and int(segment["startMs"]) < int(interval["endMs"])
+        ]
+        false_alarm_ms += max(
+            0,
+            _interval_union_duration(hypothesis_intervals)
+            - _interval_union_duration(intersections),
+        )
+    base.update(
+        {
+            "scored": totals["reference"] > 0,
+            "referenceDurationMs": totals["reference"],
+            "coveredDurationMs": totals["covered"],
+            "correctDurationMs": totals["correct"],
+            "incorrectDurationMs": (
+                totals["reference"] - totals["correct"]
+            ),
+            "uncoveredDurationMs": (
+                totals["reference"] - totals["covered"]
+            ),
+            "ambiguousDurationMs": totals["ambiguous"],
+            "undeterminedDurationMs": totals["undetermined"],
+            "falseAlarmDurationMs": false_alarm_ms,
+            "accuracy": (
+                totals["correct"] / totals["reference"]
+                if totals["reference"]
+                else None
+            ),
+            "coverage": (
+                totals["covered"] / totals["reference"]
+                if totals["reference"]
+                else None
+            ),
+            "perLanguage": {
+                key: {
+                    "referenceDurationMs": value["reference"],
+                    "coveredDurationMs": value["covered"],
+                    "correctDurationMs": value["correct"],
+                    "incorrectDurationMs": (
+                        value["reference"] - value["correct"]
+                    ),
+                    "uncoveredDurationMs": (
+                        value["reference"] - value["covered"]
+                    ),
+                    "ambiguousDurationMs": value["ambiguous"],
+                    "undeterminedDurationMs": value["undetermined"],
+                    "accuracy": (
+                        value["correct"] / value["reference"]
+                        if value["reference"]
+                        else None
+                    ),
+                }
+                for key, value in sorted(per_language.items())
+            },
+            "perSpeaker": {
+                key: {
+                    "referenceDurationMs": value["reference"],
+                    "coveredDurationMs": value["covered"],
+                    "correctDurationMs": value["correct"],
+                    "incorrectDurationMs": (
+                        value["reference"] - value["correct"]
+                    ),
+                    "uncoveredDurationMs": (
+                        value["reference"] - value["covered"]
+                    ),
+                    "ambiguousDurationMs": value["ambiguous"],
+                    "undeterminedDurationMs": value["undetermined"],
+                    "accuracy": (
+                        value["correct"] / value["reference"]
+                        if value["reference"]
+                        else None
+                    ),
+                }
+                for key, value in sorted(per_speaker.items())
+            },
+        }
+    )
+    return base
+
+
+def _align_language_tokens(
+    reference: Sequence[tuple[str, str]],
+    hypothesis: Sequence[tuple[str, str]],
+) -> dict[str, Any]:
+    aligned = 0
+    correct_language = 0
+    lexical_exact = 0
+    deleted = 0
+    inserted = 0
+    undetermined = 0
+    per_language: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "reference": 0,
+            "aligned": 0,
+            "correct": 0,
+            "undetermined": 0,
+        }
+    )
+    for _, language in reference:
+        per_language[language]["reference"] += 1
+
+    def score_pair(
+        reference_index: int,
+        hypothesis_index: int,
+        *,
+        exact: bool,
+    ) -> None:
+        nonlocal aligned, correct_language, lexical_exact, undetermined
+        reference_token = reference[reference_index]
+        hypothesis_token = hypothesis[hypothesis_index]
+        aligned += 1
+        lexical_exact += exact
+        language_correct = reference_token[1] == hypothesis_token[1]
+        language_undetermined = hypothesis_token[1] == "und"
+        correct_language += language_correct
+        undetermined += language_undetermined
+        per_language[reference_token[1]]["aligned"] += 1
+        per_language[reference_token[1]]["correct"] += language_correct
+        per_language[reference_token[1]][
+            "undetermined"
+        ] += language_undetermined
+
+    reference_tokens = [token for token, _ in reference]
+    hypothesis_tokens = [token for token, _ in hypothesis]
+    reference_index = 0
+    hypothesis_index = 0
+    for edit in Levenshtein.editops(reference_tokens, hypothesis_tokens):
+        while (
+            reference_index < edit.src_pos
+            and hypothesis_index < edit.dest_pos
+        ):
+            if (
+                reference[reference_index][0]
+                != hypothesis[hypothesis_index][0]
+            ):
+                raise RuntimeError(
+                    "language token alignment exact span is invalid"
+                )
+            score_pair(
+                reference_index,
+                hypothesis_index,
+                exact=True,
+            )
+            reference_index += 1
+            hypothesis_index += 1
+        if (
+            reference_index != edit.src_pos
+            or hypothesis_index != edit.dest_pos
+        ):
+            raise RuntimeError(
+                "language token alignment edit path is invalid"
+            )
+        if edit.tag == "replace":
+            score_pair(
+                reference_index,
+                hypothesis_index,
+                exact=False,
+            )
+            reference_index += 1
+            hypothesis_index += 1
+        elif edit.tag == "delete":
+            deleted += 1
+            reference_index += 1
+        elif edit.tag == "insert":
+            inserted += 1
+            hypothesis_index += 1
+        else:
+            raise RuntimeError(
+                f"language token alignment edit is invalid: {edit.tag}"
+            )
+    while (
+        reference_index < len(reference)
+        and hypothesis_index < len(hypothesis)
+    ):
+        if (
+            reference[reference_index][0]
+            != hypothesis[hypothesis_index][0]
+        ):
+            raise RuntimeError(
+                "language token alignment trailing span is invalid"
+            )
+        score_pair(
+            reference_index,
+            hypothesis_index,
+            exact=True,
+        )
+        reference_index += 1
+        hypothesis_index += 1
+    deleted += len(reference) - reference_index
+    inserted += len(hypothesis) - hypothesis_index
+    reference_count = len(reference)
+    return {
+        "referenceTokenCount": reference_count,
+        "hypothesisTokenCount": len(hypothesis),
+        "alignedReferenceTokenCount": aligned,
+        "correctLanguageTokenCount": correct_language,
+        "incorrectLanguageTokenCount": reference_count - correct_language,
+        "lexicallyExactAlignedTokenCount": lexical_exact,
+        "deletedReferenceTokenCount": deleted,
+        "insertedHypothesisTokenCount": inserted,
+        "undeterminedAlignedTokenCount": undetermined,
+        "alignmentEngine": "rapidfuzz-levenshtein-editops",
+        "accuracy": (
+            correct_language / reference_count
+            if reference_count
+            else None
+        ),
+        "alignedAccuracy": (
+            correct_language / aligned if aligned else None
+        ),
+        "coverage": aligned / reference_count if reference_count else None,
+        "perLanguage": {
+            key: {
+                "referenceTokenCount": value["reference"],
+                "alignedReferenceTokenCount": value["aligned"],
+                "correctLanguageTokenCount": value["correct"],
+                "incorrectLanguageTokenCount": (
+                    value["reference"] - value["correct"]
+                ),
+                "undeterminedAlignedTokenCount": value["undetermined"],
+                "accuracy": (
+                    value["correct"] / value["reference"]
+                    if value["reference"]
+                    else None
+                ),
+            }
+            for key, value in sorted(per_language.items())
+        },
+    }
+
+
+def _lexical_language_quality(
+    *,
+    reference: Sequence[Mapping[str, Any]],
+    hypothesis: Sequence[Mapping[str, Any]],
+    speaker_mapping: Sequence[Mapping[str, Any]],
+    eligible: bool,
+) -> dict[str, Any]:
+    if not eligible or not reference:
+        return {
+            "eligible": eligible,
+            "scored": False,
+            "reason": "word-language-truth-ineligible",
+            "tokenization": "mts-language-aware-nfkc-v1",
+            "accuracy": None,
+        }
+    reference_has_speakers = reference[0].get("speakerId") is not None
+    reference_to_hypothesis = {
+        str(item["referenceSpeaker"]): str(item["hypothesisSpeaker"])
+        for item in speaker_mapping
+    }
+    reference_streams: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    hypothesis_streams: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for interval in sorted(
+        reference,
+        key=lambda item: (
+            str(item.get("speakerId") or "__global__"),
+            int(item["startMs"]),
+            int(item["endMs"]),
+        ),
+    ):
+        stream = str(interval.get("speakerId") or "__global__")
+        reference_streams[stream].extend(
+            (str(token), str(interval["language"]))
+            for token in interval["tokens"]
+        )
+    for stream in reference_streams:
+        hypothesis_speaker = (
+            reference_to_hypothesis.get(stream)
+            if reference_has_speakers
+            else None
+        )
+        stream_segments = sorted(
+            (
+                segment
+                for segment in hypothesis
+                if (
+                    not reference_has_speakers
+                    or str(segment["speakerId"]) == hypothesis_speaker
+                )
+            ),
+            key=lambda item: (
+                int(item["startMs"]),
+                int(item["endMs"]),
+                str(item.get("segmentId", item.get("id", ""))),
+            ),
+        )
+        for segment in stream_segments:
+            hypothesis_streams[stream].extend(
+                (token, str(segment["language"]))
+                for token in tokenize_for_score(str(segment["finalText"]))
+            )
+    per_speaker = {
+        stream: _align_language_tokens(
+            reference_streams[stream],
+            hypothesis_streams.get(stream, []),
+        )
+        for stream in sorted(reference_streams)
+    }
+    totals = {
+        field: sum(int(value[field]) for value in per_speaker.values())
+        for field in (
+            "referenceTokenCount",
+            "hypothesisTokenCount",
+            "alignedReferenceTokenCount",
+            "correctLanguageTokenCount",
+            "incorrectLanguageTokenCount",
+            "lexicallyExactAlignedTokenCount",
+            "deletedReferenceTokenCount",
+            "insertedHypothesisTokenCount",
+            "undeterminedAlignedTokenCount",
+        )
+    }
+    mapped_hypothesis = {
+        str(item["hypothesisSpeaker"]) for item in speaker_mapping
+    }
+    if reference_has_speakers:
+        unmapped_insertions = sum(
+            len(tokenize_for_score(str(segment["finalText"])))
+            for segment in hypothesis
+            if str(segment["speakerId"]) not in mapped_hypothesis
+        )
+        totals["hypothesisTokenCount"] += unmapped_insertions
+        totals["insertedHypothesisTokenCount"] += unmapped_insertions
+    per_language: dict[str, dict[str, int]] = defaultdict(
+        lambda: {
+            "reference": 0,
+            "aligned": 0,
+            "correct": 0,
+            "undetermined": 0,
+        }
+    )
+    for speaker_quality in per_speaker.values():
+        for language, values in speaker_quality["perLanguage"].items():
+            per_language[language]["reference"] += int(
+                values["referenceTokenCount"]
+            )
+            per_language[language]["aligned"] += int(
+                values["alignedReferenceTokenCount"]
+            )
+            per_language[language]["correct"] += int(
+                values["correctLanguageTokenCount"]
+            )
+            per_language[language]["undetermined"] += int(
+                values["undeterminedAlignedTokenCount"]
+            )
+    reference_count = totals["referenceTokenCount"]
+    aligned_count = totals["alignedReferenceTokenCount"]
+    totals.update(
+        {
+            "eligible": True,
+            "scored": reference_count > 0,
+            "tokenization": "mts-language-aware-nfkc-v1",
+            "alignmentEngine": "rapidfuzz-levenshtein-editops",
+            "accuracy": (
+                totals["correctLanguageTokenCount"] / reference_count
+                if reference_count
+                else None
+            ),
+            "alignedAccuracy": (
+                totals["correctLanguageTokenCount"] / aligned_count
+                if aligned_count
+                else None
+            ),
+            "coverage": (
+                aligned_count / reference_count
+                if reference_count
+                else None
+            ),
+            "perLanguage": {
+                key: {
+                    "referenceTokenCount": value["reference"],
+                    "alignedReferenceTokenCount": value["aligned"],
+                    "correctLanguageTokenCount": value["correct"],
+                    "incorrectLanguageTokenCount": (
+                        value["reference"] - value["correct"]
+                    ),
+                    "undeterminedAlignedTokenCount": value[
+                        "undetermined"
+                    ],
+                    "accuracy": (
+                        value["correct"] / value["reference"]
+                        if value["reference"]
+                        else None
+                    ),
+                }
+                for key, value in sorted(per_language.items())
+            },
+            "perSpeaker": per_speaker,
+        }
+    )
+    return totals
+
+
+def _minimum_distance_point_matching(
+    reference: Sequence[int],
+    hypothesis: Sequence[int],
+) -> list[dict[str, Any]]:
+    if not reference or not hypothesis:
+        return []
+    swapped = len(reference) > len(hypothesis)
+    shorter = list(hypothesis if swapped else reference)
+    longer = list(reference if swapped else hypothesis)
+    rows = len(shorter) + 1
+    columns = len(longer) + 1
+    infinity = sum(abs(left - right) for left in shorter for right in longer) + 1
+    costs = [[infinity] * columns for _ in range(rows)]
+    take = [[False] * columns for _ in range(rows)]
+    for column in range(columns):
+        costs[0][column] = 0
+    for row in range(1, rows):
+        for column in range(1, columns):
+            skip_cost = costs[row][column - 1]
+            match_cost = costs[row - 1][column - 1] + abs(
+                shorter[row - 1] - longer[column - 1]
+            )
+            if match_cost <= skip_cost:
+                costs[row][column] = match_cost
+                take[row][column] = True
+            else:
+                costs[row][column] = skip_cost
+    pairs: list[tuple[int, int]] = []
+    row = len(shorter)
+    column = len(longer)
+    while row:
+        if take[row][column]:
+            pairs.append((shorter[row - 1], longer[column - 1]))
+            row -= 1
+        column -= 1
+    pairs.reverse()
+    return [
+        {
+            "referenceMs": hypothesis_value if swapped else reference_value,
+            "hypothesisMs": reference_value if swapped else hypothesis_value,
+            "absoluteErrorMs": abs(reference_value - hypothesis_value),
+        }
+        for reference_value, hypothesis_value in pairs
+    ]
+
+
+def _switch_point_quality(
+    *,
+    reference: Sequence[Mapping[str, Any]],
+    hypothesis: Sequence[Mapping[str, Any]],
+    speaker_mapping: Sequence[Mapping[str, Any]],
+    truth: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    reference_has_speakers = (
+        bool(reference) and reference[0].get("speakerId") is not None
+    )
+    reference_to_hypothesis = {
+        str(item["referenceSpeaker"]): str(item["hypothesisSpeaker"])
+        for item in speaker_mapping
+    }
+    reference_streams: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    hypothesis_streams: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for interval in reference:
+        reference_streams[
+            str(interval.get("speakerId") or "__global__")
+        ].append(interval)
+    for stream in reference_streams:
+        hypothesis_speaker = (
+            reference_to_hypothesis.get(stream)
+            if reference_has_speakers
+            else None
+        )
+        hypothesis_streams[stream] = [
+            segment
+            for segment in hypothesis
+            if (
+                not reference_has_speakers
+                or str(segment["speakerId"]) == hypothesis_speaker
+            )
+        ]
+    explicit_global_points: list[int] = []
+    if not reference_has_speakers and isinstance(truth, Mapping):
+        raw_points = truth.get("switchPointsSeconds")
+        if isinstance(raw_points, list):
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or float(value) < 0
+                for value in raw_points
+            ):
+                raise ValueError("language switch point truth is invalid")
+            explicit_global_points = sorted(
+                round(float(value) * 1000) for value in raw_points
+            )
+    reference_points: list[int] = []
+    predicted_points: list[int] = []
+    matches: list[dict[str, Any]] = []
+    per_speaker: dict[str, dict[str, Any]] = {}
+    missed_count = 0
+    false_alarm_count = 0
+    mapped_hypothesis_speakers: set[str] = set()
+    for stream in sorted(reference_streams):
+        reference_items = sorted(
+            reference_streams[stream],
+            key=lambda item: (
+                int(item["startMs"]),
+                int(item["endMs"]),
+            ),
+        )
+        stream_reference_points = (
+            explicit_global_points
+            if stream == "__global__" and explicit_global_points
+            else [
+                int(current["startMs"])
+                for previous, current in zip(
+                    reference_items,
+                    reference_items[1:],
+                )
+                if previous["language"] != current["language"]
+            ]
+        )
+        hypothesis_items = sorted(
+            hypothesis_streams[stream],
+            key=lambda item: (
+                int(item["startMs"]),
+                int(item["endMs"]),
+                str(item.get("segmentId", item.get("id", ""))),
+            ),
+        )
+        hypothesis_speaker = (
+            reference_to_hypothesis.get(stream)
+            if reference_has_speakers
+            else None
+        )
+        if hypothesis_speaker is not None:
+            mapped_hypothesis_speakers.add(hypothesis_speaker)
+        stream_predicted_points = [
+            int(current["startMs"])
+            for previous, current in zip(
+                hypothesis_items,
+                hypothesis_items[1:],
+            )
+            if previous["language"] != current["language"]
+        ]
+        stream_matches = _minimum_distance_point_matching(
+            stream_reference_points,
+            stream_predicted_points,
+        )
+        if stream != "__global__":
+            for item in stream_matches:
+                item["referenceSpeaker"] = stream
+                item["hypothesisSpeaker"] = hypothesis_speaker
+        stream_missed = len(stream_reference_points) - len(stream_matches)
+        stream_false_alarm = len(stream_predicted_points) - len(
+            stream_matches
+        )
+        per_speaker[stream] = {
+            "hypothesisSpeaker": hypothesis_speaker,
+            "referenceSwitchPointsMs": stream_reference_points,
+            "predictedSwitchPointsMs": stream_predicted_points,
+            "matchedSwitchPoints": stream_matches,
+            "missedReferenceSwitchCount": stream_missed,
+            "falseAlarmSwitchCount": stream_false_alarm,
+        }
+        reference_points.extend(stream_reference_points)
+        predicted_points.extend(stream_predicted_points)
+        matches.extend(stream_matches)
+        missed_count += stream_missed
+        false_alarm_count += stream_false_alarm
+    unmapped_hypothesis_speakers: dict[str, dict[str, Any]] = {}
+    if reference_has_speakers:
+        all_hypothesis_speakers = sorted(
+            {str(segment["speakerId"]) for segment in hypothesis}
+        )
+        for hypothesis_speaker in all_hypothesis_speakers:
+            if hypothesis_speaker in mapped_hypothesis_speakers:
+                continue
+            items = sorted(
+                (
+                    segment
+                    for segment in hypothesis
+                    if str(segment["speakerId"]) == hypothesis_speaker
+                ),
+                key=lambda item: (
+                    int(item["startMs"]),
+                    int(item["endMs"]),
+                    str(item.get("segmentId", item.get("id", ""))),
+                ),
+            )
+            stream_predicted_points = [
+                int(current["startMs"])
+                for previous, current in zip(items, items[1:])
+                if previous["language"] != current["language"]
+            ]
+            unmapped_hypothesis_speakers[hypothesis_speaker] = {
+                "predictedSwitchPointsMs": stream_predicted_points,
+                "falseAlarmSwitchCount": len(stream_predicted_points),
+            }
+            predicted_points.extend(stream_predicted_points)
+            false_alarm_count += len(stream_predicted_points)
+    reference_points.sort()
+    predicted_points.sort()
+    errors = [item["absoluteErrorMs"] for item in matches]
+    return {
+        "referenceSwitchPointsMs": reference_points,
+        "predictedSwitchPointsMs": predicted_points,
+        "matchedSwitchPoints": matches,
+        "switchPointAbsoluteErrorsMs": errors,
+        "switchPointMeanAbsoluteErrorMs": (
+            statistics.fmean(errors) if errors else None
+        ),
+        "switchPointMaxAbsoluteErrorMs": max(errors) if errors else None,
+        "missedReferenceSwitchCount": missed_count,
+        "falseAlarmSwitchCount": false_alarm_count,
+        "perSpeaker": per_speaker,
+        "unmappedHypothesisSpeakers": unmapped_hypothesis_speakers,
+    }
+
+
 def _final_language_quality(
     *,
-    expected_language: object,
+    case: Mapping[str, Any],
     segments: Sequence[Mapping[str, Any]],
-) -> dict[str, Any]:
-    expected_root = _language_root(expected_language)
-    detected = [
-        root
+    duration_ms: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    (
+        reference,
+        expected_languages,
+        qualification,
+        time_eligible,
+        word_eligible,
+    ) = _language_intervals(case=case, duration_ms=duration_ms)
+    normalized_segments = [
+        {
+            **dict(segment),
+            "language": _language_root(segment.get("language")) or "und",
+        }
         for segment in segments
-        if (root := _language_root(segment.get("language"))) is not None
     ]
-    detected_counts = {
-        language: detected.count(language) for language in sorted(set(detected))
-    }
-    eligible = expected_root not in {None, "auto", "mul", "und"}
-    correct = (
-        sum(language == expected_root for language in detected)
-        if eligible
+    detected = [str(segment["language"]) for segment in normalized_segments]
+    detected_languages = sorted(
+        {language for language in detected if language != "und"}
+    )
+    speaker_mapping = _language_speaker_mapping(
+        reference=reference,
+        hypothesis=normalized_segments,
+    )
+    duration = _duration_language_quality(
+        reference=reference,
+        hypothesis=normalized_segments,
+        speaker_mapping=speaker_mapping,
+        eligible=time_eligible,
+    )
+    lexical = _lexical_language_quality(
+        reference=reference,
+        hypothesis=normalized_segments,
+        speaker_mapping=speaker_mapping,
+        eligible=word_eligible,
+    )
+    expected_set = set(expected_languages)
+    detected_set = set(detected_languages)
+    monolingual = len(expected_languages) == 1
+    correct_segments = (
+        sum(language == expected_languages[0] for language in detected)
+        if monolingual
         else None
     )
-    return {
+    language = {
         "authority": "final-adjudicated-language-span",
-        "expectedLanguage": expected_language,
-        "expectedLanguageRoot": expected_root,
-        "detectedLanguageCounts": detected_counts,
-        "segmentCount": len(segments),
-        "scoredSegmentCount": len(detected) if eligible else 0,
-        "correctSegmentCount": correct,
+        "qualification": qualification,
+        "eligible": bool(expected_languages),
+        "expectedLanguage": case.get("language"),
+        "expectedLanguageRoot": (
+            expected_languages[0] if monolingual else "mul"
+        ),
+        "expectedLanguages": expected_languages,
+        "detectedLanguages": detected_languages,
+        "expectedLanguageRecall": (
+            len(expected_set & detected_set) / len(expected_set)
+            if expected_set
+            else None
+        ),
+        "expectedLanguageSetExact": detected_set == expected_set,
+        "unexpectedLanguages": sorted(detected_set - expected_set),
+        "missingLanguages": sorted(expected_set - detected_set),
+        "detectedLanguageCounts": {
+            language: detected.count(language)
+            for language in sorted(set(detected))
+        },
+        "segmentCount": len(normalized_segments),
+        "scoredSegmentCount": len(normalized_segments) if monolingual else 0,
+        "correctSegmentCount": correct_segments,
         "segmentAccuracy": (
-            correct / len(detected)
-            if eligible and correct is not None and detected
+            correct_segments / len(normalized_segments)
+            if correct_segments is not None and normalized_segments
             else None
         ),
         "undeterminedRate": (
             detected.count("und") / len(detected) if detected else None
         ),
-        "eligible": eligible,
+        "speakerMappingPolicy": (
+            "time-overlap-max-weight-hungarian-v1"
+            if reference
+            and reference[0].get("speakerId") is not None
+            else "not-applicable-unlabelled-reference-speaker"
+        ),
+        "speakerMapping": speaker_mapping,
+        "durationWeighted": duration,
+        "lexicalTokenWeighted": lexical,
     }
+    truth = case.get("languageTruth")
+    code_switch = None
+    if isinstance(truth, Mapping) or len(expected_languages) > 1:
+        switches = _switch_point_quality(
+            reference=reference,
+            hypothesis=normalized_segments,
+            speaker_mapping=speaker_mapping,
+            truth=truth if isinstance(truth, Mapping) else None,
+        )
+        code_switch = {
+            "authority": "final-adjudicated-language-span",
+            "qualification": qualification,
+            "expectedLanguages": expected_languages,
+            "detectedLanguages": detected_languages,
+            "documentLanguage": None,
+            "documentLanguageRoot": None,
+            "documentMarkedMultilingual": len(detected_languages) > 1,
+            "expectedLanguageRecall": language["expectedLanguageRecall"],
+            "expectedLanguageSetExact": language[
+                "expectedLanguageSetExact"
+            ],
+            "unexpectedLanguages": language["unexpectedLanguages"],
+            "missingLanguages": language["missingLanguages"],
+            "timeScoringEligible": time_eligible,
+            "wordScoringEligible": word_eligible,
+            "durationWeightedAccuracy": duration["accuracy"],
+            "lexicalTokenWeightedAccuracy": lexical.get("accuracy"),
+            "durationWeighted": duration,
+            "lexicalTokenWeighted": lexical,
+            "speakerMapping": speaker_mapping,
+            **switches,
+        }
+    return language, code_switch
 
 
 def _segment_language_roots(segment: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1594,14 +2729,10 @@ def _post_semantic_acceptance(
         speaker_timeline=None,
         text_field="finalText",
     )
-    language = _final_language_quality(
-        expected_language=case.get("language"),
-        segments=segments,
-    )
-    code_switch = _code_switch_language_quality(
+    language, code_switch = _final_language_quality(
         case=case,
-        transcript={},
-        segments=[dict(segment) for segment in segments],
+        segments=segments,
+        duration_ms=int(validated["source"]["durationMs"]),
     )
     factual = _factual_integrity_quality(
         case=case,
@@ -1623,19 +2754,13 @@ def _post_semantic_acceptance(
         missing_truth.append("serialized-text-truth")
     if joint.get("scored") is not True:
         missing_truth.append("speaker-attributed-text-truth")
-    language_truth_available = (
-        language.get("eligible") is True
-        or (
-            isinstance(case.get("languageTruth"), Mapping)
-            and isinstance(code_switch, Mapping)
-        )
-    )
-    if not language_truth_available:
+    if language.get("eligible") is not True:
         missing_truth.append("language-truth")
-    if (
-        isinstance(case.get("languageTruth"), Mapping)
-        and code_switch is None
-    ):
+    if language.get("durationWeighted", {}).get("scored") is not True:
+        missing_truth.append("time-weighted-language-truth")
+    if language.get("lexicalTokenWeighted", {}).get("scored") is not True:
+        missing_truth.append("word-weighted-language-truth")
+    if isinstance(case.get("languageTruth"), Mapping) and code_switch is None:
         missing_truth.append("code-switch-truth")
     if factual.get("scored") is not True:
         missing_truth.append("annotated-factual-truth")
@@ -2134,6 +3259,36 @@ def _bucket_summary(
                 (int, float),
             )
         ]
+        duration_language_accuracy_values = [
+            value
+            for item in items
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "language",
+                        "durationWeighted",
+                        "accuracy",
+                    )
+                ),
+                (int, float),
+            )
+        ]
+        lexical_language_accuracy_values = [
+            value
+            for item in items
+            if isinstance(
+                (
+                    value := _post_metric(
+                        item,
+                        "language",
+                        "lexicalTokenWeighted",
+                        "accuracy",
+                    )
+                ),
+                (int, float),
+            )
+        ]
         cp_wer_values = [
             value
             for item in items
@@ -2208,6 +3363,16 @@ def _bucket_summary(
             "meanLanguageSegmentAccuracy": (
                 statistics.fmean(language_accuracy_values)
                 if language_accuracy_values
+                else None
+            ),
+            "meanDurationWeightedLanguageAccuracy": (
+                statistics.fmean(duration_language_accuracy_values)
+                if duration_language_accuracy_values
+                else None
+            ),
+            "meanLexicalTokenWeightedLanguageAccuracy": (
+                statistics.fmean(lexical_language_accuracy_values)
+                if lexical_language_accuracy_values
                 else None
             ),
             "meanCpWer": (
@@ -2308,7 +3473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     report = {
-        "schemaVersion": "1.4.0",
+        "schemaVersion": "1.5.0",
         "libraryId": resolved.get("libraryId"),
         "cases": reports,
         "summary": {
@@ -2354,6 +3519,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _post_metric(item, "language", "eligible") is True
                 for item in reports
             ),
+            "languageDurationScored": sum(
+                _post_metric(
+                    item,
+                    "language",
+                    "durationWeighted",
+                    "scored",
+                )
+                is True
+                for item in reports
+            ),
+            "languageLexicalTokenScored": sum(
+                _post_metric(
+                    item,
+                    "language",
+                    "lexicalTokenWeighted",
+                    "scored",
+                )
+                is True
+                for item in reports
+            ),
             "codeSwitchDocumentScored": sum(
                 isinstance(_post_metric(item, "codeSwitch"), Mapping)
                 for item in reports
@@ -2365,6 +3550,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         item,
                         "codeSwitch",
                         "durationWeightedAccuracy",
+                    ),
+                    (int, float),
+                )
+                for item in reports
+            ),
+            "codeSwitchLexicalTokenScored": sum(
+                _post_metric(item, "codeSwitch", "wordScoringEligible") is True
+                and isinstance(
+                    _post_metric(
+                        item,
+                        "codeSwitch",
+                        "lexicalTokenWeightedAccuracy",
                     ),
                     (int, float),
                 )

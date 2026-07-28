@@ -28,6 +28,7 @@ from tools.global_sample_library import GlobalSampleLibraryError
 DEFAULT_MANIFEST = ROOT / "sample_library" / "code-switch-manifest.v1.json"
 DEFAULT_OUTPUT = ROOT / ".runtime_cache" / "sample-library" / "code-switch"
 RESOLVED_NAME = "code-switch-sample-library.resolved.v1.json"
+RESOLVED_SCHEMA_VERSION = "1.1.0"
 SOURCE_EVIDENCE_SCHEMA_VERSION = "1.0.0"
 USER_AGENT = "MediaTranscribeStudio-code-switch-samples/1.0"
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
@@ -812,6 +813,7 @@ def _build_case(
             "qualification": "document-language-pair-without-time-alignment",
             "expectedLanguages": list(case["expectedLanguages"]),
             "timeScoringEligible": False,
+            "wordScoringEligible": False,
         }
         switch_count_field = case.get("switchCountField")
         if isinstance(switch_count_field, str):
@@ -836,6 +838,7 @@ def _build_case(
             "asr": True,
             "languageDocumentPair": True,
             "languageTiming": False,
+            "languageWords": False,
         }
         extra: dict[str, Any] = {
             "expectedSpeakerCount": None,
@@ -871,6 +874,7 @@ def _build_case(
                 ),
                 "expectedLanguages": list(case["expectedLanguages"]),
                 "timeScoringEligible": False,
+                "wordScoringEligible": False,
             },
             "truthEligibility": {
                 "speakerCount": True,
@@ -880,6 +884,7 @@ def _build_case(
                 "asr": False,
                 "languageDocumentPair": True,
                 "languageTiming": False,
+                "languageWords": False,
             },
         }
     else:
@@ -911,6 +916,7 @@ def _build_case(
                 "qualification": "synthetic-concatenation-exact-chunk-timestamps",
                 "expectedLanguages": list(case["expectedLanguages"]),
                 "timeScoringEligible": True,
+                "wordScoringEligible": True,
                 "intervals": [
                     {
                         "language": chunk["language"],
@@ -930,6 +936,7 @@ def _build_case(
                 "asr": True,
                 "languageDocumentPair": True,
                 "languageTiming": True,
+                "languageWords": True,
             },
         }
     probe = _probe(output)
@@ -996,7 +1003,7 @@ def build_library(manifest_path: Path, output_root: Path) -> Path:
         )
     attribution.write_text("\n".join(lines), encoding="utf-8")
     resolved = {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": RESOLVED_SCHEMA_VERSION,
         "libraryId": manifest["libraryId"],
         "generatedAt": datetime.now(UTC).isoformat(),
         "sourceManifest": str(manifest_path.resolve()),
@@ -1030,6 +1037,9 @@ def build_library(manifest_path: Path, output_root: Path) -> Path:
             ),
             "timeScoredCases": sum(
                 case["truthEligibility"]["languageTiming"] is True for case in cases
+            ),
+            "wordScoredCases": sum(
+                case["truthEligibility"]["languageWords"] is True for case in cases
             ),
         },
         "attributionPath": str(attribution.relative_to(output_root)),

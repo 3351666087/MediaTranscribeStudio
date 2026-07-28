@@ -21,7 +21,9 @@ from tools.sample_library import (
     word_error_rate,
 )
 from tools.evaluate_sample_library import (
+    _align_language_tokens,
     _bucket_summary,
+    _final_language_quality,
     _joint_metric_labels,
     _joint_transcription_quality,
     _scoring_unit,
@@ -339,19 +341,23 @@ def test_formal_acceptance_scores_only_hash_bound_final_segments(
                 "qualification": "exact-fixture",
                 "expectedLanguages": ["en", "es"],
                 "timeScoringEligible": True,
+                "wordScoringEligible": True,
                 "intervals": [
                     {
                         "language": "en",
                         "startSeconds": 0.0,
                         "endSeconds": 1.0,
+                        "speakerId": "truth-a",
+                        "transcript": "alpha",
                     },
                     {
                         "language": "es",
                         "startSeconds": 1.0,
                         "endSeconds": 2.0,
+                        "speakerId": "truth-b",
+                        "transcript": "beta",
                     },
                 ],
-                "switchPointsSeconds": [1.0],
             },
             "factualTruth": {
                 "requiredLiterals": ["alpha", "beta"],
@@ -398,7 +404,22 @@ def test_formal_acceptance_scores_only_hash_bound_final_segments(
         "en": 1,
         "es": 1,
     }
+    assert metrics["language"]["durationWeighted"]["accuracy"] == 1.0
+    assert metrics["language"]["lexicalTokenWeighted"]["accuracy"] == 1.0
+    assert metrics["language"]["speakerMapping"] == [
+        {
+            "referenceSpeaker": "truth-a",
+            "hypothesisSpeaker": "speaker-1",
+            "overlapMs": 1000.0,
+        },
+        {
+            "referenceSpeaker": "truth-b",
+            "hypothesisSpeaker": "speaker-2",
+            "overlapMs": 1000.0,
+        },
+    ]
     assert metrics["codeSwitch"]["durationWeightedAccuracy"] == 1.0
+    assert metrics["codeSwitch"]["lexicalTokenWeightedAccuracy"] == 1.0
     assert metrics["factualIntegrity"]["passed"] is True
     assert acceptance["artifactPath"] == str(
         output / "final-adjudicated-transcript.v1.json"
@@ -449,16 +470,21 @@ def test_formal_acceptance_preserves_one_speaker_across_language_spans(
                 "qualification": "single-speaker-code-switch-fixture",
                 "expectedLanguages": ["en", "es"],
                 "timeScoringEligible": True,
+                "wordScoringEligible": True,
                 "intervals": [
                     {
                         "language": "en",
                         "startSeconds": 0.0,
                         "endSeconds": 1.0,
+                        "speakerId": "truth-a",
+                        "transcript": "alpha",
                     },
                     {
                         "language": "es",
                         "startSeconds": 1.0,
                         "endSeconds": 2.0,
+                        "speakerId": "truth-a",
+                        "transcript": "beta",
                     },
                 ],
                 "switchPointsSeconds": [1.0],
@@ -486,6 +512,9 @@ def test_formal_acceptance_preserves_one_speaker_across_language_spans(
     assert acceptance["metrics"]["codeSwitch"][
         "durationWeightedAccuracy"
     ] == 1.0
+    assert acceptance["metrics"]["codeSwitch"][
+        "lexicalTokenWeightedAccuracy"
+    ] == 1.0
     final = json.loads(
         (
             output / "final-adjudicated-transcript.v1.json"
@@ -499,6 +528,507 @@ def test_formal_acceptance_preserves_one_speaker_across_language_spans(
         "en",
         "es",
     ]
+
+
+def test_final_language_metrics_score_overlapping_multilingual_speakers() -> None:
+    language, code_switch = _final_language_quality(
+        case={
+            "language": "mul",
+            "languageTruth": {
+                "qualification": "overlapping-multilingual-speakers",
+                "expectedLanguages": ["en", "es"],
+                "timeScoringEligible": True,
+                "wordScoringEligible": True,
+                "intervals": [
+                    {
+                        "language": "en",
+                        "speakerId": "truth-a",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.0,
+                        "transcript": "hello",
+                    },
+                    {
+                        "language": "es",
+                        "speakerId": "truth-b",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.0,
+                        "transcript": "hola",
+                    },
+                ],
+            },
+        },
+        segments=[
+            {
+                "id": "segment-a",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "hello",
+            },
+            {
+                "id": "segment-b",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-2",
+                "language": "es",
+                "finalText": "hola",
+            },
+        ],
+        duration_ms=1_000,
+    )
+
+    assert language["durationWeighted"]["referenceDurationMs"] == 2_000
+    assert language["durationWeighted"]["accuracy"] == 1.0
+    assert language["lexicalTokenWeighted"]["referenceTokenCount"] == 2
+    assert language["lexicalTokenWeighted"]["accuracy"] == 1.0
+    assert len(language["speakerMapping"]) == 2
+    assert code_switch is not None
+    assert code_switch["referenceSwitchPointsMs"] == []
+    assert code_switch["predictedSwitchPointsMs"] == []
+
+
+def test_final_language_metrics_expose_wrong_language_and_missed_switch() -> None:
+    language, code_switch = _final_language_quality(
+        case={
+            "language": "mul",
+            "languageTruth": {
+                "qualification": "single-speaker-exact-switches",
+                "expectedLanguages": ["en", "es"],
+                "timeScoringEligible": True,
+                "wordScoringEligible": True,
+                "intervals": [
+                    {
+                        "language": "en",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.0,
+                        "transcript": "one",
+                    },
+                    {
+                        "language": "es",
+                        "startSeconds": 1.0,
+                        "endSeconds": 2.0,
+                        "transcript": "dos",
+                    },
+                    {
+                        "language": "en",
+                        "startSeconds": 2.0,
+                        "endSeconds": 3.0,
+                        "transcript": "three",
+                    },
+                ],
+                "switchPointsSeconds": [1.0, 2.0],
+            },
+        },
+        segments=[
+            {
+                "id": "segment-a",
+                "startMs": 0,
+                "endMs": 1_500,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "one dos",
+            },
+            {
+                "id": "segment-b",
+                "startMs": 1_500,
+                "endMs": 3_000,
+                "speakerId": "speaker-1",
+                "language": "es",
+                "finalText": "three",
+            },
+        ],
+        duration_ms=3_000,
+    )
+
+    assert language["expectedLanguageSetExact"] is True
+    assert language["durationWeighted"]["accuracy"] == pytest.approx(0.5)
+    assert language["lexicalTokenWeighted"]["accuracy"] == pytest.approx(
+        1 / 3
+    )
+    assert code_switch is not None
+    assert code_switch["predictedSwitchPointsMs"] == [1_500]
+    assert len(code_switch["matchedSwitchPoints"]) == 1
+    assert code_switch["missedReferenceSwitchCount"] == 1
+    assert code_switch["falseAlarmSwitchCount"] == 0
+
+
+def test_final_language_metrics_reject_ambiguous_reference_overlap() -> None:
+    with pytest.raises(
+        ValueError,
+        match="language truth intervals overlap",
+    ):
+        _final_language_quality(
+            case={
+                "language": "mul",
+                "languageTruth": {
+                    "expectedLanguages": ["en", "es"],
+                    "timeScoringEligible": True,
+                    "wordScoringEligible": True,
+                    "intervals": [
+                        {
+                            "language": "en",
+                            "startSeconds": 0.0,
+                            "endSeconds": 1.0,
+                            "transcript": "hello",
+                        },
+                        {
+                            "language": "es",
+                            "startSeconds": 0.5,
+                            "endSeconds": 1.5,
+                            "transcript": "hola",
+                        },
+                    ],
+                },
+            },
+            segments=[],
+            duration_ms=2_000,
+        )
+
+
+def test_final_language_metrics_keep_speaker_switch_streams_isolated() -> None:
+    language, code_switch = _final_language_quality(
+        case={
+            "language": "mul",
+            "languageTruth": {
+                "qualification": "speaker-attributed-switches",
+                "expectedLanguages": ["de", "en", "es", "fr"],
+                "timeScoringEligible": True,
+                "wordScoringEligible": True,
+                "intervals": [
+                    {
+                        "language": "en",
+                        "speakerId": "truth-a",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.0,
+                        "transcript": "hello",
+                    },
+                    {
+                        "language": "es",
+                        "speakerId": "truth-a",
+                        "startSeconds": 1.0,
+                        "endSeconds": 2.0,
+                        "transcript": "hola",
+                    },
+                    {
+                        "language": "fr",
+                        "speakerId": "truth-b",
+                        "startSeconds": 0.0,
+                        "endSeconds": 1.5,
+                        "transcript": "bonjour",
+                    },
+                    {
+                        "language": "de",
+                        "speakerId": "truth-b",
+                        "startSeconds": 1.5,
+                        "endSeconds": 2.5,
+                        "transcript": "hallo",
+                    },
+                ],
+            },
+        },
+        segments=[
+            {
+                "id": "segment-a1",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "hello",
+            },
+            {
+                "id": "segment-a2",
+                "startMs": 1_000,
+                "endMs": 2_000,
+                "speakerId": "speaker-1",
+                "language": "es",
+                "finalText": "hola",
+            },
+            {
+                "id": "segment-b1",
+                "startMs": 0,
+                "endMs": 1_600,
+                "speakerId": "speaker-2",
+                "language": "fr",
+                "finalText": "bonjour",
+            },
+            {
+                "id": "segment-b2",
+                "startMs": 1_600,
+                "endMs": 2_500,
+                "speakerId": "speaker-2",
+                "language": "de",
+                "finalText": "hallo",
+            },
+            {
+                "id": "segment-extra-1",
+                "startMs": 2_500,
+                "endMs": 3_000,
+                "speakerId": "speaker-extra",
+                "language": "en",
+                "finalText": "extra",
+            },
+            {
+                "id": "segment-extra-2",
+                "startMs": 3_000,
+                "endMs": 3_500,
+                "speakerId": "speaker-extra",
+                "language": "es",
+                "finalText": "adicional",
+            },
+        ],
+        duration_ms=3_500,
+    )
+
+    assert language["speakerMapping"] == [
+        {
+            "referenceSpeaker": "truth-a",
+            "hypothesisSpeaker": "speaker-1",
+            "overlapMs": 2_000.0,
+        },
+        {
+            "referenceSpeaker": "truth-b",
+            "hypothesisSpeaker": "speaker-2",
+            "overlapMs": 2_500.0,
+        },
+    ]
+    assert code_switch is not None
+    assert code_switch["perSpeaker"]["truth-a"][
+        "matchedSwitchPoints"
+    ] == [
+        {
+            "referenceMs": 1_000,
+            "hypothesisMs": 1_000,
+            "absoluteErrorMs": 0,
+            "referenceSpeaker": "truth-a",
+            "hypothesisSpeaker": "speaker-1",
+        }
+    ]
+    assert code_switch["perSpeaker"]["truth-b"][
+        "matchedSwitchPoints"
+    ] == [
+        {
+            "referenceMs": 1_500,
+            "hypothesisMs": 1_600,
+            "absoluteErrorMs": 100,
+            "referenceSpeaker": "truth-b",
+            "hypothesisSpeaker": "speaker-2",
+        }
+    ]
+    assert code_switch["falseAlarmSwitchCount"] == 1
+    assert code_switch["unmappedHypothesisSpeakers"] == {
+        "speaker-extra": {
+            "predictedSwitchPointsMs": [3_000],
+            "falseAlarmSwitchCount": 1,
+        }
+    }
+
+
+def test_final_language_metrics_count_und_uncovered_and_false_alarm_time() -> None:
+    language, _ = _final_language_quality(
+        case={
+            "language": "en",
+            "languageTruth": {
+                "qualification": "partial-coverage",
+                "expectedLanguages": ["en"],
+                "timeScoringEligible": True,
+                "wordScoringEligible": True,
+                "intervals": [
+                    {
+                        "language": "en",
+                        "startSeconds": 0.0,
+                        "endSeconds": 3.0,
+                        "transcript": "one two three",
+                    }
+                ],
+            },
+        },
+        segments=[
+            {
+                "id": "segment-correct",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "one",
+            },
+            {
+                "id": "segment-und",
+                "startMs": 1_000,
+                "endMs": 2_000,
+                "speakerId": "speaker-1",
+                "language": "und",
+                "finalText": "two",
+            },
+            {
+                "id": "segment-false-alarm-a",
+                "startMs": 3_000,
+                "endMs": 4_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "extra",
+            },
+            {
+                "id": "segment-false-alarm-b",
+                "startMs": 3_500,
+                "endMs": 4_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "",
+            },
+        ],
+        duration_ms=4_000,
+    )
+
+    duration = language["durationWeighted"]
+    assert duration["referenceDurationMs"] == 3_000
+    assert duration["coveredDurationMs"] == 2_000
+    assert duration["correctDurationMs"] == 1_000
+    assert duration["incorrectDurationMs"] == 2_000
+    assert duration["uncoveredDurationMs"] == 1_000
+    assert duration["undeterminedDurationMs"] == 1_000
+    assert duration["falseAlarmDurationMs"] == 1_000
+    assert duration["accuracy"] == pytest.approx(1 / 3)
+    assert duration["coverage"] == pytest.approx(2 / 3)
+    lexical = language["lexicalTokenWeighted"]
+    assert lexical["undeterminedAlignedTokenCount"] == 1
+    assert lexical["alignmentEngine"] == (
+        "rapidfuzz-levenshtein-editops"
+    )
+
+
+def test_language_token_alignment_counts_insertions_and_deletions() -> None:
+    quality = _align_language_tokens(
+        [
+            ("alpha", "en"),
+            ("beta", "es"),
+            ("gamma", "en"),
+            ("omega", "en"),
+        ],
+        [
+            ("alpha", "en"),
+            ("gamma", "en"),
+            ("omega", "en"),
+            ("delta", "de"),
+        ],
+    )
+
+    assert quality["referenceTokenCount"] == 4
+    assert quality["hypothesisTokenCount"] == 4
+    assert quality["alignedReferenceTokenCount"] == 3
+    assert quality["correctLanguageTokenCount"] == 3
+    assert quality["deletedReferenceTokenCount"] == 1
+    assert quality["insertedHypothesisTokenCount"] == 1
+    assert quality["coverage"] == pytest.approx(3 / 4)
+    assert quality["accuracy"] == pytest.approx(3 / 4)
+
+
+def test_document_language_truth_does_not_imply_time_or_word_truth() -> None:
+    language, code_switch = _final_language_quality(
+        case={
+            "language": "mul",
+            "languageTruth": {
+                "qualification": (
+                    "document-language-pair-without-time-alignment"
+                ),
+                "expectedLanguages": ["en", "es"],
+                "timeScoringEligible": False,
+                "wordScoringEligible": False,
+            },
+        },
+        segments=[
+            {
+                "id": "segment-a",
+                "startMs": 0,
+                "endMs": 1_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "hello",
+            },
+            {
+                "id": "segment-b",
+                "startMs": 1_000,
+                "endMs": 2_000,
+                "speakerId": "speaker-1",
+                "language": "es",
+                "finalText": "hola",
+            },
+        ],
+        duration_ms=2_000,
+    )
+
+    assert language["expectedLanguageSetExact"] is True
+    assert language["durationWeighted"]["scored"] is False
+    assert language["durationWeighted"]["accuracy"] is None
+    assert language["lexicalTokenWeighted"]["scored"] is False
+    assert language["lexicalTokenWeighted"]["accuracy"] is None
+    assert code_switch is not None
+    assert code_switch["timeScoringEligible"] is False
+    assert code_switch["wordScoringEligible"] is False
+    assert code_switch["durationWeightedAccuracy"] is None
+    assert code_switch["lexicalTokenWeightedAccuracy"] is None
+
+
+def test_single_language_document_truth_does_not_imply_time_truth() -> None:
+    language, code_switch = _final_language_quality(
+        case={
+            "language": "en",
+            "scoringTranscript": "hello world",
+        },
+        segments=[
+            {
+                "id": "segment-a",
+                "startMs": 2_000,
+                "endMs": 3_000,
+                "speakerId": "speaker-1",
+                "language": "en",
+                "finalText": "hello world",
+            }
+        ],
+        duration_ms=10_000,
+    )
+
+    assert language["qualification"] == (
+        "whole-media-single-language-without-time-alignment"
+    )
+    assert language["durationWeighted"]["eligible"] is False
+    assert language["durationWeighted"]["scored"] is False
+    assert language["durationWeighted"]["accuracy"] is None
+    assert language["lexicalTokenWeighted"]["scored"] is True
+    assert language["lexicalTokenWeighted"]["accuracy"] == 1.0
+    assert code_switch is None
+
+
+def test_final_language_metrics_reject_inconsistent_switch_truth() -> None:
+    with pytest.raises(
+        ValueError,
+        match="switch points do not match interval truth",
+    ):
+        _final_language_quality(
+            case={
+                "language": "mul",
+                "languageTruth": {
+                    "expectedLanguages": ["en", "es"],
+                    "timeScoringEligible": True,
+                    "wordScoringEligible": False,
+                    "intervals": [
+                        {
+                            "language": "en",
+                            "startSeconds": 0.0,
+                            "endSeconds": 1.0,
+                        },
+                        {
+                            "language": "es",
+                            "startSeconds": 1.0,
+                            "endSeconds": 2.0,
+                        },
+                    ],
+                    "switchPointsSeconds": [1.5],
+                },
+            },
+            segments=[],
+            duration_ms=2_000,
+        )
 
 
 def test_formal_acceptance_blocks_open_review_without_final_artifact(
@@ -700,6 +1230,8 @@ def test_evaluator_preserves_source_and_split_buckets() -> None:
             "meanJer": None,
             "meanRtf": None,
             "meanLanguageSegmentAccuracy": None,
+            "meanDurationWeightedLanguageAccuracy": None,
+            "meanLexicalTokenWeightedLanguageAccuracy": None,
             "meanCpWer": None,
             "meanTcpWer": None,
             "meanSpeakerAttributedWer": None,
@@ -713,6 +1245,8 @@ def test_evaluator_preserves_source_and_split_buckets() -> None:
             "meanJer": None,
             "meanRtf": None,
             "meanLanguageSegmentAccuracy": None,
+            "meanDurationWeightedLanguageAccuracy": None,
+            "meanLexicalTokenWeightedLanguageAccuracy": None,
             "meanCpWer": None,
             "meanTcpWer": None,
             "meanSpeakerAttributedWer": None,

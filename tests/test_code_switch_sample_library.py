@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from tools.build_code_switch_sample_library import (
+    RESOLVED_SCHEMA_VERSION,
     _load_cached_dataset_evidence,
     _load_cached_source_row,
     load_manifest,
@@ -21,6 +22,7 @@ MANIFEST = ROOT / "sample_library" / "code-switch-manifest.v1.json"
 
 
 def test_checked_in_manifest_covers_real_multispeaker_and_timed_switches() -> None:
+    assert RESOLVED_SCHEMA_VERSION == "1.1.0"
     manifest = load_manifest(MANIFEST)
     cases = manifest["cases"]
     assert len(cases) == 19

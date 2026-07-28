@@ -50,7 +50,7 @@
 - [x] 为每一级记录触发原因、输入范围、缓存键、耗时、峰值资源、输出置信度和退出原因，并实现有界队列、背压、取消与恢复。
 - [x] 将人数估计、DER/JER/speaker confusion、时间边界、`rawText` CER、语义建议安全性、系统效率和 PDF 质量拆成不可互相抵消的指标域。
 - [x] 将质量晋级统一到强制语义仲裁后的最终 `speaker + language span + time + text` 输出：前置 VAD、diarization、声纹、LID、ASR 和 LLM 候选只保留契约有效、不可变真值/人工锁、资源上限、确定性回退和最低召回等轻量准入，不再要求每个基模单独达到最终生产质量；任何组合只有在同一冻结 held-out 的最终输出上通过人数、speaker-attributed text、逐段/逐词语言、代码切换、overlap、事实保真、复核量和端到端效率硬门槛后才能晋级。
-- [ ] 建立统一后语义验收契约和报告；“统一”表示同一个终态、同一个真值清单和一次原子判定，不表示可用单一平均分抵消失败。最终门槛至少包含 speech/no-speech、人数误差、DER/JER/confusion、cpWER/tcpWER/SA-WER 或 cpCER/tcpCER/SA-CER、词/时间加权 LID、代码切换边界、overlap 漏说话人率、受保护事实/数字/专名保留、幻觉/删除、`und`/abstention、人工复核量、RTF 和峰值资源，并对语言、人数和声学分桶逐项 fail closed。
+- [x] 建立统一后语义验收契约和报告；“统一”表示同一个终态、同一个真值清单和一次原子判定，不表示可用单一平均分抵消失败。报告 schema `1.7.0` 和冻结的 `post-semantic-acceptance-profile` 已覆盖 speech/no-speech、人数误差、DER/JER/confusion、cpWER/tcpWER/SA-WER 或 cpCER/tcpCER/SA-CER、词/时间加权 LID、代码切换边界、overlap 漏说话人率、受保护事实/数字/专名保留、幻觉/删除、`und`/abstention、人工复核量、RTF 和峰值资源；按 case、held-out split、语言、人数和场景分桶，任一规则、真值、指标、阈值或 coverage 缺失均 fail closed。该勾选只表示统一指标与判定机制完成，不表示真实生产阈值已登记或任意人数、任意语言、单人多语言质量已经通过。
 - [ ] 最终输出不得硬编码人数或文档级单语言：同一说话人的相邻语言 span 必须保留同一个 canonical speaker，同一媒体可同时包含多国说话人和单人多语言；人数只受显式资源预算约束，语言必须开放集识别并在证据不足时输出 `und`/复核，禁止把支持集外语言猜成已知语言。发布覆盖声明必须由真实 held-out 逐语言、逐人数证明，不能把有限样本外推成无限人数或所有语言已经通过。
 - [x] 消除桌面端、Rust mock、Java validator/renderer/metadata 和测试中的固定五人约束。
 - [ ] 通过至少 `N=1/2/5/8/13` 的回归矩阵，并对更大 `N` 做资源压力测试；五人仅作为 `N=5` fixture，任何资源失败都不得静默改变 `N`。

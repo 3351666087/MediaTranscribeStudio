@@ -15,6 +15,7 @@ from backend import (
     validate_semantic_suggestions_artifact,
 )
 from backend.persistence import canonical_json_sha256
+from backend.asr_evidence import build_asr_candidate_set
 from backend.semantic_processing import (
     _segment_request,
     _semantic_gate_response_schema,
@@ -289,7 +290,18 @@ def test_prompt_deduplicates_batch_neighbors_and_omits_validator_only_data() -> 
         "speaker-score:<segmentId>:<speakerId>",
         "asr-nbest:<segmentId>:<candidateId>",
         "asr-tokens:<segmentId>",
+        "candidate-lattice:<latticeId>",
+        "candidate-group:<groupId>",
+        "candidate:<candidateId>",
     ]
+    assert payload["candidateLattice"]["latticeId"].startswith(
+        "semantic-lattice-"
+    )
+    assert all(
+        "turns" not in candidate.get("summary", {})
+        for group in payload["candidateLattice"]["groups"]
+        for candidate in group["alternatives"]
+    )
 
 
 def test_prompt_token_timestamps_are_bounded_and_hash_bound() -> None:
@@ -380,7 +392,7 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
         "proposalPlannedBatchCount": 1,
         "proposalPlannedMaxBatchSize": 2,
         "contextTokenBudget": 3072,
-        "maxEstimatedInputTokens": 1757,
+        "maxEstimatedInputTokens": 3034,
         "suggestionCount": 2,
         "speakerSuggestionCount": 1,
         "textSuggestionCount": 1,
@@ -453,11 +465,11 @@ def test_token_budget_aware_packing_avoids_known_context_overflow() -> None:
     ).run(document)
 
     assert artifact["status"] == "completed"
-    assert provider.batch_sizes == [3]
-    assert artifact["metrics"]["plannedBatchCount"] == 1
-    assert artifact["metrics"]["plannedMaxBatchSize"] == 3
+    assert provider.batch_sizes == [1, 1, 1]
+    assert artifact["metrics"]["plannedBatchCount"] == 3
+    assert artifact["metrics"]["plannedMaxBatchSize"] == 1
     assert artifact["metrics"]["contextTokenBudget"] == 3_072
-    assert artifact["metrics"]["maxEstimatedInputTokens"] <= 3_072
+    assert artifact["metrics"]["maxEstimatedInputTokens"] == 2_666
     assert artifact["metrics"]["contextSplitCount"] == 0
 
 
@@ -503,18 +515,46 @@ def test_context_overflow_splits_batches_without_recording_false_failure() -> No
 
 
 def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
-    nbest = {
-        "provider": "fixture-asr",
-        "nBest": [
+    nbest = build_asr_candidate_set(
+        model_id="fixture-asr",
+        model_revision="revision-1",
+        model_manifest_sha256="b" * 64,
+        model_identity_status="manifest-bound",
+        source_audio_sha256="a" * 64,
+        normalization_profile="mono-16khz-f32-v1",
+        source_window_id="segment-1",
+        start_ms=0,
+        end_ms=1_000,
+        hypotheses=[
             {
-                "candidateId": "nbest-2",
+                "text": "I can go",
+                "language": "en",
+                "tokens": [
+                    {"text": "I", "startMs": 0, "endMs": 100},
+                    {"text": "can", "startMs": 200, "endMs": 400},
+                    {"text": "go", "startMs": 500, "endMs": 800},
+                ],
+                "acousticScore": -0.1,
+                "acousticScoreStatus": "available",
+                "decodeScore": -0.1,
+                "decodeScoreStatus": "available",
+            },
+            {
                 "text": "I cannot go",
                 "language": "en",
-                "score": -0.2,
-                "lexicalRepairEligible": True,
-            }
+                "tokens": [
+                    {"text": "I", "startMs": 0, "endMs": 100},
+                    {"text": "cannot", "startMs": 200, "endMs": 450},
+                    {"text": "go", "startMs": 500, "endMs": 800},
+                ],
+                "acousticScore": -0.2,
+                "acousticScoreStatus": "available",
+                "decodeScore": -0.2,
+                "decodeScoreStatus": "available",
+            },
         ],
-    }
+    )
+    candidate_id = nbest["nBest"][1]["candidateId"]
     document = _document(first_asr=nbest)
     provider = MappingLocalLLMProvider(
         _scripted_responses(
@@ -523,10 +563,10 @@ def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
                     "segment-1",
                     ranking=["speaker-1", "speaker-2"],
                     text="I cannot go",
-                    candidate_id="nbest-2",
+                    candidate_id=candidate_id,
                     evidence_refs=[
                         "segment:segment-1",
-                        "asr-nbest:segment-1:nbest-2",
+                        f"asr-nbest:segment-1:{candidate_id}",
                     ],
                 ),
                 _keep("segment-2", "speaker-1", "Hello world"),
@@ -545,7 +585,7 @@ def test_lexical_repair_requires_and_binds_exact_nbest_candidate() -> None:
     patch = artifact["suggestions"][0]["textPatch"]
     assert patch["lexicalChange"] is True
     assert patch["protectedTokenChange"] is True
-    assert patch["evidenceCandidateId"] == "nbest-2"
+    assert patch["evidenceCandidateId"] == candidate_id
 
 
 def test_lexical_repair_rejects_ineligible_nbest_candidate() -> None:

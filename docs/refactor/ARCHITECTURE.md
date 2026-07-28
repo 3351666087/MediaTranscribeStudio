@@ -106,7 +106,11 @@ flowchart LR
 4. `language span`：支持集语言、开放集 `und`、逐段/逐词语言和代码切换边界 candidate。
 5. `text`：provider 原生 N-best、token 时间、强制对齐和术语证据；没有真实候选时禁止内容词修复。
 
-LLM 只能输出候选 ID、排序、abstention 和证据引用。确定性 composer 必须重算候选哈希，保持源媒体、`rawText`、人工锁和候选时间边界不可变，并拒绝新造 speaker、语言、文本或时间点。一个域只有单一候选时，语义层不能声称修复了该域；它必须保留原结果并把 `candidate-domain-unavailable` 送入 review/质量报告。
+`semantic-candidate-lattice.v1` 已实现上述五域的统一表示、源媒体/transcript/model revision/payload/candidate/group/lattice 多层 SHA-256 绑定、运行时全量重建和 `available / partial / candidate-domain-unavailable` 状态；`semantic-candidate-lattice-v9` 会把有界候选摘要送入每次强制语义请求，并把完整格绑定到语义工件。旧 `v8` 工件只读兼容，但未绑定的旧 N-best 即使自报可修改，也不再能授权内容词变化。
+
+LLM 对**可验证候选空间**拥有完整终态仲裁权限：可选择人声 disposition、人数/整段时间线、turn split/merge、角色归属、语言 span、代码切换边界和文本候选，也可要求针对缺失域执行有界局部重算或挑战模型补候选；不得用固定的“禁止改人数/边界/语言”规则削弱语义校准。硬边界只保护源媒体、原始 ASR、人工锁和证据身份：LLM 只能输出 candidate ID、排序、abstention、补候选请求和证据引用，不能把未执行的模型结果或自由生成的 speaker、语言、文本、时间点伪装成已有证据。确定性 composer 重算全部哈希后组合终态；一个域只有单一候选时必须触发候选生成或明确 `candidate-domain-unavailable`，不能声称该域已由语义层修复。任何自动应用权限只由同一版本组合在统一后语义 held-out 的各硬域结果授予，不由单条禁止规则或模型自报 confidence 决定。
+
+当前实现完成了候选格、可用性、prompt/工件绑定和篡改门禁，尚未完成 job-level 五域 candidate-ID 选择、补候选调度和确定性 composer。对 AISHELL-4 `N=5`、Liva `en/sw N=3`、Liva `en/tl N=5` 三份真实 transcript 的 v9 审计表明：只有逐段 `speaker-assignment` 有多候选，人声 disposition、完整人数/时间线、语言 span 和 ASR text 都仍是单候选；因此下一阶段必须接入 Community/Pyannote/MOSS 时间线挑战、开放集 LID 与 provider 原生 N-best，不能再次仅重跑 9B 后把 abstain 当作进展。
 
 候选格和 LLM 组合只以强制语义后的完整 `speaker + language span + time + finalText` 终态晋级。前级模型指标用于候选召回、路由和诊断，不单独决定发布；终态人数、DER/JER、边界、cp/tcp/SA-WER/CER、语言/切换、overlap、事实、复核量和资源域仍不可互相抵消。
 
@@ -118,7 +122,7 @@ LLM 只能输出候选 ID、排序、abstention 和证据引用。确定性 comp
 2. **全量旗舰通道**：Community-1/VBx 生成整段 regular/exclusive Dynamic-N 时间线；Qwen3-ASR-1.7B 对支持集内候选段完成基础转写。两者按 stage 单次加载并批内复用，不调用本地 LLM，也不默认全场运行所有挑战模型。`modelResidency=stage` 面向统一内存边缘机，`worker` 只面向已验证容量充足的服务器 worker。
 3. **不确定性路由**：仅将语言、边界、overlap、人数后验、短片段、离群 embedding 或模型冲突片段送入更高成本复核。
 4. **定向重算与挑战者验证**：只对入队片段执行局部重分段、Whisper/Parakeet/Canary/Omnilingual ASR 候选、CAM++/ERes2NetV2 声纹审计或上下文扩大；挑战者只有在目标分桶 held-out 晋级后才能接管主结果。
-5. **强制语义仲裁**：每个有人声作业都经过本地 LLM；低风险段可以批量 abstain，高风险段只能在不可变候选格中选择或重排 candidate ID。人数、边界、语言或文本候选缺失时进入最小人工复核，不能自由补造。
+5. **强制语义仲裁**：每个有人声作业都经过本地 LLM；低风险段可以批量 abstain，高风险段在不可变候选格中选择或重排 candidate ID。人数、边界、语言或文本候选缺失时先按域触发有界挑战模型、局部重算或上下文扩展，穷尽已登记生成器后才进入最小人工复核；不能用自由生成冒充未运行的候选。
 6. **人工复核**：只展示仍有冲突或高影响的最小证据包；人工锁定结果进入后续增量解码，避免全局无差别返工。
 7. **增量报告**：只有版本化 transcript document 通过硬门槛后才调用 Java sidecar；内容未变时复用已验证 artifact，内容变更时只重建受影响报告版本。
 
@@ -143,6 +147,8 @@ LLM 只能输出候选 ID、排序、abstention 和证据引用。确定性 comp
 ## 本地小 LLM 生产门控
 
 `qwen2.5:1.5b` 与 `qwen3.5:4b` 的正式本地基准结论均为 `reject_for_production`。其中 `qwen3.5:4b` 在 88 个脱敏样本上的最终契约有效率为 `0.784`、越界文本修改率为 `0.205`、auto-apply 候选回归率为 `0.135`；安全挑战契约有效率仅为 `0.625`，未达到预登记门槛，因此它已退出生产 allowlist 并从本机 Ollama 卸载，只保留不可变报告作为历史证据。`qwen3.5:9b` 已安装并成为默认高能力候选。当前 `semantic-candidate-state-v8` 在 AISHELL-4 `N=5`、Liva `en/sw N=3` 和 Liva `en/tl N=5` 三个有部分真值的真实开发诊断中合计 `25/25 abstain`、0 建议、0 应用，所有可评分终态指标均无变化；它没有产生回退，也没有证明能弥补基模。现有协议又禁止新 speaker、turn split/merge、边界变化和语言变化，因此在候选格扩展前结构上无法修复这些域。当前 9B 仍是生产必经但 fail-closed 的 semantic arbitrator，即**仅建议、永不自动应用**：
+
+`v9` 已移除“这些域原则上不可修改”的架构限制，但没有伪造尚不存在的候选。三份真实 transcript 的候选格审计均通过 source/transcript/producer/payload/derived-state 篡改拒绝；每份只有 `speaker-assignment` 域可选，另外四域均为单候选。因此当前不重跑无解的 9B，而先补真实跨模型候选和 job-level composer。完成后是否自动应用只看统一后语义 held-out 的最终质量与回退，不永久绑定在 suggestion-only 策略上。
 
 - 输出必须经过 JSON/schema 和 deterministic validator。
 - 模型自报置信度不作为自动应用依据。

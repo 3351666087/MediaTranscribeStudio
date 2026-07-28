@@ -73,6 +73,10 @@ JSON Schema alone:
    artifacts include real SHA-256 digests.
 10. Voice-activity classifications agree with their VAD windows, exact speech
     coverage, source hash, and transcribable-speech disposition.
+11. Mandatory semantic arbitration receives a source-media-, transcript-,
+    producer-revision-, payload-, candidate-, group-, and lattice-hash-bound
+    candidate space. A missing or single-candidate domain is explicitly
+    unavailable and cannot be reported as semantically repaired.
 
 ## Contract inventory
 
@@ -89,6 +93,7 @@ JSON Schema alone:
 | `pdf-render-request.schema.json` | Request sent to the Java PDF sidecar. |
 | `pdf-render-result.schema.json` | Renderer outcome and generated artifact paths. |
 | `report-document.schema.json` | Canonical transcript and report document with a dynamic speaker set. |
+| `semantic-candidate-lattice.schema.json` | Hash-bound speech disposition, complete speaker timeline/cardinality, per-turn speaker, language-span, and ASR-text candidate groups with explicit domain availability. |
 | `semantic-arbitration.schema.json` | Constrained semantic proposal for human or deterministic arbitration. |
 | `summary-output.schema.json` | Evidence-grounded summary artifact. |
 | `translation-output.schema.json` | Versioned translation artifact with validated language metadata. |

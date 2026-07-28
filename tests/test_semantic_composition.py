@@ -11,19 +11,23 @@ from backend import (
     MappingLocalLLMProvider,
     SemanticCandidateGenerationRegistry,
     SemanticCompositionError,
+    SemanticCompositionOrchestrator,
     SemanticJobArbitrationRunner,
     build_semantic_candidate_lattice,
     build_semantic_candidate_lattice_from_document,
     build_semantic_composition,
     build_semantic_job_arbitration,
     build_asr_text_challenger_result,
+    build_final_composed_transcript,
     build_open_set_lid_challenger_result,
     build_timeline_challenger_result,
     build_voice_activity_challenger_result,
+    compose_transcript_document,
     extend_semantic_candidate_lattice,
     validate_semantic_composition,
     validate_semantic_candidate_generation,
     validate_semantic_job_arbitration,
+    validate_final_composed_transcript,
 )
 from backend.persistence import canonical_json_sha256
 from backend.asr_evidence import build_asr_candidate_set
@@ -1124,3 +1128,174 @@ def test_public_semantic_composition_schemas_validate_real_artifacts(
 
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(artifact)
+
+
+def test_persistent_orchestrator_resumes_a_bounded_two_round_loop(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class DeterministicArbitrator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.release_calls = 0
+
+        def run(
+            self,
+            current_document: dict,
+            *,
+            candidate_lattice: dict,
+            carried_lattice: dict | None = None,
+            carried_arbitration: dict | None = None,
+        ) -> dict:
+            self.calls += 1
+            assert current_document == document
+            if candidate_lattice["availability"][
+                "allRequiredDomainsAvailable"
+            ]:
+                response = _select_current_response(candidate_lattice)
+            else:
+                response = _request_or_select_response(candidate_lattice)
+            return _artifact(candidate_lattice, response)
+
+        def release_resources(self) -> None:
+            self.release_calls += 1
+
+    def generate(
+        request: dict,
+        _document: dict,
+        current_lattice: dict,
+    ) -> dict:
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        payload = copy.deepcopy(current["payload"])
+        if request["domain"] == "speech-disposition":
+            payload["speechDurationMs"] = 1_900
+            payload["speechRatio"] = 0.95
+            payload["speechWindowCount"] = 2
+        elif request["domain"] == "speaker-cardinality-timeline":
+            payload["timelineKind"] = "challenger"
+        elif request["domain"] == "language-span":
+            payload["confidence"] = 0.9
+        elif request["domain"] == "asr-text":
+            payload["sourceCandidateId"] = "fixture-redecode"
+            payload["candidateSetSha256"] = canonical_json_sha256(request)
+        else:
+            raise AssertionError("unexpected request domain")
+        return {
+            "producer": {
+                **PRODUCER,
+                "systemId": "orchestrator-" + request["requestKind"],
+                "artifactSha256": canonical_json_sha256(
+                    {"request": request, "payload": payload}
+                ),
+            },
+            "candidates": [{"payload": payload}],
+        }
+
+    arbitrator = DeterministicArbitrator()
+    registry = SemanticCandidateGenerationRegistry(
+        {
+            request_kind: generate
+            for request_kind in set(REQUEST_KIND.values())
+        }
+    )
+    orchestrator = SemanticCompositionOrchestrator(
+        arbitrator=arbitrator,  # type: ignore[arg-type]
+        generators=registry,
+        max_rounds=2,
+    )
+    artifact_root = tmp_path / "semantic"
+    first = orchestrator.run(document, artifact_root=artifact_root)
+
+    assert first.round_count == 2
+    assert first.resumed_artifact_count == 0
+    assert first.composition["status"] == "composition-complete"
+    assert first.final_lattice["availability"][
+        "allRequiredDomainsAvailable"
+    ] is True
+    assert arbitrator.calls == 2
+    assert all(path.is_file() for path in first.artifact_paths)
+
+    resumed = orchestrator.run(document, artifact_root=artifact_root)
+    assert resumed.composition == first.composition
+    assert resumed.resumed_artifact_count == len(first.artifact_paths)
+    assert arbitrator.calls == 2
+
+    projected = compose_transcript_document(
+        document,
+        resumed.composition,
+        input_lattice=resumed.final_lattice,
+        arbitration_artifact=resumed.arbitration,
+    )
+    assert projected["provenance"]["semanticComposition"][
+        "applicationPolicy"
+    ] == "mandatory-candidate-selection"
+    assert projected["semanticTimeline"] == resumed.composition["timeline"]
+
+
+def test_composition_is_the_final_scoring_and_delivery_authority() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    arbitration = _artifact(lattice, _ready_response(lattice))
+    composition = build_semantic_composition(
+        document,
+        lattice,
+        arbitration,
+        generated_at="2026-07-28T05:00:00Z",
+    )
+    review_queue = {
+        "jobId": document["jobId"],
+        "items": [],
+        "decisions": [],
+        "openCount": 0,
+    }
+
+    final = build_final_composed_transcript(
+        document,
+        review_queue,
+        composition,
+        arbitration,
+        lattice,
+        generated_at="2026-07-28T05:01:00Z",
+    )
+
+    assert final["schemaVersion"] == "1.2.0"
+    assert final["acceptanceSubject"] == (
+        "speech-speaker-timeline-language-final-text"
+    )
+    assert final["semantic"]["applicationPolicy"] == (
+        "mandatory-candidate-selection"
+    )
+    assert final["semantic"]["requiresHumanApproval"] is False
+    assert final["speakerPolicy"] == composition["speakerPolicy"]
+    assert final["timeline"] == composition["timeline"]
+    assert final["segments"][0]["finalText"] == (
+        composition["segments"][0]["finalText"]
+    )
+    validate_final_composed_transcript(
+        final,
+        expected_document=document,
+        expected_review_queue=review_queue,
+        expected_composition_artifact=composition,
+        expected_arbitration_artifact=arbitration,
+        expected_input_lattice=lattice,
+    )
+    schema = json.loads(
+        (
+            ROOT
+            / "contracts"
+            / "final-adjudicated-transcript.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(final)

@@ -36,8 +36,10 @@ from .documents import (
 from .errors import JobCancelled, WorkerError, invalid_request
 from .final_adjudication import (
     build_final_adjudicated_transcript,
+    build_final_composed_transcript,
     build_final_no_speech_adjudication,
     validate_final_adjudicated_transcript,
+    validate_final_composed_transcript,
     validate_final_no_speech_adjudication,
 )
 from .local_llm import LocalLLMConfig, LocalLLMProvider, OllamaLocalProvider
@@ -98,6 +100,11 @@ from .semantic_processing import (
     SemanticProcessingRunner,
     attach_semantic_suggestions_to_review,
 )
+from .semantic_composition import compose_transcript_document
+from .semantic_orchestration import (
+    SemanticCompositionOrchestrator,
+    SemanticCompositionRunResult,
+)
 
 
 EventSink = Callable[[dict[str, Any]], None]
@@ -157,7 +164,11 @@ class JobRecord:
     business_provenance: dict[str, Any] | None = None
     business_error: dict[str, Any] | None = None
     semantic_status: str = "not-requested"
+    semantic_mode: str = "legacy-suggestions"
     semantic_artifact_path: str | None = None
+    semantic_artifact_paths: list[str] = field(default_factory=list)
+    semantic_input_lattice_path: str | None = None
+    semantic_arbitration_path: str | None = None
     semantic_provenance: dict[str, Any] | None = None
     semantic_error: dict[str, Any] | None = None
     capacity_released: bool = False
@@ -198,6 +209,10 @@ class WorkerService:
         | None = None,
         semantic_runner_factory: Callable[
             [StartJobRequest, AdapterContext], SemanticProcessingRunner
+        ]
+        | None = None,
+        semantic_orchestrator_factory: Callable[
+            [StartJobRequest, AdapterContext], SemanticCompositionOrchestrator
         ]
         | None = None,
         semantic_required: bool = False,
@@ -249,6 +264,15 @@ class WorkerService:
         self.semantic_provider = semantic_provider
         self.semantic_provider_factory = semantic_provider_factory
         self.semantic_runner_factory = semantic_runner_factory
+        self.semantic_orchestrator_factory = semantic_orchestrator_factory
+        if (
+            semantic_runner_factory is not None
+            and semantic_orchestrator_factory is not None
+        ):
+            raise ValueError(
+                "semantic runner and composition orchestrator factories are "
+                "mutually exclusive"
+            )
         self.semantic_required = bool(semantic_required)
         if semantic_model is not None and (
             not isinstance(semantic_model, str) or not semantic_model.strip()
@@ -1236,14 +1260,29 @@ class WorkerService:
                     details={"openCount": open_count(queue)},
                 )
             self._sync_record_from_review_state(record, document, queue)
+            if record.semantic_mode == "candidate-composition":
+                self._run_semantic_processing(
+                    record,
+                    document,
+                    queue,
+                    context,
+                )
             self._persist_final_adjudicated_transcript(
                 record,
                 document,
                 queue,
             )
-            self._run_business_processing(record, document, context)
-            self._ensure_output_execution_plans(record, document)
-            self._execute_transcript_exports(record, document, context)
+            delivery_document = self._semantic_delivery_document(
+                record,
+                document,
+            )
+            self._run_business_processing(record, delivery_document, context)
+            self._ensure_output_execution_plans(record, delivery_document)
+            self._execute_transcript_exports(
+                record,
+                delivery_document,
+                context,
+            )
             if operation == "rerender" or record.request.render_pdf:
                 self._transition(record, JobStatus.RUNNING, "rendering")
                 self._emit(
@@ -1256,11 +1295,19 @@ class WorkerService:
                         "adapterVersion": self.renderer_adapter.version,
                     },
                 )
-                self._render_persisted_document(record, document, context)
+                self._render_persisted_document(
+                    record,
+                    delivery_document,
+                    context,
+                )
             elif record.quality_status == "review-complete":
                 record.quality_status = "not-requested"
             context.raise_if_cancelled()
-            self._execute_output_publication(record, document, context)
+            self._execute_output_publication(
+                record,
+                delivery_document,
+                context,
+            )
             context.raise_if_cancelled()
             with record.lock:
                 record.followup_operation = None
@@ -2421,6 +2468,96 @@ class WorkerService:
             cancellation_check=context.raise_if_cancelled,
         )
 
+    def _run_semantic_composition_processing(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+        review_queue: Mapping[str, Any],
+        context: AdapterContext,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        factory = self.semantic_orchestrator_factory
+        if factory is None:
+            raise WorkerError(
+                "SEMANTIC_COMPOSITION_UNAVAILABLE",
+                "semantic composition orchestrator is not configured",
+            )
+        transcript_sha = canonical_json_sha256(document)
+        artifact_root = (
+            record.request.output_directory
+            / "semantic"
+            / "composition-runs"
+            / transcript_sha
+        )
+        orchestrator = factory(record.request, context)
+        try:
+            result = orchestrator.run(
+                document,
+                artifact_root=artifact_root,
+            )
+        except BaseException as primary_error:
+            try:
+                self._release_stage_runner_resources(
+                    orchestrator,
+                    stage="semantic_composition",
+                )
+            except Exception as release_error:
+                primary_error.add_note(
+                    "semantic_composition resource release also failed: "
+                    f"{type(release_error).__name__}"
+                )
+            raise
+        self._release_stage_runner_resources(
+            orchestrator,
+            stage="semantic_composition",
+        )
+        record.semantic_mode = "candidate-composition"
+        record.semantic_status = "completed"
+        record.semantic_artifact_path = str(result.composition_path)
+        record.semantic_artifact_paths = [
+            str(path) for path in result.artifact_paths
+        ]
+        for artifact_path in record.semantic_artifact_paths:
+            if artifact_path not in record.artifact_paths:
+                record.artifact_paths.append(artifact_path)
+        record.semantic_input_lattice_path = str(result.final_lattice_path)
+        record.semantic_arbitration_path = str(result.arbitration_path)
+        provider = result.arbitration.get("provider")
+        record.semantic_provenance = {
+            "model": result.arbitration["model"],
+            "promptVersion": result.arbitration["promptVersion"],
+            "provider": dict(provider) if isinstance(provider, Mapping) else {},
+            "applicationPolicy": "mandatory-candidate-selection",
+            "requiresHumanApproval": False,
+            "roundCount": result.round_count,
+            "resumedArtifactCount": result.resumed_artifact_count,
+            "selectedCandidateCount": len(result.arbitration["selections"]),
+            "changedCandidateCount": sum(
+                selection["selectedCandidateId"]
+                != next(
+                    group["currentCandidateId"]
+                    for domain in result.final_lattice["domains"]
+                    for group in domain["groups"]
+                    if group["groupId"] == selection["groupId"]
+                )
+                for selection in result.arbitration["selections"]
+            ),
+        }
+        self._emit(
+            record,
+            "stage.completed",
+            {
+                "stage": "semantic_composition",
+                "status": result.composition["status"],
+                "roundCount": result.round_count,
+                "resumedArtifactCount": result.resumed_artifact_count,
+                "selectedCandidateCount": len(
+                    result.arbitration["selections"]
+                ),
+                "candidateGenerationRequestCount": 0,
+            },
+        )
+        return result.composition, dict(review_queue)
+
     def _run_semantic_processing(
         self,
         record: JobRecord,
@@ -2442,13 +2579,28 @@ class WorkerService:
             record,
             "stage.started",
             {
-                "stage": "semantic_processing",
+                "stage": (
+                    "semantic_composition"
+                    if self.semantic_orchestrator_factory is not None
+                    else "semantic_processing"
+                ),
                 "model": self.semantic_model or record.request.local_llm_model,
-                "applicationPolicy": "suggestion-only",
-                "autoApply": False,
+                "applicationPolicy": (
+                    "mandatory-candidate-selection"
+                    if self.semantic_orchestrator_factory is not None
+                    else "suggestion-only"
+                ),
+                "autoApply": self.semantic_orchestrator_factory is not None,
             },
         )
         try:
+            if self.semantic_orchestrator_factory is not None:
+                return self._run_semantic_composition_processing(
+                    record,
+                    document,
+                    review_queue,
+                    context,
+                )
             artifact_path = (
                 record.request.output_directory
                 / "semantic"
@@ -2480,7 +2632,11 @@ class WorkerService:
                 artifact_path=str(artifact_path),
             )
             record.semantic_status = str(artifact["status"])
+            record.semantic_mode = "legacy-suggestions"
             record.semantic_artifact_path = str(artifact_path)
+            record.semantic_artifact_paths = [str(artifact_path)]
+            record.semantic_input_lattice_path = None
+            record.semantic_arbitration_path = None
             provider = artifact.get("provider")
             record.semantic_provenance = {
                 "model": artifact["model"],
@@ -2706,7 +2862,41 @@ class WorkerService:
             / "final-adjudicated-transcript.v1.json"
         )
         created = False
-        if final_path.exists():
+        if semantic_artifact.get("artifactType") == "semantic-composition":
+            if (
+                record.semantic_input_lattice_path is None
+                or record.semantic_arbitration_path is None
+            ):
+                raise WorkerError(
+                    "FINAL_ADJUDICATION_SEMANTIC_INVALID",
+                    "composed final adjudication is missing lattice or arbitration",
+                )
+            input_lattice = read_json_strict(
+                Path(record.semantic_input_lattice_path)
+            )
+            arbitration = read_json_strict(
+                Path(record.semantic_arbitration_path)
+            )
+            if final_path.exists():
+                artifact = validate_final_composed_transcript(
+                    read_json_strict(final_path),
+                    expected_document=document,
+                    expected_review_queue=review_queue,
+                    expected_composition_artifact=semantic_artifact,
+                    expected_arbitration_artifact=arbitration,
+                    expected_input_lattice=input_lattice,
+                )
+            else:
+                artifact = build_final_composed_transcript(
+                    document,
+                    review_queue,
+                    semantic_artifact,
+                    arbitration,
+                    input_lattice,
+                )
+                atomic_write_json_no_replace(final_path, artifact)
+                created = True
+        elif final_path.exists():
             artifact = validate_final_adjudicated_transcript(
                 read_json_strict(final_path),
                 expected_document=document,
@@ -2736,6 +2926,33 @@ class WorkerService:
                 },
             )
         return artifact
+
+    def _semantic_delivery_document(
+        self,
+        record: JobRecord,
+        document: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if record.semantic_mode != "candidate-composition":
+            return dict(document)
+        if (
+            record.semantic_artifact_path is None
+            or record.semantic_input_lattice_path is None
+            or record.semantic_arbitration_path is None
+        ):
+            raise WorkerError(
+                "SEMANTIC_COMPOSITION_INVALID",
+                "semantic delivery projection is missing bound artifacts",
+            )
+        return compose_transcript_document(
+            document,
+            read_json_strict(Path(record.semantic_artifact_path)),
+            input_lattice=read_json_strict(
+                Path(record.semantic_input_lattice_path)
+            ),
+            arbitration_artifact=read_json_strict(
+                Path(record.semantic_arbitration_path)
+            ),
+        )
 
     def _persist_final_no_speech_adjudication(
         self,
@@ -3035,17 +3252,27 @@ class WorkerService:
             )
             if semantic_artifact is not None:
                 assert record.semantic_artifact_path is not None
-                record.artifact_paths.append(record.semantic_artifact_path)
+                for semantic_path in record.semantic_artifact_paths:
+                    if semantic_path not in record.artifact_paths:
+                        record.artifact_paths.append(semantic_path)
                 self._emit(
                     record,
                     "artifact.created",
                     {
-                        "artifactType": "semantic-suggestions-v1",
+                        "artifactType": (
+                            "semantic-composition-v1"
+                            if record.semantic_mode
+                            == "candidate-composition"
+                            else "semantic-suggestions-v1"
+                        ),
                         "path": record.semantic_artifact_path,
                         "sha256": canonical_json_sha256(
                             semantic_artifact
                         ),
                         "status": semantic_artifact["status"],
+                        "artifactCount": len(
+                            record.semantic_artifact_paths
+                        ),
                     },
                 )
             if record.review_open_count:
@@ -3068,9 +3295,24 @@ class WorkerService:
                 document,
                 review_queue,
             )
-            self._run_business_processing(record, document, context)
-            self._ensure_output_execution_plans(record, document)
-            self._execute_transcript_exports(record, document, context)
+            delivery_document = self._semantic_delivery_document(
+                record,
+                document,
+            )
+            self._run_business_processing(
+                record,
+                delivery_document,
+                context,
+            )
+            self._ensure_output_execution_plans(
+                record,
+                delivery_document,
+            )
+            self._execute_transcript_exports(
+                record,
+                delivery_document,
+                context,
+            )
             if record.request.render_pdf:
                 self._transition(record, JobStatus.RUNNING, "rendering")
                 self._emit(
@@ -3082,11 +3324,19 @@ class WorkerService:
                         "adapterVersion": self.renderer_adapter.version,
                     },
                 )
-                self._render_persisted_document(record, document, context)
+                self._render_persisted_document(
+                    record,
+                    delivery_document,
+                    context,
+                )
             else:
                 record.quality_status = "not-requested"
             context.raise_if_cancelled()
-            self._execute_output_publication(record, document, context)
+            self._execute_output_publication(
+                record,
+                delivery_document,
+                context,
+            )
             context.raise_if_cancelled()
             self._transition(record, JobStatus.COMPLETED, "completed")
             self._emit(
@@ -3431,7 +3681,11 @@ class WorkerService:
         return {
             "required": record.semantic_status != "not-requested",
             "status": record.semantic_status,
+            "mode": record.semantic_mode,
             "artifactPath": record.semantic_artifact_path,
+            "artifactPaths": list(record.semantic_artifact_paths),
+            "inputLatticePath": record.semantic_input_lattice_path,
+            "arbitrationPath": record.semantic_arbitration_path,
             "provenance": (
                 dict(record.semantic_provenance)
                 if record.semantic_provenance
@@ -3442,7 +3696,7 @@ class WorkerService:
                 if record.semantic_error
                 else None
             ),
-            "autoApply": False,
+            "autoApply": record.semantic_mode == "candidate-composition",
         }
 
     @staticmethod

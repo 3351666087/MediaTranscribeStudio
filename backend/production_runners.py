@@ -3431,6 +3431,22 @@ class LocalPyannoteAuditAdapter:
         self._pipeline_instance: Any = None
         self._load_lock = threading.Lock()
         self._inference_lock = threading.RLock()
+        manifest_path = self.model_path / ".mts-model-manifest.json"
+        try:
+            raw_manifest = manifest_path.read_bytes()
+            manifest = json.loads(raw_manifest.decode("utf-8"))
+            revision = str(manifest.get("revision") or "").strip()
+            if not revision:
+                raise ValueError("model revision is missing")
+            self._model_revision = revision
+            self._model_manifest_sha256 = hashlib.sha256(
+                raw_manifest
+            ).hexdigest()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            self._model_revision = "unverified-local"
+            self._model_manifest_sha256 = hashlib.sha256(
+                str(self.model_path).encode("utf-8")
+            ).hexdigest()
         os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
 
     @property
@@ -3510,6 +3526,81 @@ class LocalPyannoteAuditAdapter:
                     del pipeline
                 if not self._uses_isolated_runtime:
                     _release_accelerator_memory()
+
+    def timeline_challenger(
+        self,
+        audio_path: str | Path,
+        *,
+        duration_ms: int,
+        context: AdapterContext,
+    ) -> dict[str, Any]:
+        """Run one full-media, anonymous-label timeline challenge."""
+
+        path = Path(audio_path)
+        if (
+            not path.is_file()
+            or isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or duration_ms < 1
+        ):
+            raise WorkerError(
+                "PYANNOTE_TIMELINE_INPUT_INVALID",
+                "pyannote timeline challenger requires local audio and duration",
+            )
+        if self._uses_isolated_runtime:
+            regular, exclusive = self._run_isolated_inference(
+                path,
+                start_ms=0,
+                end_ms=duration_ms,
+                context=context,
+                failure_code="PYANNOTE_TIMELINE_INFERENCE_FAILED",
+                failure_message=(
+                    "pyannote failed while generating a full-media challenger"
+                ),
+                details={"durationMs": duration_ms},
+            )
+        else:
+            samples, sample_rate = _load_audio(path)
+            expected_frames = round(duration_ms * sample_rate / 1000)
+            if (
+                sample_rate != 16_000
+                or abs(len(samples) - expected_frames) > 16
+            ):
+                raise WorkerError(
+                    "PYANNOTE_TIMELINE_INPUT_INVALID",
+                    "pyannote timeline challenger requires complete mono 16 kHz audio",
+                )
+            result = self._infer_waveform(
+                samples,
+                sample_rate,
+                context,
+                failure_code="PYANNOTE_TIMELINE_INFERENCE_FAILED",
+                failure_message=(
+                    "pyannote failed while generating a full-media challenger"
+                ),
+                details={"durationMs": duration_ms},
+            )
+            regular = self._speaker_turns(
+                result,
+                SpeechWindow(
+                    window_id="semantic-timeline",
+                    start_ms=0,
+                    end_ms=duration_ms,
+                ),
+            )
+            exclusive = None
+        if not regular:
+            raise WorkerError(
+                "PYANNOTE_TIMELINE_RESULT_INVALID",
+                "pyannote timeline challenger returned no speaker turns",
+            )
+        return {
+            "speakerTurns": regular,
+            "exclusiveSpeakerTurns": exclusive,
+            "modelId": self.adapter_id,
+            "modelRevision": self._model_revision,
+            "modelManifestSha256": self._model_manifest_sha256,
+        }
 
     @staticmethod
     def _normalize_isolated_turns(

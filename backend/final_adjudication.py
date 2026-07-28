@@ -14,10 +14,16 @@ from .semantic_processing import (
     SEMANTIC_APPLICATION_POLICY,
     validate_semantic_suggestions_artifact,
 )
+from .semantic_candidate_lattice import validate_semantic_candidate_lattice
+from .semantic_composition import (
+    validate_semantic_composition,
+    validate_semantic_job_arbitration,
+)
 from .voice_activity import validate_voice_activity
 
 
 FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION = "1.1.0"
+FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION = "1.2.0"
 FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE = "final-adjudicated-transcript"
 
 
@@ -491,6 +497,299 @@ def validate_final_adjudicated_transcript(
     return value
 
 
+def _composition_final_segments(
+    document: Mapping[str, Any],
+    composition: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    raw_segments = document.get("segments")
+    composed_segments = composition.get("segments")
+    if not isinstance(raw_segments, list) or not isinstance(
+        composed_segments,
+        list,
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "composed final transcript requires source and composed segments",
+        )
+    source_by_id = {
+        str(segment.get("id")): segment
+        for segment in raw_segments
+        if isinstance(segment, Mapping)
+    }
+    if len(source_by_id) != len(raw_segments):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "source transcript segments must have unique identities",
+        )
+    output: list[dict[str, Any]] = []
+    for index, segment in enumerate(composed_segments):
+        if not isinstance(segment, Mapping):
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "semantic composition segments must be objects",
+                segmentIndex=index,
+            )
+        segment_id = str(segment.get("id") or "")
+        source = source_by_id.get(segment_id)
+        revisions = source.get("revisions", []) if isinstance(source, Mapping) else None
+        if source is None or not isinstance(revisions, list):
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "semantic composition is rebound to another transcript segment",
+                segmentId=segment_id,
+            )
+        output.append(
+            {
+                "id": segment_id,
+                "startMs": segment["startMs"],
+                "endMs": segment["endMs"],
+                "speakerId": segment["speakerId"],
+                "language": segment["language"],
+                "finalText": segment["finalText"],
+                "rawTextSha256": segment["rawTextSha256"],
+                "overlapping": segment["overlapping"],
+                "humanLocked": segment["humanLocked"],
+                "revisionCount": len(revisions),
+            }
+        )
+    if len(output) != len(raw_segments):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "semantic composition must preserve every source segment",
+        )
+    return output
+
+
+def _changed_selection_count(
+    lattice: Mapping[str, Any],
+    arbitration: Mapping[str, Any],
+) -> int:
+    current_by_group = {
+        str(group["groupId"]): str(group["currentCandidateId"])
+        for domain in lattice["domains"]
+        for group in domain["groups"]
+    }
+    return sum(
+        str(selection["selectedCandidateId"])
+        != current_by_group[str(selection["groupId"])]
+        for selection in arbitration["selections"]
+    )
+
+
+def build_final_composed_transcript(
+    document: Mapping[str, Any],
+    review_queue: Mapping[str, Any],
+    composition_artifact: Mapping[str, Any],
+    arbitration_artifact: Mapping[str, Any],
+    input_lattice: Mapping[str, Any],
+    *,
+    generated_at: str | None = None,
+    _validate_result: bool = True,
+) -> dict[str, Any]:
+    """Build the final scoring subject from mandatory candidate composition."""
+
+    for value, label in (
+        (document, "transcript"),
+        (review_queue, "review queue"),
+        (composition_artifact, "semantic composition"),
+        (arbitration_artifact, "semantic arbitration"),
+        (input_lattice, "semantic candidate lattice"),
+    ):
+        try:
+            validate_strict_json(dict(value))
+        except ValueError as exc:
+            raise _fail(
+                "FINAL_ADJUDICATION_INPUT_INVALID",
+                f"{label} must contain strict finite JSON",
+                reason=str(exc),
+            ) from exc
+    job_id = document.get("jobId")
+    document_id = document.get("documentId")
+    if (
+        document.get("schemaVersion") != "2.0.0"
+        or not isinstance(job_id, str)
+        or not job_id
+        or not isinstance(document_id, str)
+        or not document_id
+        or review_queue.get("jobId") != job_id
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_INPUT_INVALID",
+            "transcript and review queue identity is invalid",
+        )
+    accepted, rejected, decision_count = _resolved_review_counts(review_queue)
+    transcript_hash = canonical_json_sha256(document)
+    lattice = validate_semantic_candidate_lattice(
+        input_lattice,
+        expected_source_media_sha256=document.get("source", {}).get("sha256"),
+        expected_transcript_sha256=transcript_hash,
+    )
+    arbitration = validate_semantic_job_arbitration(
+        arbitration_artifact,
+        expected_job_id=job_id,
+        expected_lattice=lattice,
+    )
+    composition = validate_semantic_composition(
+        composition_artifact,
+        expected_document=document,
+        expected_lattice=lattice,
+        expected_arbitration=arbitration,
+    )
+    if (
+        arbitration["status"] != "ready-to-compose"
+        or composition["status"] != "composition-complete"
+        or composition["disposition"] != "transcribable-speech"
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_SEMANTIC_INCOMPLETE",
+            "final composed transcript requires completed speech composition",
+        )
+    source = document.get("source")
+    if not isinstance(source, Mapping):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "transcript source is required",
+        )
+    source_sha256 = source.get("sha256")
+    duration_ms = source.get("durationMs")
+    if (
+        not isinstance(source_sha256, str)
+        or len(source_sha256) != 64
+        or isinstance(duration_ms, bool)
+        or not isinstance(duration_ms, int)
+        or duration_ms < 1
+    ):
+        raise _fail(
+            "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+            "transcript source identity or duration is invalid",
+        )
+    segments = _composition_final_segments(document, composition)
+    generated = generated_at or utc_now()
+    if not isinstance(generated, str) or not generated or len(generated) > 64:
+        raise _fail(
+            "FINAL_ADJUDICATION_INPUT_INVALID",
+            "final composed generatedAt is invalid",
+        )
+    artifact = {
+        "schemaVersion": FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION,
+        "artifactType": FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
+        "artifactId": f"final-composed-{document_id}",
+        "jobId": job_id,
+        "documentId": document_id,
+        "generatedAt": generated,
+        "status": "adjudication-complete",
+        "disposition": "transcribable-speech",
+        "acceptanceSubject": "speech-speaker-timeline-language-final-text",
+        "input": {
+            "sourceMediaSha256": source_sha256,
+            "transcriptDocumentSha256": transcript_hash,
+            "candidateLatticeSha256": lattice["latticeSha256"],
+            "arbitrationArtifactSha256": canonical_json_sha256(arbitration),
+            "compositionArtifactSha256": canonical_json_sha256(composition),
+            "reviewQueueSha256": canonical_json_sha256(review_queue),
+        },
+        "semantic": {
+            "status": "composition-complete",
+            "model": arbitration["model"],
+            "promptVersion": arbitration["promptVersion"],
+            "applicationPolicy": "mandatory-candidate-selection",
+            "requiresHumanApproval": False,
+            "selectedCandidateCount": len(arbitration["selections"]),
+            "changedCandidateCount": _changed_selection_count(
+                lattice,
+                arbitration,
+            ),
+        },
+        "review": {
+            "openCount": 0,
+            "itemCount": accepted + rejected,
+            "acceptedCount": accepted,
+            "rejectedCount": rejected,
+            "decisionCount": decision_count,
+        },
+        "source": {
+            "durationMs": duration_ms,
+        },
+        "speakerPolicy": dict(composition["speakerPolicy"]),
+        "timeline": dict(composition["timeline"]),
+        "finalTextAuthority": "semantic-composition-selected-asr-text",
+        "timelineAuthority": "semantic-composition-selected-timeline",
+        "segments": segments,
+    }
+    if _validate_result:
+        return validate_final_composed_transcript(
+            artifact,
+            expected_document=document,
+            expected_review_queue=review_queue,
+            expected_composition_artifact=composition,
+            expected_arbitration_artifact=arbitration,
+            expected_input_lattice=lattice,
+        )
+    return artifact
+
+
+def validate_final_composed_transcript(
+    artifact: Mapping[str, Any],
+    *,
+    expected_document: Mapping[str, Any],
+    expected_review_queue: Mapping[str, Any],
+    expected_composition_artifact: Mapping[str, Any],
+    expected_arbitration_artifact: Mapping[str, Any],
+    expected_input_lattice: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild and compare the composition-authoritative final transcript."""
+
+    value = dict(artifact)
+    try:
+        validate_strict_json(value)
+    except ValueError as exc:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "composed final adjudication must contain strict finite JSON",
+            reason=str(exc),
+        ) from exc
+    required = {
+        "schemaVersion",
+        "artifactType",
+        "artifactId",
+        "jobId",
+        "documentId",
+        "generatedAt",
+        "status",
+        "disposition",
+        "acceptanceSubject",
+        "input",
+        "semantic",
+        "review",
+        "source",
+        "speakerPolicy",
+        "timeline",
+        "finalTextAuthority",
+        "timelineAuthority",
+        "segments",
+    }
+    if set(value) != required:
+        raise _fail(
+            "FINAL_ADJUDICATION_ARTIFACT_INVALID",
+            "composed final adjudication fields do not match schema 1.2.0",
+        )
+    rebuilt = build_final_composed_transcript(
+        expected_document,
+        expected_review_queue,
+        expected_composition_artifact,
+        expected_arbitration_artifact,
+        expected_input_lattice,
+        generated_at=value.get("generatedAt"),
+        _validate_result=False,
+    )
+    if value != rebuilt:
+        raise _fail(
+            "FINAL_ADJUDICATION_BINDING_INVALID",
+            "composed final adjudication does not match current evidence",
+        )
+    return value
+
+
 def _no_speech_voice_summary(
     voice_activity: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -639,8 +938,11 @@ def validate_final_no_speech_adjudication(
 __all__ = [
     "FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE",
     "FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION",
+    "FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION",
+    "build_final_composed_transcript",
     "build_final_no_speech_adjudication",
     "build_final_adjudicated_transcript",
+    "validate_final_composed_transcript",
     "validate_final_no_speech_adjudication",
     "validate_final_adjudicated_transcript",
 ]

@@ -28,6 +28,9 @@ from .production_runners import (
     LocalPyannoteAuditAdapter,
     LocalQwen3AsrAdapter,
 )
+from .production_semantic import ProductionSemanticCandidateRegistry
+from .semantic_composition import SemanticJobArbitrationRunner
+from .semantic_orchestration import SemanticCompositionOrchestrator
 from .service import WorkerService
 from .speaker_pipeline import (
     JsonStageCache,
@@ -216,6 +219,37 @@ def build_production_composition(
     )
     local_llm_stage_residency = config.runtime.model_residency == "stage"
     local_llm_keep_alive = "5m" if local_llm_stage_residency else "10m"
+
+    def semantic_orchestrator_factory(
+        request: Any,
+        context: Any,
+    ) -> SemanticCompositionOrchestrator:
+        if pyannote is None:
+            raise RuntimeError(
+                "semantic composition requires a configured pyannote challenger"
+            )
+        provider = OllamaLocalProvider(
+            LocalLLMConfig(
+                model=config.speaker.local_llm_model,
+                endpoint=request.local_llm_endpoint,
+                keep_alive=local_llm_keep_alive,
+                release_on_close=local_llm_stage_residency,
+            )
+        )
+        return SemanticCompositionOrchestrator(
+            arbitrator=SemanticJobArbitrationRunner(
+                provider=provider,
+                model=config.speaker.local_llm_model,
+                cancellation_check=context.raise_if_cancelled,
+            ),
+            generators=ProductionSemanticCandidateRegistry(
+                asr_adapter=asr,
+                pyannote_adapter=pyannote,
+                context=context,
+            ),
+            max_rounds=3,
+        )
+
     service = factories.service(
         path_policy=PathPolicy(
             allowed_input_roots=config.paths.allowed_input_roots,
@@ -256,6 +290,11 @@ def build_production_composition(
         ),
         semantic_required=True,
         semantic_model=config.speaker.local_llm_model,
+        semantic_orchestrator_factory=(
+            semantic_orchestrator_factory
+            if pyannote is not None
+            else None
+        ),
     )
     return ProductionComposition(service=service, preflight=preflight)
 

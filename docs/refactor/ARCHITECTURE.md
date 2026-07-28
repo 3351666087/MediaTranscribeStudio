@@ -112,7 +112,9 @@ LLM 对**可验证候选空间**拥有完整终态仲裁权限：可选择人声
 
 `semantic-job-arbitration.v1` 现已把高权限落实为完整 job 协议：每个候选组必须恰好执行一次“精确排序全部 eligible candidate ID”或“请求域匹配的有界 challenger”，空域也必须请求补算；候选 ID、group/domain/scope、evidence ref、request kind、状态和计数均由运行时重建。`semantic-composition.v1` 只在补算请求为零时执行，重算以所选 candidate 为 current 的新格，并生成隔离的 speech disposition、完整人数/时间线、逐段角色、语言和 N-best 文本终态；完整时间线可以改变人数并携带 split/merge，跨域语言/文本冲突、时间线不支持的角色、人工锁变化和任意哈希篡改均 fail closed。旧逐段 suggestion runner 仍只读兼容，不再代表高权限终态。
 
-仍未完成的是候选生成调度及真实模型接入。对 AISHELL-4 `N=5`、Liva `en/sw N=3`、Liva `en/tl N=5` 三份真实 transcript 的 v9 审计表明：只有逐段 `speaker-assignment` 有多候选，人声 disposition、完整人数/时间线、语言 span 和 ASR text 都仍是单候选；下一阶段必须把 Community/Pyannote/MOSS 时间线挑战、开放集 LID/`und`、provider 原生 N-best 和局部重算结果写回新格，再由 job-level arbitrator 重跑，不能仅把“已请求补候选”误报为最终质量提升。
+生产 worker 现已接入可恢复的有界组合循环：每个 transcript hash 使用独立目录原子持久化初始 lattice、逐轮 arbitration、candidate generation、扩展 lattice 和 composition，重复启动必须逐件验证后复用，最多三轮仍未可组合就 fail closed。配置了本地 Community-1 的生产图会注册 canonical voice-activity、全媒体 Pyannote regular/exclusive 时间线、时间线主导的 speaker assignment、同一规范音频上的 Qwen3-ASR re-decode/LID 和 provider candidate-set；没有独立 diarizer 时不伪造时间线 challenger，也不启用高权限组合。`final-adjudicated-transcript 1.2` 直接绑定最终 lattice/arbitration/composition，并把被选中的完整时间线、角色、语言和文本投影给翻译、字幕、报告和发布，持久化源 transcript 仍不可变；人工复核后必须按新 transcript hash 重新运行组合。
+
+仍未完成的是 MOSS 等更多生产 timeline handler、真实生产配置下的新闭环复跑、仲裁吞吐优化和广泛 held-out 晋级。AISHELL-4 `N=5` 的单例真实结果只证明文本域小幅改善，speaker 指标不变；生产接入本身不构成任意人数、任意语言或单人/多人代码切换质量证明。
 
 候选格和 LLM 组合只以强制语义后的完整 `speaker + language span + time + finalText` 终态晋级。前级模型指标用于候选召回、路由和诊断，不单独决定发布；终态人数、DER/JER、边界、cp/tcp/SA-WER/CER、语言/切换、overlap、事实、复核量和资源域仍不可互相抵消。
 

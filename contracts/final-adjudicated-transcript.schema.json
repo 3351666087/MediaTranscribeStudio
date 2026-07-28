@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mediatranscribestudio.local/contracts/final-adjudicated-transcript/1.1.0",
+  "$id": "https://mediatranscribestudio.local/contracts/final-adjudicated-transcript/1.2.0",
   "title": "Final adjudicated transcript disposition",
   "description": "The only media disposition eligible for formal quality scoring. Transcribable speech requires completed semantic arbitration and resolved review; verified speech absence binds directly to voice-activity evidence without fabricating a transcript.",
   "type": "object",
   "oneOf": [
     {"$ref": "#/$defs/transcribableSpeechArtifact"},
+    {"$ref": "#/$defs/composedTranscribableSpeechArtifact"},
     {"$ref": "#/$defs/noSpeechArtifact"}
   ],
   "$defs": {
@@ -163,6 +164,175 @@
           }
         },
         "finalTextAuthority": {"const": "normalizedText"},
+        "segments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/segment"}
+        }
+      }
+    },
+    "composedTranscribableSpeechArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "artifactType",
+        "artifactId",
+        "jobId",
+        "documentId",
+        "generatedAt",
+        "status",
+        "disposition",
+        "acceptanceSubject",
+        "input",
+        "semantic",
+        "review",
+        "source",
+        "speakerPolicy",
+        "timeline",
+        "finalTextAuthority",
+        "timelineAuthority",
+        "segments"
+      ],
+      "properties": {
+        "schemaVersion": {"const": "1.2.0"},
+        "artifactType": {"const": "final-adjudicated-transcript"},
+        "artifactId": {"type": "string", "minLength": 1, "maxLength": 240},
+        "jobId": {"type": "string", "minLength": 1, "maxLength": 160},
+        "documentId": {"type": "string", "minLength": 1, "maxLength": 240},
+        "generatedAt": {"type": "string", "minLength": 1, "maxLength": 64},
+        "status": {"const": "adjudication-complete"},
+        "disposition": {"const": "transcribable-speech"},
+        "acceptanceSubject": {
+          "const": "speech-speaker-timeline-language-final-text"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sourceMediaSha256",
+            "transcriptDocumentSha256",
+            "candidateLatticeSha256",
+            "arbitrationArtifactSha256",
+            "compositionArtifactSha256",
+            "reviewQueueSha256"
+          ],
+          "properties": {
+            "sourceMediaSha256": {"$ref": "#/$defs/sha256"},
+            "transcriptDocumentSha256": {"$ref": "#/$defs/sha256"},
+            "candidateLatticeSha256": {"$ref": "#/$defs/sha256"},
+            "arbitrationArtifactSha256": {"$ref": "#/$defs/sha256"},
+            "compositionArtifactSha256": {"$ref": "#/$defs/sha256"},
+            "reviewQueueSha256": {"$ref": "#/$defs/sha256"}
+          }
+        },
+        "semantic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "model",
+            "promptVersion",
+            "applicationPolicy",
+            "requiresHumanApproval",
+            "selectedCandidateCount",
+            "changedCandidateCount"
+          ],
+          "properties": {
+            "status": {"const": "composition-complete"},
+            "model": {"type": "string", "minLength": 1, "maxLength": 240},
+            "promptVersion": {"type": "string", "minLength": 1, "maxLength": 240},
+            "applicationPolicy": {"const": "mandatory-candidate-selection"},
+            "requiresHumanApproval": {"const": false},
+            "selectedCandidateCount": {"type": "integer", "minimum": 1},
+            "changedCandidateCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "openCount",
+            "itemCount",
+            "acceptedCount",
+            "rejectedCount",
+            "decisionCount"
+          ],
+          "properties": {
+            "openCount": {"const": 0},
+            "itemCount": {"type": "integer", "minimum": 0},
+            "acceptedCount": {"type": "integer", "minimum": 0},
+            "rejectedCount": {"type": "integer", "minimum": 0},
+            "decisionCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["durationMs"],
+          "properties": {
+            "durationMs": {"type": "integer", "minimum": 1}
+          }
+        },
+        "speakerPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resolvedCount", "speakerIds"],
+          "properties": {
+            "resolvedCount": {"type": "integer", "minimum": 1},
+            "speakerIds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/speakerId"}
+            }
+          }
+        },
+        "timeline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "speakerCount",
+            "speakerIds",
+            "timelineKind",
+            "startMs",
+            "endMs",
+            "turns"
+          ],
+          "properties": {
+            "speakerCount": {"type": "integer", "minimum": 1},
+            "speakerIds": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/speakerId"}
+            },
+            "timelineKind": {"type": "string", "minLength": 1, "maxLength": 120},
+            "startMs": {"type": "integer", "minimum": 0},
+            "endMs": {"type": "integer", "minimum": 1},
+            "turns": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["startMs", "endMs", "speakerId", "overlap"],
+                "properties": {
+                  "startMs": {"type": "integer", "minimum": 0},
+                  "endMs": {"type": "integer", "minimum": 1},
+                  "speakerId": {"$ref": "#/$defs/speakerId"},
+                  "overlap": {"type": "boolean"}
+                }
+              }
+            }
+          }
+        },
+        "finalTextAuthority": {
+          "const": "semantic-composition-selected-asr-text"
+        },
+        "timelineAuthority": {
+          "const": "semantic-composition-selected-timeline"
+        },
         "segments": {
           "type": "array",
           "minItems": 1,

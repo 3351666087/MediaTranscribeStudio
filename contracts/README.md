@@ -90,7 +90,7 @@ JSON Schema alone:
 | `artifact-manifest.schema.json` | Content-addressed artifact inventory and integrity metadata. |
 | `asr-evidence.schema.json` | Immutable model-, source-window-, token-, score-, candidate-ID-, and hash-bound ASR top-1/N-best evidence. |
 | `business-processing-request.schema.json` | Opt-in local translation and summary request. |
-| `final-adjudicated-transcript.schema.json` | Unified hash-bound final disposition: reviewed post-semantic transcript or verified absence of transcribable speech. |
+| `final-adjudicated-transcript.schema.json` | Unified hash-bound final disposition: legacy reviewed suggestions (`1.1`), mandatory candidate composition (`1.2`), or verified absence of transcribable speech. |
 | `job-event.schema.json` | Versioned worker event stream. |
 | `output-customization.schema.json` | Evidence-bearing canonical report, subtitle, delivery, export, and reversibility snapshot. |
 | `output-recipe.schema.json` | Compact native desktop presentation recipe compiled into canonical output customizations. |
@@ -148,18 +148,21 @@ operations. Their contracts preserve:
 - source-segment evidence where required;
 - separation from source transcript and speaker evidence.
 
-Local small models operate only within these suggestion and derived-artifact
-boundaries. They cannot silently rewrite the source transcript, timestamps,
-speaker assignments, voiceprint evidence, or human locks. Any source-language
-correction that is accepted into a later source revision must remain explicit,
-attributable, and auditable. Independent polishing is not part of the product
-or public contract; source-language repair belongs exclusively to mandatory
-semantic arbitration.
+Local models operate only within these candidate and derived-artifact
+boundaries. They cannot rewrite source media, raw ASR evidence, candidate
+identity, voiceprint evidence, or human locks. A mandatory arbitrator may
+select any eligible candidate, and `semantic-composition.v1` may project those
+selections into an isolated delivery document without mutating the persisted
+source transcript. Independent polishing is not part of the product or public
+contract; source-language repair belongs exclusively to mandatory semantic
+arbitration.
 
 Formal quality scoring uses only
-`final-adjudicated-transcript.schema.json`. Its `transcribable-speech`
-disposition is authoritative for the reviewed `speakerId`, `language`,
-`startMs`, `endMs`, and `finalText` tuple. Its
+`final-adjudicated-transcript.schema.json`. Legacy `1.1` speech artifacts bind
+the reviewed suggestion-only transcript. Version `1.2` binds the input lattice,
+job arbitration, deterministic composition, resolved review queue, complete
+selected timeline, and selected `speakerId`, `language`, `startMs`, `endMs`,
+and `finalText` tuple. Its
 `no-transcribable-speech` disposition contains no transcript, speaker, or
 semantic fields and instead binds the source media to validated
 `voice-activity.v1.json` evidence. VAD, diarization, voiceprint, LID, ASR, and

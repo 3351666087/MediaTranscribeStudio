@@ -1739,6 +1739,92 @@ def validate_semantic_composition(
     return value
 
 
+def compose_transcript_document(
+    document: Mapping[str, Any],
+    composition_artifact: Mapping[str, Any],
+    *,
+    input_lattice: Mapping[str, Any],
+    arbitration_artifact: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a validated composition into an isolated delivery document."""
+
+    composition = validate_semantic_composition(
+        composition_artifact,
+        expected_document=document,
+        expected_lattice=input_lattice,
+        expected_arbitration=arbitration_artifact,
+    )
+    if composition["disposition"] != "transcribable-speech":
+        raise _fail("a transcript delivery document requires transcribable speech")
+    projected = json.loads(json.dumps(document, ensure_ascii=False))
+    composed_by_id = {
+        str(segment["id"]): segment for segment in composition["segments"]
+    }
+    raw_segments = projected.get("segments")
+    if not isinstance(raw_segments, list) or len(raw_segments) != len(
+        composed_by_id
+    ):
+        raise _fail("composition cannot be projected onto different segments")
+    for segment in raw_segments:
+        segment_id = str(segment.get("id") or "")
+        composed = composed_by_id.get(segment_id)
+        if composed is None:
+            raise _fail("composition omitted a delivery segment")
+        segment["speakerId"] = composed["speakerId"]
+        segment["language"] = composed["language"]
+        segment["normalizedText"] = composed["finalText"]
+        segment["displayText"] = composed["finalText"]
+    policy = projected.get("speakerPolicy")
+    if not isinstance(policy, dict):
+        raise _fail("composition delivery requires a speaker policy")
+    speaker_ids = list(composition["speakerPolicy"]["speakerIds"])
+    policy["resolvedCount"] = composition["speakerPolicy"]["resolvedCount"]
+    policy["speakerIds"] = speaker_ids
+    policy["requireExactSet"] = True
+    policy["unknownSpeakerAllowed"] = False
+    existing_roles = {
+        str(speaker.get("id")): speaker.get("role")
+        for speaker in projected.get("speakers", [])
+        if isinstance(speaker, Mapping)
+    }
+    projected["speakers"] = [
+        {
+            **{"id": speaker_id},
+            **(
+                {"role": existing_roles[speaker_id]}
+                if isinstance(existing_roles.get(speaker_id), str)
+                else {}
+            ),
+        }
+        for speaker_id in speaker_ids
+    ]
+    languages = {
+        str(segment["language"])
+        for segment in raw_segments
+        if str(segment["language"]) != "und"
+    }
+    projected["language"] = (
+        "und"
+        if not languages
+        else next(iter(languages))
+        if len(languages) == 1
+        else "mul"
+    )
+    projected.pop("speakerTimeline", None)
+    projected["semanticTimeline"] = composition["timeline"]
+    provenance = projected.get("provenance")
+    if not isinstance(provenance, dict):
+        raise _fail("composition delivery requires transcript provenance")
+    provenance["semanticComposition"] = {
+        "artifactId": composition["artifactId"],
+        "compositionSha256": composition["compositionSha256"],
+        "artifactSha256": canonical_json_sha256(composition),
+        "applicationPolicy": "mandatory-candidate-selection",
+    }
+    validate_strict_json(projected)
+    return projected
+
+
 __all__ = [
     "SEMANTIC_COMPOSITION_ARTIFACT_TYPE",
     "SEMANTIC_COMPOSITION_SCHEMA_VERSION",
@@ -1749,6 +1835,7 @@ __all__ = [
     "SemanticJobArbitrationRunner",
     "build_semantic_composition",
     "build_semantic_job_arbitration",
+    "compose_transcript_document",
     "semantic_job_prompt_context",
     "validate_semantic_composition",
     "validate_semantic_job_arbitration",

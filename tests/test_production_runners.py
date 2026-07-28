@@ -2874,6 +2874,59 @@ class ProductionRunnerTests(unittest.TestCase):
             ],
         )
 
+    def test_pyannote_exposes_one_bound_full_timeline_challenger(
+        self,
+    ) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def isolated_runner(**kwargs):
+            calls.append(kwargs)
+            return {
+                "speakerTurns": [
+                    {
+                        "startMs": 0,
+                        "endMs": 2200,
+                        "localSpeaker": "LOCAL_A",
+                    },
+                    {
+                        "startMs": 1800,
+                        "endMs": 4000,
+                        "localSpeaker": "LOCAL_B",
+                    },
+                ],
+                "exclusiveSpeakerTurns": [
+                    {
+                        "startMs": 0,
+                        "endMs": 2000,
+                        "localSpeaker": "LOCAL_A",
+                    },
+                    {
+                        "startMs": 2000,
+                        "endMs": 4000,
+                        "localSpeaker": "LOCAL_B",
+                    },
+                ],
+            }
+
+        adapter = LocalPyannoteAuditAdapter(
+            model_path=self.pyannote_model,
+            device="cpu",
+            isolated_inference_runner=isolated_runner,
+        )
+        result = adapter.timeline_challenger(
+            self.audio,
+            duration_ms=4000,
+            context=self.context,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["start_ms"], 0)
+        self.assertEqual(calls[0]["end_ms"], 4000)
+        self.assertEqual(len(result["speakerTurns"]), 2)
+        self.assertEqual(len(result["exclusiveSpeakerTurns"]), 2)
+        self.assertEqual(result["modelId"], "pyannote-community-1")
+        self.assertRegex(result["modelManifestSha256"], r"^[0-9a-f]{64}$")
+
     def test_pyannote_receives_exact_manual_speaker_count(self) -> None:
         annotation = FakeAnnotation(
             [

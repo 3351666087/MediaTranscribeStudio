@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import io
 import json
 import tempfile
@@ -17,9 +18,12 @@ from backend import (
     LocalLLMProvider,
     MappingLocalLLMProvider,
     PathPolicy,
+    SemanticCandidateGenerationRegistry,
+    SemanticCompositionOrchestrator,
     WorkerError,
     WorkerProtocol,
     WorkerService,
+    build_semantic_job_arbitration,
 )
 from backend.media_probe import MediaProbe, ProcessLimits, ProcessResult
 from backend.output_publication import (
@@ -54,6 +58,7 @@ def _service(
     subtitle_visual_qa_hook: Any | None = None,
     heartbeat_interval_seconds: float = 15.0,
     semantic_required: bool = False,
+    semantic_orchestrator_factory: Any | None = None,
 ) -> WorkerService:
     input_root = root / "input"
     output_root = root / "output"
@@ -73,6 +78,7 @@ def _service(
         business_provider=provider,
         business_runner_factory=runner_factory,
         semantic_required=semantic_required,
+        semantic_orchestrator_factory=semantic_orchestrator_factory,
         media_probe=media_probe,
         output_publisher=(
             output_publisher
@@ -569,6 +575,213 @@ def test_completed_semantic_job_persists_final_adjudicated_transcript() -> None:
         assert created[0]["payload"]["sha256"] == canonical_json_sha256(
             artifact
         )
+        service.shutdown()
+
+
+def test_required_semantic_composition_persists_and_drives_final_scoring() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        request_kind = {
+            "speech-disposition": "speech-disposition-challenger",
+            "speaker-cardinality-timeline": "timeline-challenger",
+            "speaker-assignment": "speaker-assignment-challenger",
+            "language-span": "open-set-lid",
+            "asr-text": "provider-native-nbest",
+        }
+
+        class DeterministicArbitrator:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.release_calls = 0
+
+            def run(
+                self,
+                document: dict,
+                *,
+                candidate_lattice: dict,
+                carried_lattice: dict | None = None,
+                carried_arbitration: dict | None = None,
+            ) -> dict:
+                self.calls += 1
+                selections = []
+                requests = []
+                for domain in candidate_lattice["domains"]:
+                    for group in domain["groups"]:
+                        refs = [
+                            (
+                                "candidate-lattice:"
+                                + candidate_lattice["latticeId"]
+                            ),
+                            "candidate-group:" + group["groupId"],
+                        ]
+                        if group["status"] == "available":
+                            current = group["currentCandidateId"]
+                            eligible = [
+                                candidate["candidateId"]
+                                for candidate in group["candidates"]
+                                if candidate["selectionEligible"]
+                            ]
+                            selections.append(
+                                {
+                                    "groupId": group["groupId"],
+                                    "rankedCandidateIds": [
+                                        current,
+                                        *(
+                                            item
+                                            for item in eligible
+                                            if item != current
+                                        ),
+                                    ],
+                                    "reasonCodes": [
+                                        "CURRENT_CROSS_DOMAIN_CONSISTENT"
+                                    ],
+                                    "evidenceRefs": refs,
+                                }
+                            )
+                        else:
+                            requests.append(
+                                {
+                                    "domain": domain["domain"],
+                                    "groupId": group["groupId"],
+                                    "scopeId": group["scopeId"],
+                                    "requestKind": request_kind[
+                                        domain["domain"]
+                                    ],
+                                    "minimumAlternativeCount": 2,
+                                    "reasonCodes": [
+                                        "INSUFFICIENT_ALTERNATIVES"
+                                    ],
+                                    "evidenceRefs": refs,
+                                }
+                            )
+                return build_semantic_job_arbitration(
+                    job_id=document["jobId"],
+                    lattice=candidate_lattice,
+                    response={
+                        "latticeId": candidate_lattice["latticeId"],
+                        "latticeSha256": candidate_lattice[
+                            "latticeSha256"
+                        ],
+                        "selections": selections,
+                        "candidateGenerationRequests": requests,
+                    },
+                    model="fixture-9b",
+                    provider={
+                        "id": "fixture-loopback",
+                        "version": "1",
+                        "networkPolicy": "loopback-only",
+                    },
+                )
+
+            def release_resources(self) -> None:
+                self.release_calls += 1
+
+        def generate(
+            request: dict,
+            _document: dict,
+            lattice: dict,
+        ) -> dict:
+            group = next(
+                group
+                for domain in lattice["domains"]
+                for group in domain["groups"]
+                if group["groupId"] == request["groupId"]
+            )
+            current = next(
+                candidate
+                for candidate in group["candidates"]
+                if candidate["candidateId"] == group["currentCandidateId"]
+            )
+            payload = copy.deepcopy(current["payload"])
+            domain = request["domain"]
+            if domain == "speech-disposition":
+                payload.update(
+                    {
+                        "speechDurationMs": 950,
+                        "speechRatio": 0.95,
+                        "speechWindowCount": 1,
+                    }
+                )
+            elif domain == "speaker-cardinality-timeline":
+                payload["timelineKind"] = "challenger"
+            elif domain == "speaker-assignment":
+                payload["score"] = 0.99
+            elif domain == "language-span":
+                payload["confidence"] = 0.99
+            elif domain == "asr-text":
+                payload["text"] = payload["text"] + "!"
+                payload["sourceCandidateId"] = "fixture-redecode"
+                payload["candidateSetSha256"] = canonical_json_sha256(
+                    request
+                )
+            else:
+                raise AssertionError("unexpected semantic domain")
+            return {
+                "producer": {
+                    "producerType": "model",
+                    "systemId": "service-" + request["requestKind"],
+                    "revision": "revision-1",
+                    "artifactSha256": canonical_json_sha256(payload),
+                    "modelManifestSha256": "d" * 64,
+                    "identityStatus": "manifest-bound",
+                },
+                "candidates": [{"payload": payload}],
+            }
+
+        arbitrator = DeterministicArbitrator()
+        orchestrator = SemanticCompositionOrchestrator(
+            arbitrator=arbitrator,  # type: ignore[arg-type]
+            generators=SemanticCandidateGenerationRegistry(
+                {
+                    kind: generate
+                    for kind in set(request_kind.values())
+                }
+            ),
+            max_rounds=2,
+        )
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            semantic_required=True,
+            semantic_orchestrator_factory=(
+                lambda request, context: orchestrator
+            ),
+        )
+
+        started = service.start(
+            {
+                "jobId": "semantic-composed-final",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "localLlmMode": "disabled",
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "completed"
+        assert final["semantic"]["mode"] == "candidate-composition"
+        assert final["semantic"]["autoApply"] is True
+        assert final["semantic"]["provenance"]["roundCount"] == 2
+        assert len(final["semantic"]["artifactPaths"]) == 6
+        final_artifact = json.loads(
+            (
+                root
+                / "output"
+                / "job"
+                / "final-adjudicated-transcript.v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert final_artifact["schemaVersion"] == "1.2.0"
+        assert final_artifact["semantic"]["applicationPolicy"] == (
+            "mandatory-candidate-selection"
+        )
+        assert final_artifact["timelineAuthority"] == (
+            "semantic-composition-selected-timeline"
+        )
+        assert arbitrator.calls == 2
+        assert arbitrator.release_calls == 1
         service.shutdown()
 
 

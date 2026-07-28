@@ -12,9 +12,12 @@ from .errors import JobCancelled, WorkerError
 from .final_adjudication import (
     FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
     FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION,
+    FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION,
     build_final_adjudicated_transcript,
+    build_final_composed_transcript,
     build_final_no_speech_adjudication,
     validate_final_adjudicated_transcript,
+    validate_final_composed_transcript,
     validate_final_no_speech_adjudication,
 )
 from .business_processing import (
@@ -61,6 +64,7 @@ from .semantic_composition import (
     SemanticJobArbitrationRunner,
     build_semantic_composition,
     build_semantic_job_arbitration,
+    compose_transcript_document,
     semantic_job_prompt_context,
     validate_semantic_composition,
     validate_semantic_job_arbitration,
@@ -75,6 +79,11 @@ from .semantic_candidate_generation import (
     build_voice_activity_challenger_result,
     validate_semantic_candidate_generation,
 )
+from .semantic_orchestration import (
+    SemanticCompositionOrchestrator,
+    SemanticCompositionRunResult,
+)
+from .production_semantic import ProductionSemanticCandidateRegistry
 from .models import (
     CHECKPOINT_SCHEMA_VERSION,
     PROTOCOL_VERSION,
@@ -147,6 +156,7 @@ __all__ = [
     "CHECKPOINT_SCHEMA_VERSION",
     "FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE",
     "FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION",
+    "FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION",
     "JobCancelled",
     "JobStatus",
     "JsonlEmitter",
@@ -167,6 +177,7 @@ __all__ = [
     "PathPolicy",
     "PreflightCheck",
     "ProductionComposition",
+    "ProductionSemanticCandidateRegistry",
     "ProductionConfig",
     "ProductionConfigError",
     "ProductionExecutables",
@@ -200,6 +211,8 @@ __all__ = [
     "SemanticCandidateLatticeError",
     "SemanticCandidateGenerationRegistry",
     "SemanticCompositionError",
+    "SemanticCompositionOrchestrator",
+    "SemanticCompositionRunResult",
     "SemanticJobArbitrationRunner",
     "SemanticProcessingRunner",
     "StartJobRequest",
@@ -227,10 +240,12 @@ __all__ = [
     "build_timeline_challenger_result",
     "build_voice_activity_challenger_result",
     "build_final_adjudicated_transcript",
+    "build_final_composed_transcript",
     "build_final_no_speech_adjudication",
     "build_production_composition",
     "compile_output_customizations",
     "compact_candidate_lattice_context",
+    "compose_transcript_document",
     "extend_semantic_candidate_lattice",
     "canonical_speaker_ids",
     "offline_environment",
@@ -247,6 +262,7 @@ __all__ = [
     "validate_semantic_candidate_lattice",
     "validate_semantic_candidate_generation",
     "validate_final_adjudicated_transcript",
+    "validate_final_composed_transcript",
     "validate_final_no_speech_adjudication",
     "validate_job_id",
 ]

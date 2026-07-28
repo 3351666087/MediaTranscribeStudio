@@ -1,6 +1,6 @@
 # 目标架构
 
-> 审计日期：2026-07-21
+> 审计日期：2026-07-28
 > 状态：目标架构已经建立部分替代组件，但旧入口、旧流水线、旧 PDF 链路与固定五人约束仍未完成退役。
 
 > 2026-07-25 模型架构更新：旗舰模型、专用挑战者、1600+ 语言长尾路径、托管前沿/私有服务器/M4 三档部署和晋级门禁见 [`FLAGSHIP_SPEECH_ARCHITECTURE.md`](./FLAGSHIP_SPEECH_ARCHITECTURE.md)。最新决策以该文件为准：Precision-2 是逐次授权上传时的托管 diarization 前沿候选，Community-1/VBx 是默认离线 Dynamic-N 主权威，Qwen3-ASR-1.7B 是支持集内主 ASR；CAM++、ERes2NetV2、Sortformer 和其他 ASR 均先作为挑战者或审计证据，只有 held-out 胜出后才能接管分桶。
@@ -10,6 +10,7 @@
 - 完全离线处理中文会议，不上传音频、逐字稿、说话人声纹或人工真值。
 - 说话人数支持自动检测、手动指定和混合约束；目标契约接受任意正整数 `N`，不把五人会议或任何固定常量写成系统上限。
 - ASR、时间边界、声纹、局部音频复核和上下文语义互相提供证据，但任何单一模型都不能无约束修改说话人或中文原文。
+- 强制语义仲裁只在前级模型生成的不可变候选格中选择或重排人数、时间线、speaker、语言 span 和文本 candidate ID；候选格必须覆盖待修复域，LLM 不得自由发明候选。
 - 采用“便宜证据先行、只对不确定片段升级”的效率级联；禁止默认对整段会议重复运行最昂贵模型。
 - 说话人分离、人数估计、时间边界、ASR、语义建议、性能和 PDF 质量分别计量，禁止用单一综合分数掩盖任一硬失败。
 - Python 只承担模型、音频、领域编排和 sidecar 调用，不再承担桌面 UI 或 PDF 渲染。
@@ -36,12 +37,16 @@ flowchart LR
   OMNI --> ALIGN
   PIPE --> VERIFY["CAM++ / ERes2NetV2 audit evidence"]
   PIPE --> REVIEW["Local audio review"]
-  PIPE --> LLM["Local small LLM suggestion generator"]
+  CONTENT --> LATTICE["Immutable cross-model candidate lattice"]
+  DECODER --> LATTICE
+  ALIGN --> LATTICE
+  VERIFY --> LATTICE
+  PIPE --> LLM["Mandatory local semantic arbitrator"]
+  LATTICE --> LLM
   FUSION --> DECODER["Dynamic-N constrained decoder"]
   REVIEW --> DECODER
-  LLM --> VALIDATOR["Deterministic semantic validator"]
-  VALIDATOR --> DECODER
-  DECODER --> DOC["Versioned transcript document"]
+  LLM --> VALIDATOR["Candidate-ID validator + deterministic composer"]
+  VALIDATOR --> DOC["Versioned transcript document"]
   DOC --> PDF["Java PDF sidecar"]
   PDF --> HTML["Offline XHTML"]
   PDF --> OUTPUT["PDF + page PNGs + contact sheet"]
@@ -91,6 +96,20 @@ flowchart LR
 - 对多人串话拆分验证父子时间边界包含关系、最小时长和文本来源。
 - 在任何 cardinality invariant 失败时 fail-closed，不生成“看似成功”的最终报告。
 
+## 强制语义候选格
+
+本地 LLM 是最终质量链的必经仲裁器，但它不是声学模型，也不是无约束文本生成器。前级模型必须先构建哈希绑定的不可变候选格：
+
+1. `speech disposition`：可转写人声或无可转写人声候选及 VAD/lexical evidence。
+2. `speaker cardinality/timeline`：Community-1/VBx、MOSS、受控 Pyannote/CAM++ 投影和其他已登记挑战者给出的完整人数与时间线 candidate。
+3. `speaker assignment`：每个稳定 turn 的 acoustic top-K canonical speaker candidate。
+4. `language span`：支持集语言、开放集 `und`、逐段/逐词语言和代码切换边界 candidate。
+5. `text`：provider 原生 N-best、token 时间、强制对齐和术语证据；没有真实候选时禁止内容词修复。
+
+LLM 只能输出候选 ID、排序、abstention 和证据引用。确定性 composer 必须重算候选哈希，保持源媒体、`rawText`、人工锁和候选时间边界不可变，并拒绝新造 speaker、语言、文本或时间点。一个域只有单一候选时，语义层不能声称修复了该域；它必须保留原结果并把 `candidate-domain-unavailable` 送入 review/质量报告。
+
+候选格和 LLM 组合只以强制语义后的完整 `speaker + language span + time + finalText` 终态晋级。前级模型指标用于候选召回、路由和诊断，不单独决定发布；终态人数、DER/JER、边界、cp/tcp/SA-WER/CER、语言/切换、overlap、事实、复核量和资源域仍不可互相抵消。
+
 ## 效率级联
 
 生产链按成本由低到高升级，所有中间产物以输入 hash、模型版本、参数和契约版本为缓存键：
@@ -99,7 +118,7 @@ flowchart LR
 2. **全量旗舰通道**：Community-1/VBx 生成整段 regular/exclusive Dynamic-N 时间线；Qwen3-ASR-1.7B 对支持集内候选段完成基础转写。两者按 stage 单次加载并批内复用，不调用本地 LLM，也不默认全场运行所有挑战模型。`modelResidency=stage` 面向统一内存边缘机，`worker` 只面向已验证容量充足的服务器 worker。
 3. **不确定性路由**：仅将语言、边界、overlap、人数后验、短片段、离群 embedding 或模型冲突片段送入更高成本复核。
 4. **定向重算与挑战者验证**：只对入队片段执行局部重分段、Whisper/Parakeet/Canary/Omnilingual ASR 候选、CAM++/ERes2NetV2 声纹审计或上下文扩大；挑战者只有在目标分桶 held-out 晋级后才能接管主结果。
-5. **语义建议**：确定性规则仍无法解决时，本地小 LLM只能生成结构化建议，不能直接修改说话人、turn 结构或中文原文。
+5. **强制语义仲裁**：每个有人声作业都经过本地 LLM；低风险段可以批量 abstain，高风险段只能在不可变候选格中选择或重排 candidate ID。人数、边界、语言或文本候选缺失时进入最小人工复核，不能自由补造。
 6. **人工复核**：只展示仍有冲突或高影响的最小证据包；人工锁定结果进入后续增量解码，避免全局无差别返工。
 7. **增量报告**：只有版本化 transcript document 通过硬门槛后才调用 Java sidecar；内容未变时复用已验证 artifact，内容变更时只重建受影响报告版本。
 
@@ -123,16 +142,16 @@ flowchart LR
 
 ## 本地小 LLM 生产门控
 
-`qwen2.5:1.5b` 与 `qwen3.5:4b` 的正式本地基准结论均为 `reject_for_production`。其中 `qwen3.5:4b` 在 88 个脱敏样本上的最终契约有效率为 `0.784`、越界文本修改率为 `0.205`、auto-apply 候选回归率为 `0.135`；安全挑战契约有效率仅为 `0.625`，未达到预登记门槛，因此它已退出生产 allowlist 并从本机 Ollama 卸载，只保留不可变报告作为历史证据。`qwen3.5:9b` 已安装并成为默认高能力候选，已在 3 个公开真实人声转录段上完成动态 schema 约束的 provider 闭环：2 次调用、3/3 验证通过、3 次 abstain、无自动应用且 transcript/`rawText` 哈希不变；这只证明生产契约可运行，尚未通过语义说话人重排、最小语法修复、翻译、摘要或 N-best 重排的完整 held-out 质量门。当前 9B 只能作为生产必经但 fail-closed 的 suggestion generator，即**仅建议、永不自动应用**：
+`qwen2.5:1.5b` 与 `qwen3.5:4b` 的正式本地基准结论均为 `reject_for_production`。其中 `qwen3.5:4b` 在 88 个脱敏样本上的最终契约有效率为 `0.784`、越界文本修改率为 `0.205`、auto-apply 候选回归率为 `0.135`；安全挑战契约有效率仅为 `0.625`，未达到预登记门槛，因此它已退出生产 allowlist 并从本机 Ollama 卸载，只保留不可变报告作为历史证据。`qwen3.5:9b` 已安装并成为默认高能力候选。当前 `semantic-candidate-state-v8` 在 AISHELL-4 `N=5`、Liva `en/sw N=3` 和 Liva `en/tl N=5` 三个有部分真值的真实开发诊断中合计 `25/25 abstain`、0 建议、0 应用，所有可评分终态指标均无变化；它没有产生回退，也没有证明能弥补基模。现有协议又禁止新 speaker、turn split/merge、边界变化和语言变化，因此在候选格扩展前结构上无法修复这些域。当前 9B 仍是生产必经但 fail-closed 的 semantic arbitrator，即**仅建议、永不自动应用**：
 
 - 输出必须经过 JSON/schema 和 deterministic validator。
 - 模型自报置信度不作为自动应用依据。
-- 不得自动修改说话人或文本，不得拆分或合并 turn、处理 overlap、翻译或总结；语义仲裁只能提交受证据约束的复核建议。
+- 不得自由生成说话人、文本、语言或时间边界；语义仲裁只能选择受哈希绑定的候选 ID，并在尚未通过 held-out 前提交复核建议。
 - 不得覆盖人工锁定或高 CAM++ margin。
 - 普通中文原文不得由该模型自动改写；仅可提出标点、语气词、口吃和机械重复清理建议。
 - 所有建议必须可拒绝、可追踪，并保留修改前后文本和理由。
 
-正式报告同时证明 `qwen3.5:4b` 在关闭 thinking 后能稳定返回 JSON，但“JSON 可解析”不等于“修改安全”。其说话人字段和 turn 拆分字段本来就被输出 schema 禁止，因此该评测不能被解释为说话人分离准确率。说话人角色仍只由声学证据、全局约束、局部音频复核和人工锁定决定。
+正式报告同时证明 `qwen3.5:4b` 在关闭 thinking 后能稳定返回 JSON，但“JSON 可解析”不等于“修改安全”。其说话人字段和 turn 拆分字段本来就被输出 schema 禁止，因此该评测不能被解释为说话人分离准确率。说话人角色候选仍只由声学证据、全局约束、局部音频复核和人工锁定产生；LLM 只能对这些候选做语义重排。
 
 只有重新基准达到预先登记的契约、安全、越界修改、风险升级和回归阈值后，才能重新讨论自动应用；完成 benchmark 本身不代表生产可行。
 

@@ -588,7 +588,7 @@ def _group(
     )
     eligible_count = sum(item["selectionEligible"] for item in candidates)
     current_eligible = bool(current["selectionEligible"])
-    if current_eligible and eligible_count >= 2:
+    if current_eligible and eligible_count >= 1:
         status = "available"
         unavailable_reason = None
     elif not current_eligible:
@@ -597,9 +597,6 @@ def _group(
     elif eligible_count == 0:
         status = "candidate-domain-unavailable"
         unavailable_reason = "no-eligible-candidate"
-    else:
-        status = "candidate-domain-unavailable"
-        unavailable_reason = "single-eligible-candidate"
     group_seed = {"domain": domain, "scopeId": scope_id}
     return {
         "groupId": "group-" + canonical_json_sha256(group_seed)[:24],
@@ -779,6 +776,155 @@ def _overlap_flags(turns: Sequence[Mapping[str, Any]]) -> list[bool]:
             )
         )
     return flags
+
+
+def _embedded_timeline_candidates(
+    segments: Sequence[Mapping[str, Any]],
+    *,
+    duration_ms: int,
+) -> list[dict[str, Any]]:
+    """Reuse full-timeline diarization evidence already paid for upstream."""
+
+    candidates: list[dict[str, Any]] = []
+    seen_payloads: set[str] = set()
+    for segment in segments:
+        evidence = segment.get("evidence")
+        overlap = (
+            evidence.get("overlap")
+            if isinstance(evidence, Mapping)
+            else None
+        )
+        full = (
+            overlap.get("fullTimelineInference")
+            if isinstance(overlap, Mapping)
+            else None
+        )
+        provider = (
+            overlap.get("provider")
+            if isinstance(overlap, Mapping)
+            else None
+        )
+        if (
+            not isinstance(full, Mapping)
+            or not isinstance(provider, Mapping)
+            or full.get("scope") != "full-normalized-timeline"
+            or full.get("startMs") != 0
+            or full.get("endMs") != duration_ms
+        ):
+            continue
+        system_id = provider.get("id")
+        revision = provider.get("version")
+        if (
+            not isinstance(system_id, str)
+            or not system_id.strip()
+            or not isinstance(revision, str)
+            or not revision.strip()
+        ):
+            continue
+        for turns_field, digest_field, kind in (
+            (
+                "speakerTurns",
+                "speakerTurnsSha256",
+                "overlap-preserving",
+            ),
+            (
+                "exclusiveSpeakerTurns",
+                "exclusiveSpeakerTurnsSha256",
+                "single-speaker",
+            ),
+        ):
+            raw_turns = full.get(turns_field)
+            digest = full.get(digest_field)
+            if (
+                not isinstance(raw_turns, list)
+                or not raw_turns
+                or not isinstance(digest, str)
+                or _SHA256.fullmatch(digest) is None
+            ):
+                continue
+            persisted_turns_sha256 = canonical_json_sha256(raw_turns)
+            labels = sorted(
+                {
+                    str(turn.get("localSpeaker") or "")
+                    for turn in raw_turns
+                    if isinstance(turn, Mapping)
+                }
+            )
+            if (
+                not labels
+                or "" in labels
+                or (
+                    turns_field == "speakerTurns"
+                    and len(labels)
+                    != int(full.get("localSpeakerCount") or len(labels))
+                )
+            ):
+                continue
+            mapping = {
+                label: f"speaker-{index}"
+                for index, label in enumerate(labels, start=1)
+            }
+            try:
+                flags = _overlap_flags(raw_turns)
+                turns = [
+                    {
+                        "startMs": int(turn["startMs"]),
+                        "endMs": int(turn["endMs"]),
+                        "speakerId": mapping[str(turn["localSpeaker"])],
+                        "overlap": flags[index],
+                    }
+                    for index, turn in enumerate(raw_turns)
+                    if isinstance(turn, Mapping)
+                ]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(turns) != len(raw_turns):
+                continue
+            turns.sort(
+                key=lambda item: (
+                    item["startMs"],
+                    item["endMs"],
+                    item["speakerId"],
+                )
+            )
+            payload = {
+                "speakerCount": len(labels),
+                "speakerIds": [
+                    f"speaker-{index}"
+                    for index in range(1, len(labels) + 1)
+                ],
+                "timelineKind": (
+                    kind
+                    if kind != "single-speaker" or len(labels) == 1
+                    else "challenger"
+                ),
+                "startMs": 0,
+                "endMs": duration_ms,
+                "turns": turns,
+            }
+            payload_sha = canonical_json_sha256(payload)
+            if payload_sha in seen_payloads:
+                continue
+            seen_payloads.add(payload_sha)
+            candidates.append(
+                _candidate_input(
+                    payload=payload,
+                    producer={
+                        "producerType": "model",
+                        "systemId": system_id.strip(),
+                        "revision": revision.strip(),
+                        "artifactSha256": persisted_turns_sha256,
+                        "modelManifestSha256": None,
+                        "identityStatus": "artifact-bound",
+                    },
+                    current=False,
+                    eligible=True,
+                    reason="eligible",
+                )
+            )
+        if candidates:
+            break
+    return candidates
 
 
 def _asr_candidate_set(
@@ -1002,6 +1148,9 @@ def build_semantic_candidate_lattice_from_document(
                     reason="eligible",
                 )
             )
+    timeline_candidates.extend(
+        _embedded_timeline_candidates(segments, duration_ms=duration)
+    )
     candidate_groups["speaker-cardinality-timeline"].append(
         {"scopeId": "media", "candidates": timeline_candidates}
     )

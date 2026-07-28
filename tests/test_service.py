@@ -59,6 +59,7 @@ def _service(
     heartbeat_interval_seconds: float = 15.0,
     semantic_required: bool = False,
     semantic_orchestrator_factory: Any | None = None,
+    semantic_model: str | None = None,
 ) -> WorkerService:
     input_root = root / "input"
     output_root = root / "output"
@@ -79,6 +80,7 @@ def _service(
         business_runner_factory=runner_factory,
         semantic_required=semantic_required,
         semantic_orchestrator_factory=semantic_orchestrator_factory,
+        semantic_model=semantic_model,
         media_probe=media_probe,
         output_publisher=(
             output_publisher
@@ -384,24 +386,55 @@ def test_start_payload_parses_business_variants_and_loopback_policy() -> None:
         service.shutdown()
 
 
-def test_start_payload_rejects_retired_local_model() -> None:
+def test_start_payload_accepts_unpinned_local_model_without_config_lock() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         service = _service(
             Path(temporary),
             adapter=FakeTranscriptionAdapter(result_mapping(1)),
         )
+        request = service.parse_start_payload(
+            {
+                "jobId": "alternate-model",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "localLlmModel": "candidate-structural:14b",
+            }
+        )
+        assert request.local_llm_model == "candidate-structural:14b"
+        service.shutdown()
+
+
+def test_start_payload_must_match_configured_semantic_model() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        service = _service(
+            Path(temporary),
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            semantic_model="production-arbitrator:27b",
+        )
+        request = service.parse_start_payload(
+            {
+                "jobId": "configured-model",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+            }
+        )
+        assert request.local_llm_model == "production-arbitrator:27b"
         with pytest.raises(
             WorkerError,
-            match="production model qwen3.5:9b",
+            match="match the configured production model",
         ):
             service.parse_start_payload(
                 {
-                    "jobId": "retired-model",
+                    "jobId": "mismatched-model",
                     "sourcePath": "source.wav",
-                    "outputDirectory": "job",
+                    "outputDirectory": "other-job",
                     "speakerCountMode": "manual",
                     "speakerCount": 1,
-                    "localLlmModel": "qwen3.5:4b",
+                    "localLlmModel": "unapproved:latest",
                 }
             )
         service.shutdown()
@@ -614,7 +647,10 @@ def test_required_semantic_composition_persists_and_drives_final_scoring() -> No
                             ),
                             "candidate-group:" + group["groupId"],
                         ]
-                        if group["status"] == "available":
+                        if (
+                            group["status"] == "available"
+                            and self.calls > 1
+                        ):
                             current = group["currentCandidateId"]
                             eligible = [
                                 candidate["candidateId"]
@@ -781,7 +817,66 @@ def test_required_semantic_composition_persists_and_drives_final_scoring() -> No
             "semantic-composition-selected-timeline"
         )
         assert arbitrator.calls == 2
-        assert arbitrator.release_calls == 1
+        assert arbitrator.release_calls == 2
+        service.shutdown()
+
+
+def test_semantic_failure_preserves_replayable_input_transcript() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+
+        class FailingOrchestrator:
+            def run(self, document: dict, *, artifact_root: Path):
+                del document, artifact_root
+                raise WorkerError(
+                    "SEMANTIC_JOB_PROVIDER_FAILED",
+                    "local semantic job arbitration failed closed",
+                    details={
+                        "reason": "fixture schema mismatch",
+                        "attemptDiagnostics": [],
+                        "responseContentPersisted": False,
+                    },
+                )
+
+            def release_resources(self) -> None:
+                return None
+
+        service = _service(
+            root,
+            adapter=FakeTranscriptionAdapter(result_mapping(1)),
+            semantic_required=True,
+            semantic_orchestrator_factory=(
+                lambda request, context: FailingOrchestrator()
+            ),
+        )
+        started = service.start(
+            {
+                "jobId": "semantic-failure-replay",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "localLlmMode": "disabled",
+            }
+        )
+        final = service.wait(started["jobId"], timeout=5)
+
+        semantic_input = (
+            root
+            / "output"
+            / "job"
+            / "semantic"
+            / "input-transcript.v2.json"
+        )
+        assert final["status"] == "failed"
+        assert final["semantic"]["status"] == "failed"
+        assert final["error"]["code"] == "SEMANTIC_JOB_PROVIDER_FAILED"
+        assert semantic_input.is_file()
+        persisted = json.loads(semantic_input.read_text(encoding="utf-8"))
+        assert persisted["jobId"] == "semantic-failure-replay"
+        assert not (
+            root / "output" / "job" / "transcript-document.v2.json"
+        ).exists()
         service.shutdown()
 
 

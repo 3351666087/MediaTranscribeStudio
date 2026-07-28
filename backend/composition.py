@@ -241,6 +241,10 @@ def build_production_composition(
                 provider=provider,
                 model=config.speaker.local_llm_model,
                 cancellation_check=context.raise_if_cancelled,
+                batch_size=8,
+                translation_targets=(
+                    request.business_config.translation_targets
+                ),
             ),
             generators=ProductionSemanticCandidateRegistry(
                 asr_adapter=asr,

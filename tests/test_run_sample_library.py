@@ -149,6 +149,72 @@ def test_auto_language_mode_does_not_pass_reference_language(
     assert captured["language"] == "auto"
 
 
+def test_semantic_composition_gate_rejects_legacy_suggestions(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "checkpoint.v2.json").write_text(
+        json.dumps(
+            {
+                "semantic": {
+                    "mode": "legacy-suggestions",
+                    "status": "completed",
+                    "autoApply": False,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert run_sample_library._semantic_composition_failure(
+        output,
+        translation_targets=["zh"],
+    ) == "semantic-mode-is-not-candidate-composition"
+
+
+def test_semantic_composition_gate_checks_translation_binding(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    semantic_root = output / "semantic"
+    semantic_root.mkdir()
+    composition = semantic_root / "composition.json"
+    lattice = semantic_root / "lattice.json"
+    arbitration = semantic_root / "arbitration.json"
+    for path in (composition, lattice):
+        path.write_text("{}", encoding="utf-8")
+    arbitration.write_text(
+        json.dumps({"translationTargets": ["zh"]}),
+        encoding="utf-8",
+    )
+    (output / "checkpoint.v2.json").write_text(
+        json.dumps(
+            {
+                "semantic": {
+                    "mode": "candidate-composition",
+                    "status": "completed",
+                    "autoApply": True,
+                    "artifactPath": str(composition),
+                    "inputLatticePath": str(lattice),
+                    "arbitrationPath": str(arbitration),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert run_sample_library._semantic_composition_failure(
+        output,
+        translation_targets=["zh"],
+    ) is None
+    assert run_sample_library._semantic_composition_failure(
+        output,
+        translation_targets=["en"],
+    ) == "semantic-translation-targets-do-not-match"
+
+
 @pytest.mark.parametrize("mode", ["manual", "hybrid"])
 def test_reference_modes_reject_unknown_speaker_count(
     tmp_path: Path,

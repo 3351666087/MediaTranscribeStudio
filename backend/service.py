@@ -381,13 +381,22 @@ class WorkerService:
             raise invalid_request(
                 "localLlmMode must be disabled, suggestion-only, business, or enabled"
             )
-        local_llm_model_raw = payload.get("localLlmModel", "qwen3.5:9b")
+        configured_local_llm_model = self.semantic_model or "qwen3.5:9b"
+        local_llm_model_raw = payload.get(
+            "localLlmModel",
+            configured_local_llm_model,
+        )
         if not isinstance(local_llm_model_raw, str):
             raise invalid_request("localLlmModel must be a string")
-        local_llm_model = local_llm_model_raw.strip() or "qwen3.5:9b"
-        if local_llm_model != "qwen3.5:9b":
+        local_llm_model = (
+            local_llm_model_raw.strip() or configured_local_llm_model
+        )
+        if (
+            self.semantic_model is not None
+            and local_llm_model != self.semantic_model
+        ):
             raise invalid_request(
-                "localLlmModel must identify the production model qwen3.5:9b"
+                "localLlmModel must match the configured production model"
             )
         endpoint_raw = payload.get(
             "localLlmEndpoint", "http://127.0.0.1:11434"
@@ -2716,12 +2725,31 @@ class WorkerService:
             },
         )
         try:
+            semantic_arbitration: Mapping[str, Any] | None = None
+            if (
+                config.translation_targets
+                and record.semantic_mode == "candidate-composition"
+            ):
+                if record.semantic_arbitration_path is None:
+                    raise WorkerError(
+                        "BUSINESS_SEMANTIC_TRANSLATION_INVALID",
+                        "candidate composition omitted its translation-bearing "
+                        "arbitration artifact",
+                    )
+                semantic_arbitration = read_json_strict(
+                    Path(record.semantic_arbitration_path)
+                )
             runner = self._business_runner(record, context)
             try:
                 paths = runner.run(
                     document,
                     output_directory=record.request.output_directory,
                     config=config,
+                    **(
+                        {"semantic_arbitration": semantic_arbitration}
+                        if semantic_arbitration is not None
+                        else {}
+                    ),
                 )
             except BaseException as primary_error:
                 try:
@@ -3189,6 +3217,38 @@ class WorkerService:
                 segment_confidence_threshold=self.segment_confidence_threshold,
                 speaker_margin_threshold=self.low_speaker_margin_threshold,
                 range_width_threshold=self.range_width_threshold,
+            )
+            semantic_input_path = (
+                record.request.output_directory
+                / "semantic"
+                / "input-transcript.v2.json"
+            )
+            if semantic_input_path.exists():
+                persisted_semantic_input = read_json_strict(
+                    semantic_input_path
+                )
+                if canonical_json_sha256(persisted_semantic_input) != (
+                    canonical_json_sha256(document)
+                ):
+                    raise WorkerError(
+                        "SEMANTIC_INPUT_CONFLICT",
+                        "persisted semantic input is rebound to another transcript",
+                    )
+            else:
+                atomic_write_json_no_replace(
+                    semantic_input_path,
+                    document,
+                )
+            if str(semantic_input_path) not in record.artifact_paths:
+                record.artifact_paths.append(str(semantic_input_path))
+            self._emit(
+                record,
+                "artifact.created",
+                {
+                    "artifactType": "semantic-input-transcript-v2",
+                    "path": str(semantic_input_path),
+                    "sha256": canonical_json_sha256(document),
+                },
             )
             semantic_artifact, review_queue = self._run_semantic_processing(
                 record,

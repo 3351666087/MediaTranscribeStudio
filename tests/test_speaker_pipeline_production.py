@@ -18,7 +18,7 @@ from backend.asr_evidence import (
     project_asr_candidate_set,
     validate_asr_candidate_set,
 )
-from backend.documents import build_review_queue
+from backend.documents import build_review_queue, validate_segments
 from backend.errors import JobCancelled, WorkerError
 from backend.models import (
     SpeakerCountPolicy,
@@ -312,6 +312,23 @@ class ContextualTurnCamPlusAdapter(FakeCamPlusAdapter):
                     4_000,
                     (0.0, 1.0),
                 ),
+            ),
+        )
+
+
+class AmbiguousInheritedContextualTurnCamPlusAdapter(
+    ContextualTurnCamPlusAdapter
+):
+    version = "contextual-turn-inherited-fixture-v1"
+
+    def refine_windows(self, prepared, context):
+        refined = super().refine_windows(prepared, context)
+        identity_windows = tuple(refined.speaker_identity_windows)
+        return replace(
+            refined,
+            speaker_identity_windows=(
+                *identity_windows[:2],
+                replace(identity_windows[2], vector=(1.01, 1.0)),
             ),
         )
 
@@ -2425,6 +2442,54 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
             refined,
         )
 
+    def test_low_margin_context_projection_preserves_source_score_authority(
+        self,
+    ) -> None:
+        preparation = FakePreparationAdapter(
+            2,
+            window_ranges={
+                "window-1": (0, 2_000),
+                "window-2": (2_000, 4_000),
+            },
+        )
+        pipeline, _, _, _, _ = self.pipeline(
+            2,
+            preparation=preparation,
+            cam=AmbiguousInheritedContextualTurnCamPlusAdapter(2),
+        )
+
+        result = pipeline.transcribe(
+            self.request(2, "manual", job_id="context-inherited-score"),
+            self.context("context-inherited-score"),
+        )
+
+        inherited = result.segments[-1]
+        projection = inherited.evidence["speakerTurnProjection"]
+        self.assertTrue(projection["assignmentInherited"])
+        self.assertEqual(projection["speakerScoreAuthority"], "source-cluster")
+        self.assertEqual(inherited.speaker_id, "speaker-2")
+        self.assertGreater(
+            projection["contextualScores"]["speaker-1"],
+            projection["contextualScores"]["speaker-2"],
+        )
+        self.assertTrue(
+            all(
+                segment.evidence["preparation"]["normalizationProfile"]
+                == "mono-16khz-f32-v1"
+                for segment in result.segments
+            )
+        )
+        self.assertEqual(
+            max(inherited.speaker_scores, key=lambda item: item.score).speaker_id,
+            inherited.speaker_id,
+        )
+        validate_segments(
+            result.segments,
+            speaker_count=2,
+            duration_ms=result.duration_ms,
+            high_margin_threshold=0.35,
+        )
+
     def test_hash_bound_pyannote_boundary_uses_only_campp_identity(
         self,
     ) -> None:
@@ -2599,6 +2664,12 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
                 sequence["reasonCodes"],
             )
             self.assertNotIn("HUMAN_LOCKED", sequence["reasonCodes"])
+        validate_segments(
+            result.segments,
+            speaker_count=2,
+            duration_ms=result.duration_ms,
+            high_margin_threshold=0.35,
+        )
 
     def test_pyannote_boundary_excludes_overlap_and_rejects_hash_tampering(
         self,
@@ -4582,12 +4653,16 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         ):
             SpeakerPipelineConfig(pyannote_mode="audit")
 
-    def test_retired_local_model_is_rejected(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError,
-            "production model qwen3.5:9b",
-        ):
-            SpeakerPipelineConfig(local_llm_model="qwen3.5:4b")
+    def test_local_model_is_configurable_but_not_blank(self) -> None:
+        config = SpeakerPipelineConfig(
+            local_llm_model="candidate-structural:14b"
+        )
+        self.assertEqual(
+            config.local_llm_model,
+            "candidate-structural:14b",
+        )
+        with self.assertRaisesRegex(ValueError, "non-empty text"):
+            SpeakerPipelineConfig(local_llm_model=" ")
 
     def test_fail_closed_review_evidence_and_queue_reasons(self) -> None:
         for window_count, expected_exit in (

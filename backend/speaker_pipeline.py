@@ -1308,9 +1308,13 @@ class SpeakerPipelineConfig:
             raise ValueError(
                 "local_llm_mode must be disabled or suggestion-only; auto_apply is forbidden"
             )
-        if self.local_llm_model != "qwen3.5:9b":
+        if (
+            not isinstance(self.local_llm_model, str)
+            or not self.local_llm_model.strip()
+            or len(self.local_llm_model) > 160
+        ):
             raise ValueError(
-                "local_llm_model must identify the production model qwen3.5:9b"
+                "local_llm_model must be non-empty text up to 160 characters"
             )
         if self.model_residency not in {"stage", "worker"}:
             raise ValueError("model_residency must be stage or worker")
@@ -6350,6 +6354,11 @@ class SpeakerPipeline:
                     if inherited
                     else contextual_assignment
                 )
+                authoritative_score_row = (
+                    clusters.scores[source_index]
+                    if inherited
+                    else score_row
+                )
                 source_partition = source.metadata.get(
                     "speakerCountPartition"
                 )
@@ -6421,6 +6430,11 @@ class SpeakerPipeline:
                         if inherited
                         else "campp-canonical-centroid"
                     ),
+                    "speakerScoreAuthority": (
+                        "source-cluster"
+                        if inherited
+                        else "contextual-projection"
+                    ),
                     "pyannoteCanonicalIdentityImported": False,
                     "leftBoundaryProposalId": (
                         left_proposal["proposalId"]
@@ -6478,7 +6492,7 @@ class SpeakerPipeline:
                     metadata=metadata,
                 )
                 output_windows.append(child)
-                output_scores.append(score_row)
+                output_scores.append(authoritative_score_row)
                 output_assignments.append(assignment)
                 output_embeddings.append(
                     EmbeddingRecord(
@@ -6973,8 +6987,14 @@ class SpeakerPipeline:
                             "provider": _adapter_identity(
                                 self.preparation_adapter
                             ),
+                            "normalizationProfile": (
+                                prepared.normalization_profile
+                            ),
                             **(
-                                {"audioPath": prepared.audio_path}
+                                {
+                                    "audioPath": prepared.audio_path,
+                                    "canonicalAudioPath": prepared.audio_path,
+                                }
                                 if prepared.audio_path is not None
                                 else {}
                             ),
@@ -9868,6 +9888,10 @@ class SpeakerPipeline:
                                     self.separation_adapter
                                 ),
                                 "audioPath": channel.audio_path,
+                                "canonicalAudioPath": prepared.audio_path,
+                                "normalizationProfile": (
+                                    prepared.normalization_profile
+                                ),
                             },
                             "boundary": {
                                 "provider": _adapter_identity(

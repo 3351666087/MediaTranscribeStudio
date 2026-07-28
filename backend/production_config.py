@@ -833,10 +833,9 @@ class ProductionConfig:
                 field="speaker.localLlmMode",
                 choices={"suggestion-only"},
             ),
-            local_llm_model=_choice(
+            local_llm_model=_nonempty_text(
                 raw_speaker.get("localLlmModel", "qwen3.5:9b"),
                 field="speaker.localLlmModel",
-                choices={"qwen3.5:9b"},
             ),
         )
         if speaker.high_margin_threshold <= speaker.low_margin_threshold:

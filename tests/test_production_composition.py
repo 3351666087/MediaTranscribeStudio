@@ -224,15 +224,17 @@ class ProductionCompositionTests(unittest.TestCase):
         ):
             ProductionConfig.load(self.config_path)
 
-    def test_retired_local_model_fails_closed(self) -> None:
+    def test_local_model_is_configurable(self) -> None:
         value = self.mapping()
-        value["speaker"]["localLlmModel"] = "qwen3.5:4b"
+        value["speaker"]["localLlmModel"] = "candidate-structural:14b"
         self.config_path.write_text(json.dumps(value), encoding="utf-8")
-        with self.assertRaisesRegex(
-            ProductionConfigError,
-            "speaker.localLlmModel",
-        ):
-            ProductionConfig.load(self.config_path)
+
+        config = ProductionConfig.load(self.config_path)
+
+        self.assertEqual(
+            config.speaker.local_llm_model,
+            "candidate-structural:14b",
+        )
 
     def test_pyannote_mode_and_model_must_agree(self) -> None:
         value = self.mapping(pyannote_mode="fallback")
@@ -456,13 +458,23 @@ class ProductionCompositionTests(unittest.TestCase):
             900,
         )
         request = SimpleNamespace(
-            business_config=SimpleNamespace(model="qwen3.5:9b"),
+            business_config=SimpleNamespace(
+                model="qwen3.5:9b",
+                translation_targets=(),
+            ),
             local_llm_endpoint="http://127.0.0.1:11434",
         )
         business_provider = service.kwargs["business_provider_factory"](request)
         semantic_provider = service.kwargs["semantic_provider_factory"](request)
+        semantic_orchestrator = service.kwargs[
+            "semantic_orchestrator_factory"
+        ](
+            request,
+            SimpleNamespace(raise_if_cancelled=lambda: None),
+        )
         self.assertEqual(business_provider.config.keep_alive, "10m")
         self.assertEqual(semantic_provider.config.keep_alive, "10m")
+        self.assertEqual(semantic_orchestrator.arbitrator.batch_size, 8)
         self.assertFalse(business_provider.config.release_on_close)
         self.assertFalse(semantic_provider.config.release_on_close)
 

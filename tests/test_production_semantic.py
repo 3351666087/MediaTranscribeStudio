@@ -87,31 +87,17 @@ def _request_response(lattice: dict) -> dict:
                 f"candidate-lattice:{lattice['latticeId']}",
                 f"candidate-group:{group['groupId']}",
             ]
-            if group["status"] == "available":
-                selections.append(
-                    {
-                        "groupId": group["groupId"],
-                        "rankedCandidateIds": [
-                            candidate["candidateId"]
-                            for candidate in group["candidates"]
-                            if candidate["selectionEligible"]
-                        ],
-                        "reasonCodes": ["AVAILABLE_EVIDENCE"],
-                        "evidenceRefs": refs,
-                    }
-                )
-            else:
-                requests.append(
-                    {
-                        "domain": domain["domain"],
-                        "groupId": group["groupId"],
-                        "scopeId": group["scopeId"],
-                        "requestKind": REQUEST_KIND[domain["domain"]],
-                        "minimumAlternativeCount": 2,
-                        "reasonCodes": ["INSUFFICIENT_ALTERNATIVES"],
-                        "evidenceRefs": refs,
-                    }
-                )
+            requests.append(
+                {
+                    "domain": domain["domain"],
+                    "groupId": group["groupId"],
+                    "scopeId": group["scopeId"],
+                    "requestKind": REQUEST_KIND[domain["domain"]],
+                    "minimumAlternativeCount": 2,
+                    "reasonCodes": ["SEMANTIC_REVIEW_REQUIRED"],
+                    "evidenceRefs": refs,
+                }
+            )
     return {
         "latticeId": lattice["latticeId"],
         "latticeSha256": lattice["latticeSha256"],
@@ -125,9 +111,17 @@ def test_production_registry_generates_all_five_real_evidence_domains(
 ) -> None:
     audio_path = tmp_path / "normalized.wav"
     audio_path.write_bytes(b"fixture-audio")
+    segment_audio_path = tmp_path / "separated-segment.wav"
+    segment_audio_path.write_bytes(b"fixture-separated-audio")
     output = tmp_path / "output"
     output.mkdir()
     document = _document(audio_path)
+    document["segments"][0]["evidence"]["preparation"].update(
+        {
+            "audioPath": str(segment_audio_path),
+            "canonicalAudioPath": str(audio_path),
+        }
+    )
     voice = build_voice_activity(
         job_id=document["jobId"],
         source_sha256=document["source"]["sha256"],
@@ -156,6 +150,11 @@ def test_production_registry_generates_all_five_real_evidence_domains(
             max_generated_tokens,
         ):
             self.calls += 1
+            assert prepared.audio_path == str(audio_path)
+            assert (
+                prepared.normalization_profile
+                == "mono-16khz-f32-v1"
+            )
             return [
                 AsrHypothesis(
                     window_id=window.window_id,
@@ -203,6 +202,7 @@ def test_production_registry_generates_all_five_real_evidence_domains(
             context,
         ):
             self.calls += 1
+            assert path == str(audio_path)
             turns = [
                 {
                     "startMs": 0,

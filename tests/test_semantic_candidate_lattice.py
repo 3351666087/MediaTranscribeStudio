@@ -20,6 +20,7 @@ from backend import (
     validate_semantic_suggestions_artifact,
 )
 from backend.asr_evidence import build_asr_candidate_set
+from backend.persistence import canonical_json_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,7 +153,7 @@ def _domain(lattice: dict, name: str) -> dict:
     return next(item for item in lattice["domains"] if item["domain"] == name)
 
 
-def test_document_lattice_is_stable_schema_valid_and_truthfully_partial() -> None:
+def test_document_lattice_is_stable_schema_valid_and_model_requestable() -> None:
     document = _document()
 
     first = build_semantic_candidate_lattice_from_document(document)
@@ -163,12 +164,10 @@ def test_document_lattice_is_stable_schema_valid_and_truthfully_partial() -> Non
     assert first["latticeId"] == (
         "semantic-lattice-" + first["latticeSha256"][:24]
     )
-    assert first["availability"]["allRequiredDomainsAvailable"] is False
-    assert _domain(first, "speech-disposition")["status"] == (
-        "candidate-domain-unavailable"
-    )
+    assert first["availability"]["allRequiredDomainsAvailable"] is True
+    assert _domain(first, "speech-disposition")["status"] == "available"
     assert _domain(first, "speaker-assignment")["status"] == "available"
-    assert _domain(first, "asr-text")["status"] == "partial"
+    assert _domain(first, "asr-text")["status"] == "available"
 
     schema = json.loads(
         (
@@ -179,7 +178,7 @@ def test_document_lattice_is_stable_schema_valid_and_truthfully_partial() -> Non
     Draft202012Validator(schema).validate(first)
 
 
-def test_missing_and_single_candidate_domains_report_unavailable() -> None:
+def test_missing_domains_are_unavailable_and_single_candidate_is_requestable() -> None:
     missing = build_semantic_candidate_lattice(
         source_media_sha256="a" * 64,
         transcript_sha256="b" * 64,
@@ -207,8 +206,94 @@ def test_missing_and_single_candidate_domains_report_unavailable() -> None:
     speech = _domain(derived, "speech-disposition")["groups"][0]
     assert speech["candidateCount"] == 1
     assert speech["eligibleCandidateCount"] == 1
-    assert speech["status"] == "candidate-domain-unavailable"
-    assert speech["unavailableReason"] == "single-eligible-candidate"
+    assert speech["status"] == "available"
+    assert speech["unavailableReason"] is None
+
+
+def test_document_lattice_reuses_embedded_full_pyannote_timelines() -> None:
+    document = _document()
+    turns = [
+        {
+            "startMs": 40,
+            "endMs": 1_960,
+            "localSpeaker": "SPEAKER_00",
+        }
+    ]
+    overlap = {
+        "provider": {
+            "id": "pyannote-community-1",
+            "version": "2.4.0",
+        },
+        "fullTimelineInference": {
+            "scope": "full-normalized-timeline",
+            "startMs": 0,
+            "endMs": 2_000,
+            "localSpeakerCount": 1,
+            "speakerTurns": turns,
+            "speakerTurnsSha256": canonical_json_sha256(turns),
+            "exclusiveSpeakerTurns": turns,
+            "exclusiveSpeakerTurnsSha256": canonical_json_sha256(turns),
+        },
+    }
+    document["segments"][0]["evidence"]["overlap"] = overlap
+
+    lattice = build_semantic_candidate_lattice_from_document(document)
+    timeline = _domain(
+        lattice,
+        "speaker-cardinality-timeline",
+    )["groups"][0]
+
+    assert timeline["status"] == "available"
+    assert {candidate["payload"]["speakerCount"] for candidate in timeline[
+        "candidates"
+    ]} == {1, 2}
+    pyannote = next(
+        candidate
+        for candidate in timeline["candidates"]
+        if candidate["payload"]["speakerCount"] == 1
+    )
+    assert pyannote["producers"][0]["systemId"] == "pyannote-community-1"
+
+
+def test_embedded_timeline_binds_normalized_persisted_turns() -> None:
+    document = _document()
+    turns = [
+        {
+            "startMs": 40,
+            "endMs": 1_960,
+            "localSpeaker": "SPEAKER_00",
+        }
+    ]
+    document["segments"][0]["evidence"]["overlap"] = {
+        "provider": {
+            "id": "pyannote-community-1",
+            "version": "2.4.0",
+        },
+        "fullTimelineInference": {
+            "scope": "full-normalized-timeline",
+            "startMs": 0,
+            "endMs": 2_000,
+            "localSpeakerCount": 1,
+            "speakerTurns": turns,
+            "speakerTurnsSha256": "f" * 64,
+            "exclusiveSpeakerTurns": turns,
+            "exclusiveSpeakerTurnsSha256": "e" * 64,
+        },
+    }
+
+    timeline = _domain(
+        build_semantic_candidate_lattice_from_document(document),
+        "speaker-cardinality-timeline",
+    )["groups"][0]
+    pyannote = next(
+        candidate
+        for candidate in timeline["candidates"]
+        if candidate["payload"]["speakerCount"] == 1
+    )
+
+    assert pyannote["producers"][0]["artifactSha256"] == (
+        canonical_json_sha256(turns)
+    )
 
 
 @pytest.mark.parametrize(
@@ -219,7 +304,7 @@ def test_missing_and_single_candidate_domains_report_unavailable() -> None:
             "sourceMediaSha256",
             "f" * 64,
         ),
-        lambda value: value["domains"][0].__setitem__("status", "available"),
+        lambda value: value["domains"][0].__setitem__("status", "unavailable"),
         lambda value: value["domains"][0]["groups"][0].__setitem__(
             "currentCandidateId",
             "candidate-" + "f" * 24,
@@ -252,7 +337,7 @@ def test_unbound_legacy_nbest_is_visible_but_cannot_authorize_repair() -> None:
 
     assert group["candidateCount"] == 2
     assert group["eligibleCandidateCount"] == 1
-    assert group["status"] == "candidate-domain-unavailable"
+    assert group["status"] == "available"
     alternative = next(
         item
         for item in group["candidates"]

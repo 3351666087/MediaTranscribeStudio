@@ -29,6 +29,7 @@ from tools.run_production_smoke import (
     build_start_payload,
     calculate_job_hard_timeout_seconds,
 )
+from backend.persistence import read_json_strict
 
 
 _RECOVERABLE_SESSION_FAILURES = frozenset(
@@ -244,6 +245,53 @@ def _aborted_session_error(result: SmokeResult) -> Mapping[str, object] | None:
     return session_error if isinstance(session_error, Mapping) else None
 
 
+def _semantic_composition_failure(
+    output: Path,
+    *,
+    translation_targets: Sequence[str],
+) -> str | None:
+    checkpoint_path = output / "checkpoint.v2.json"
+    if not checkpoint_path.is_file():
+        return "missing-checkpoint"
+    checkpoint = read_json_strict(checkpoint_path)
+    if not isinstance(checkpoint, Mapping):
+        return "invalid-checkpoint"
+    semantic = checkpoint.get("semantic")
+    if not isinstance(semantic, Mapping):
+        return "missing-semantic-checkpoint"
+    if semantic.get("mode") != "candidate-composition":
+        return "semantic-mode-is-not-candidate-composition"
+    if (
+        semantic.get("status") != "completed"
+        or semantic.get("autoApply") is not True
+    ):
+        return "semantic-composition-is-not-completed-and-auto-applied"
+    for field in ("artifactPath", "inputLatticePath", "arbitrationPath"):
+        value = semantic.get(field)
+        if not isinstance(value, str) or not Path(value).is_file():
+            return f"semantic-{field}-is-missing"
+    arbitration = read_json_strict(Path(str(semantic["arbitrationPath"])))
+    if not isinstance(arbitration, Mapping):
+        return "invalid-semantic-arbitration"
+    expected_targets = sorted(
+        {
+            target.strip().casefold()
+            for target in translation_targets
+            if target.strip()
+        }
+    )
+    actual_targets = sorted(
+        {
+            str(target).strip().casefold()
+            for target in arbitration.get("translationTargets", [])
+            if isinstance(target, str) and target.strip()
+        }
+    )
+    if actual_targets != expected_targets:
+        return "semantic-translation-targets-do-not-match"
+    return None
+
+
 def _run_recovering_batch(
     jobs: Sequence[BatchSmokeJob],
     *,
@@ -399,6 +447,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--translation-target", action="append", default=[])
     parser.add_argument("--summary", action="store_true")
     parser.add_argument(
+        "--require-semantic-composition",
+        action="store_true",
+        help=(
+            "fail a technically completed case unless its checkpoint proves "
+            "candidate-composition completed and auto-applied"
+        ),
+    )
+    parser.add_argument(
         "--reuse-worker",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -453,7 +509,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.results_root.mkdir(parents=True, exist_ok=True)
     args.worker_output_root.mkdir(parents=True, exist_ok=True)
     failures = 0
+    semantic_gate_failures: dict[str, str] = {}
+    semantic_gate_candidates: set[str] = set()
     batch_jobs: list[BatchSmokeJob] = []
+    selected_outputs: dict[str, Path] = {}
     for case_id in selected:
         row = available[case_id]
         source = args.manifest.parent / str(row["path"])
@@ -471,6 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifact_id = f"{base_artifact_id}-run{run_number}"
             run_number += 1
         output = args.worker_output_root / artifact_id
+        selected_outputs[artifact_id] = output
         logs_root = args.results_root
         raw_expected = row.get("expectedSpeakerCount")
         expected_speaker_count = (
@@ -549,6 +609,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if return_code != 0:
                 failures += 1
+            elif args.require_semantic_composition:
+                semantic_gate_candidates.add(artifact_id)
+                failure = _semantic_composition_failure(
+                    output,
+                    translation_targets=args.translation_target,
+                )
+                if failure is not None:
+                    failures += 1
+                    semantic_gate_failures[case_id] = failure
     session_ids: tuple[str, ...] = ()
     planned_session_count = 0
     if batch_jobs:
@@ -602,7 +671,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             failures += sum(
                 result.status != "observed" for result in results
             )
+            semantic_gate_candidates.update(
+                str(result.job_id).removeprefix("sample-")
+                for result in results
+                if result.status == "observed"
+            )
         session_ids = tuple(observed_session_ids)
+        if args.require_semantic_composition:
+            for artifact_id in sorted(semantic_gate_candidates):
+                output = selected_outputs[artifact_id]
+                failure = _semantic_composition_failure(
+                    output,
+                    translation_targets=args.translation_target,
+                )
+                if failure is not None:
+                    failures += 1
+                    semantic_gate_failures[artifact_id] = failure
     recovery_session_count = max(
         0,
         len(session_ids) - planned_session_count,
@@ -625,6 +709,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "libraryId": resolved.get("libraryId"),
                 "selected": selected,
                 "failedCases": failures,
+                "semanticCompositionGate": {
+                    "required": args.require_semantic_composition,
+                    "failures": semantic_gate_failures,
+                },
                 "resultsRoot": str(args.results_root.resolve()),
                 "workerLifecycle": worker_lifecycle,
                 "workerSessionId": session_ids[0] if session_ids else None,

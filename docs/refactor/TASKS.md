@@ -138,7 +138,7 @@
 - [x] 在最终聚类前加入基于 FunASR 字词/句子时间、停顿、标点和多尺度声学子窗的细粒度 turn candidate。
 - [x] 在长窗口内部检测说话人变化点，禁止把明显混合说话窗口直接绑定为单一角色。
 - [x] 对短 turn candidate 执行 CAM++ 嵌入、Dynamic-N 聚类、时间平滑、邻接合并和过分裂/欠分裂校正。
-- [ ] 将 ERes2NetV2 改为模型常驻、批量推理和仅难例升级，消除逐片约 40 秒级开销。
+- [x] 将 ERes2NetV2 改为模型常驻、批量推理和仅难例升级，消除逐片约 40 秒级开销。生产 verifier 只对 `maxSecondaryFraction` 预算内且未被 overlap/human-lock/high-margin 保护的难例运行，候选及去重后的 top-2 speaker reference clips 在一个 `review_batch` 中只调用一次 embedding pipeline；同一 stage/worker verifier 复用同一模型实例，退出或资源错误后显式释放。新增可重复、哈希绑定且不保存逐字内容的 `tools/benchmark_eres2netv2_residency.py`：本机 MPS 对公开 VoxConverse N=2 音频的 6 个固定 2.5 秒片段，冷加载加首批总计 `2.946204416 秒`（`0.491034069 秒/片`），同一 resident pipeline 的 3 次热批量为 `0.165256417 / 0.167215625 / 0.166034542 秒`，中位 `0.027672424 秒/片`；192 维向量数 `6/6`、实例复用和最终释放均通过。报告 file/canonical SHA-256 为 `049c520608ff6fabe7375a7590e39d41ded995dd23ac510e248cb320161ecdaf` / `a2fafc84d21365183c1fe8967fe32753db55812ba1901e9c91a469a838ed4938`，位于 `/Users/null3351/Library/Application Support/MediaTranscribeStudio/evidence/eres2netv2-residency-20260728/report.v1.json`；聚焦回归 `14 passed, 3 subtests passed`，全仓 `1227 passed, 21 skipped, 164 subtests passed`，25 份契约、编译和严格差异检查通过。存储审计 `actionRequired=false`，没有 retired/unmanaged/missing 模型或工件，可用空间 `28,059,025,408 bytes`。本项只证明常驻、批量和难例路由效率，不证明 ERes2NetV2 speaker decision 已达到统一后语义质量阈值。
 - [x] 增强 overlap/change detector；本地可用时提供受控 pyannote 回退，并保留离线和许可证证据。
 - [x] 声学候选稳定后再执行问答关系、称谓、轮次和上下文语义仲裁。
 - [x] 为原文语义修正保存 evidence、理由、置信度和 human lock；禁止静默覆盖不可变 raw ASR。

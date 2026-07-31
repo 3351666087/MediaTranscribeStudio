@@ -118,18 +118,29 @@ class ProductionSemanticCandidateRegistry(
                     "semantic challengers require preparation evidence",
                 )
             audio_path = preparation.get("audioPath")
+            canonical_audio_path = preparation.get("canonicalAudioPath")
+            if not isinstance(canonical_audio_path, str):
+                canonical_audio_path = audio_path
             profile = preparation.get("normalizationProfile")
             if not isinstance(audio_path, str) or not Path(audio_path).is_file():
                 raise WorkerError(
                     "PREPARED_AUDIO_MISSING",
                     "semantic challengers require persisted normalized audio",
                 )
+            if (
+                not isinstance(canonical_audio_path, str)
+                or not Path(canonical_audio_path).is_file()
+            ):
+                raise WorkerError(
+                    "PREPARED_AUDIO_MISSING",
+                    "semantic challengers require the canonical normalized timeline",
+                )
             if not isinstance(profile, str) or not profile:
                 raise WorkerError(
                     "SEMANTIC_CHALLENGER_INPUT_INVALID",
                     "semantic challengers require a normalization profile",
                 )
-            audio_paths.add(audio_path)
+            audio_paths.add(canonical_audio_path)
             profiles.add(profile)
         if len(audio_paths) != 1 or len(profiles) != 1:
             raise WorkerError(

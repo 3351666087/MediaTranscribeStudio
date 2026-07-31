@@ -16,6 +16,7 @@ from backend.business_processing import (
     BusinessProcessingConfig,
     BusinessProcessingRunner,
     _variant_input_hash,
+    validate_translation_text,
 )
 from backend.errors import JobCancelled, WorkerError
 from backend.local_llm import MappingLocalLLMProvider
@@ -810,6 +811,50 @@ def test_translation_retries_when_protected_literals_are_dropped(
     assert "api" in prompts[1]
     output = _read_json(tmp_path / "business" / "translation-zh-CN.v1.json")
     assert output["segments"][0]["text"] == "在 2026-07-31 部署 API v2。"
+
+
+def test_translation_accepts_asr_spaced_digit_equivalence() -> None:
+    assert validate_translation_text(
+        source_text="成功率は 1 0 0 % ではありません",
+        translated_text="成功率并非 100%",
+        source_language="ja",
+        target_language="zh",
+        label="translation",
+    ) == "成功率并非 100%"
+
+
+def test_translation_does_not_merge_two_independent_digits() -> None:
+    with pytest.raises(WorkerError, match="dropped protected semantic literals"):
+        validate_translation_text(
+            source_text="Options 1 2 remain available",
+            translated_text="选项 12 仍然可用",
+            source_language="en",
+            target_language="zh",
+            label="translation",
+        )
+
+
+def test_translation_rejects_wrong_target_script_after_source_script_is_gone() -> None:
+    with pytest.raises(WorkerError) as captured:
+        validate_translation_text(
+            source_text="배우가 마지막에 말한 한마디",
+            translated_text="сказанное актером оставило странное впечатление",
+            source_language="ko",
+            target_language="zh-CN",
+            label="translation",
+        )
+
+    assert captured.value.details["guard"] == "target-script"
+
+
+def test_translation_accepts_target_script_with_protected_latin_literal() -> None:
+    assert validate_translation_text(
+        source_text="Pay with PayPal",
+        translated_text="使用 PayPal 付款",
+        source_language="en",
+        target_language="zh-CN",
+        label="translation",
+    ) == "使用 PayPal 付款"
 
 
 def test_translation_rejects_punctuation_only_output_for_lexical_source(

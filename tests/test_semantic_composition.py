@@ -35,6 +35,7 @@ from backend import (
 from backend.persistence import canonical_json_sha256, read_json_strict
 from backend.asr_evidence import build_asr_candidate_set
 from backend.errors import WorkerError
+from backend.semantic_composition import _bounded_transcript_context
 from backend.voice_activity import build_voice_activity
 
 
@@ -568,6 +569,52 @@ def _artifact(lattice: dict, response: dict) -> dict:
     )
 
 
+def _positional_response(
+    lattice: dict,
+    *,
+    target_group_ids: list[str],
+    selected_by_group: dict[str, str | None],
+    translation_texts: list[str | None] | None = None,
+) -> dict:
+    groups = {
+        group["groupId"]: group
+        for domain in lattice["domains"]
+        for group in domain["groups"]
+    }
+    choices = []
+    for group_id in target_group_ids:
+        selected = selected_by_group[group_id]
+        if selected is None:
+            choices.append(-1)
+            continue
+        eligible = [
+            candidate["candidateId"]
+            for candidate in groups[group_id]["candidates"]
+            if candidate["selectionEligible"] is True
+        ]
+        choices.append(eligible.index(selected))
+    response: dict = {"choiceIndexes": choices}
+    if translation_texts is not None:
+        response["translationTexts"] = translation_texts
+    return response
+
+
+def _prompt_target_group_ids(lattice: dict, prompt: dict) -> list[str]:
+    by_domain_scope = {
+        (domain["domain"], group["scopeId"]): group["groupId"]
+        for domain in lattice["domains"]
+        for group in domain["groups"]
+    }
+    target_groups = sorted(
+        prompt["candidateLattice"]["targetGroups"],
+        key=lambda item: item["groupPosition"],
+    )
+    return [
+        by_domain_scope[(group["domain"], group["scopeId"])]
+        for group in target_groups
+    ]
+
+
 def test_job_arbitration_and_composer_apply_all_high_authority_domains() -> None:
     document = _document()
     lattice = _full_lattice(document)
@@ -602,15 +649,24 @@ def test_job_runner_uses_one_complete_high_authority_response() -> None:
     document = _document()
     lattice = _full_lattice(document)
     response = _ready_response(lattice)
+    selected_by_group = {
+        selection["groupId"]: selection["rankedCandidateIds"][0]
+        for selection in response["selections"]
+    }
 
     class CapturingProvider(MappingLocalLLMProvider):
         def __init__(self) -> None:
-            super().__init__([response])
+            super().__init__([])
             self.requests: list[dict] = []
 
         def generate_json(self, **kwargs):
             self.requests.append(dict(kwargs))
-            return super().generate_json(**kwargs)
+            prompt = json.loads(kwargs["user_prompt"])
+            return _positional_response(
+                lattice,
+                target_group_ids=_prompt_target_group_ids(lattice, prompt),
+                selected_by_group=selected_by_group,
+            )
 
     provider = CapturingProvider()
 
@@ -623,7 +679,7 @@ def test_job_runner_uses_one_complete_high_authority_response() -> None:
     ).run(document, candidate_lattice=lattice)
 
     assert artifact["status"] == "ready-to-compose"
-    assert artifact["promptVersion"] == "semantic-job-candidate-arbitration-v6"
+    assert artifact["promptVersion"] == "semantic-job-candidate-arbitration-v8"
     assert len(provider.requests) == 1
     request = provider.requests[0]
     assert "total speaker count and complete timeline" in request["system_prompt"]
@@ -639,6 +695,12 @@ def test_job_runner_uses_one_complete_high_authority_response() -> None:
         is False
     )
     assert user_prompt["outputRules"]["requireCrossDomainConsistency"] is True
+    assert user_prompt["decisionProtocol"] == {
+        "choiceIndexesAlignWithGroupPositions": True,
+        "candidateChoiceField": "choiceIndex",
+        "requestDefaultChallengerIndex": -1,
+    }
+    assert request["response_schema"]["required"] == ["choiceIndexes"]
 
 
 def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> None:
@@ -663,6 +725,7 @@ def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> No
         def generate_json(self, **kwargs):
             self.requests.append(dict(kwargs))
             prompt = json.loads(kwargs["user_prompt"])
+            target_group_ids = _prompt_target_group_ids(lattice, prompt)
             return {
                 "latticeId": lattice["latticeId"],
                 "latticeSha256": lattice["latticeSha256"],
@@ -673,7 +736,7 @@ def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> No
                         "selectedCandidateId": selection_by_group[group_id],
                         "requestKind": None,
                     }
-                    for group_id in prompt["targetGroupIds"]
+                    for group_id in target_group_ids
                 ],
             }
 
@@ -696,7 +759,7 @@ def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> No
     assert prompts[0]["targetScopeIds"] == ["media"]
     assert {
         group_domain[group_id]
-        for group_id in prompts[0]["targetGroupIds"]
+        for group_id in _prompt_target_group_ids(lattice, prompts[0])
     } == {
         "speech-disposition",
         "speaker-cardinality-timeline",
@@ -706,7 +769,7 @@ def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> No
         assert len(prompt["targetScopeIds"]) == 1
         assert {
             group_domain[group_id]
-            for group_id in prompt["targetGroupIds"]
+            for group_id in _prompt_target_group_ids(lattice, prompt)
         } == {
             "speaker-assignment",
             "language-span",
@@ -728,6 +791,36 @@ def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> No
         )
 
 
+def test_semantic_transcript_context_keeps_targets_and_bounds_global_text() -> None:
+    segments = [
+        {"segmentId": f"segment-{index}", "text": str(index)}
+        for index in range(20)
+    ]
+
+    local, local_policy = _bounded_transcript_context(
+        segments,
+        scope_ids=["segment:segment-10"],
+    )
+    global_sample, global_policy = _bounded_transcript_context(
+        segments,
+        scope_ids=["media"],
+    )
+
+    assert [item["segmentId"] for item in local] == [
+        "segment-8",
+        "segment-9",
+        "segment-10",
+        "segment-11",
+        "segment-12",
+    ]
+    assert local_policy["allTargetSegmentsIncluded"] is True
+    assert local_policy["mode"] == "target-segments-with-adjacent-context"
+    assert len(global_sample) == 8
+    assert global_sample[0]["segmentId"] == "segment-0"
+    assert global_sample[-1]["segmentId"] == "segment-19"
+    assert global_policy["mode"] == "uniform-global-sample"
+
+
 def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
     tmp_path: Path,
 ) -> None:
@@ -744,49 +837,36 @@ def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
         for group in groups.values()
         for candidate in group["candidates"]
     }
-    compact_decisions = [
-        {
-            "groupId": selection["groupId"],
-            "action": "select",
-            "selectedCandidateId": selection["rankedCandidateIds"][0],
-            "requestKind": None,
-        }
+    selected_by_group = {
+        selection["groupId"]: selection["rankedCandidateIds"][0]
         for selection in ready["selections"]
-    ]
+    }
     translated_text = {
         "segment-1": "你好",
         "segment-2": "世界",
     }
-    translations = []
-    for decision in compact_decisions:
-        group = groups[decision["groupId"]]
-        if group["domain"] != "asr-text":
-            continue
-        candidate = candidates[decision["selectedCandidateId"]]
-        payload = candidate["payload"]
-        translations.append(
-            {
-                "segmentId": payload["segmentId"],
-                "selectedCandidateId": candidate["candidateId"],
-                "targetLanguage": "zh-CN",
-                "text": translated_text[payload["segmentId"]],
-            }
-        )
-    response = {
-        "latticeId": lattice["latticeId"],
-        "latticeSha256": lattice["latticeSha256"],
-        "decisions": compact_decisions,
-        "translations": translations,
-    }
-
     class CapturingProvider(MappingLocalLLMProvider):
         def __init__(self) -> None:
-            super().__init__([response])
+            super().__init__([])
             self.requests: list[dict] = []
 
         def generate_json(self, **kwargs):
             self.requests.append(dict(kwargs))
-            return super().generate_json(**kwargs)
+            prompt = json.loads(kwargs["user_prompt"])
+            target_group_ids = _prompt_target_group_ids(lattice, prompt)
+            translation_texts = []
+            for slot in prompt["translationSlots"]:
+                group_id = target_group_ids[slot["groupPosition"]]
+                selected = candidates[selected_by_group[group_id]]
+                translation_texts.append(
+                    translated_text[selected["payload"]["segmentId"]]
+                )
+            return _positional_response(
+                lattice,
+                target_group_ids=target_group_ids,
+                selected_by_group=selected_by_group,
+                translation_texts=translation_texts,
+            )
 
     semantic_provider = CapturingProvider()
     arbitration = SemanticJobArbitrationRunner(
@@ -803,13 +883,25 @@ def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
     prompt = json.loads(request["user_prompt"])
     assert prompt["translationTargets"] == ["zh-CN"]
     assert prompt["outputRules"]["translateSelectedAsrInSameResponse"] is True
-    assert request["response_schema"]["properties"]["latticeId"] == {
-        "const": lattice["latticeId"]
+    assert request["response_schema"]["required"] == [
+        "choiceIndexes",
+        "translationTexts",
+    ]
+    assert set(request["response_schema"]["properties"]) == {
+        "choiceIndexes",
+        "translationTexts",
     }
-    translation_properties = request["response_schema"]["properties"][
-        "translations"
-    ]["items"]["properties"]
-    assert "sourceTextSha256" not in translation_properties
+    assert prompt["translationSlots"]
+    assert all(
+        set(slot) == {
+            "groupPosition",
+            "targetLanguage",
+            "sourceCandidates",
+        }
+        and slot["targetLanguage"] == "zh-CN"
+        and slot["sourceCandidates"]
+        for slot in prompt["translationSlots"]
+    )
     assert arbitration["translationTargets"] == ["zh-CN"]
     assert {
         (item["segmentId"], item["text"])
@@ -858,7 +950,7 @@ def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
     )
     translation = json.loads(translation_path.read_text(encoding="utf-8"))
     assert translation["promptVersion"] == (
-        "semantic-job-candidate-arbitration-v6"
+        "semantic-job-candidate-arbitration-v8"
     )
     assert [item["text"] for item in translation["segments"]] == [
         "你好",
@@ -872,6 +964,180 @@ def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
     assert manifest["completeness"]["translationExecution"] == {
         "zh-CN": "semantic-co-generation"
     }
+
+
+def test_positional_response_rejects_out_of_range_choice() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+
+    class InvalidProvider(MappingLocalLLMProvider):
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            return {
+                "choiceIndexes": [99] * prompt["targetGroupCount"]
+            }
+
+    with pytest.raises(WorkerError) as captured:
+        SemanticJobArbitrationRunner(
+            provider=InvalidProvider([]),
+            model="fixture-9b",
+            context_tokens=32_768,
+            output_tokens=4_096,
+            batch_size=32,
+            max_batch_attempts=1,
+        ).run(document, candidate_lattice=lattice)
+
+    assert captured.value.code == "SEMANTIC_JOB_PROVIDER_FAILED"
+    assert captured.value.details["attemptDiagnostics"][0][
+        "validationFailureCode"
+    ] == "STRICT_JSON_OR_SCHEMA_INVALID"
+
+
+def test_positional_response_requires_every_translation_slot() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    selected_by_group = {
+        selection["groupId"]: selection["rankedCandidateIds"][0]
+        for selection in _ready_response(lattice)["selections"]
+    }
+
+    class MissingTranslationProvider(MappingLocalLLMProvider):
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            return _positional_response(
+                lattice,
+                target_group_ids=_prompt_target_group_ids(lattice, prompt),
+                selected_by_group=selected_by_group,
+            )
+
+    with pytest.raises(WorkerError) as captured:
+        SemanticJobArbitrationRunner(
+            provider=MissingTranslationProvider([]),
+            model="fixture-9b",
+            context_tokens=32_768,
+            output_tokens=4_096,
+            batch_size=32,
+            max_batch_attempts=1,
+            translation_targets=("zh-CN",),
+        ).run(document, candidate_lattice=lattice)
+
+    diagnostic = captured.value.details["attemptDiagnostics"][0]
+    assert diagnostic["validationFailureCode"] == "TRANSLATION_INVALID"
+    assert diagnostic["responseFields"] == ["choiceIndexes"]
+
+
+def test_positional_response_discards_unbound_translation_for_candidate_request() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    selected_by_group = {
+        selection["groupId"]: selection["rankedCandidateIds"][0]
+        for selection in _ready_response(lattice)["selections"]
+    }
+
+    class InvalidRequestTranslationProvider(MappingLocalLLMProvider):
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            response = _positional_response(
+                lattice,
+                target_group_ids=_prompt_target_group_ids(lattice, prompt),
+                selected_by_group=selected_by_group,
+                translation_texts=[
+                    "占位译文" for _slot in prompt["translationSlots"]
+                ],
+            )
+            response["choiceIndexes"][
+                prompt["translationSlots"][0]["groupPosition"]
+            ] = -1
+            return response
+
+    artifact = SemanticJobArbitrationRunner(
+        provider=InvalidRequestTranslationProvider([]),
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=32,
+        max_batch_attempts=1,
+        translation_targets=("zh-CN",),
+    ).run(document, candidate_lattice=lattice)
+
+    assert artifact["status"] == "candidate-generation-required"
+    assert len(artifact["translations"]) == 1
+
+
+def test_positional_same_language_translation_uses_null_and_host_copy() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    selected_by_group = {
+        selection["groupId"]: selection["rankedCandidateIds"][0]
+        for selection in _select_current_response(lattice)["selections"]
+    }
+
+    class SameLanguageProvider(MappingLocalLLMProvider):
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            return _positional_response(
+                lattice,
+                target_group_ids=_prompt_target_group_ids(lattice, prompt),
+                selected_by_group=selected_by_group,
+                translation_texts=[
+                    "host-discarded" for _slot in prompt["translationSlots"]
+                ],
+            )
+
+    artifact = SemanticJobArbitrationRunner(
+        provider=SameLanguageProvider([]),
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=32,
+        translation_targets=("en",),
+    ).run(document, candidate_lattice=lattice)
+
+    assert {
+        (item["segmentId"], item["text"]) for item in artifact["translations"]
+    } == {
+        ("segment-1", "Hello"),
+        ("segment-2", "World"),
+    }
+
+
+def test_positional_translation_retry_receives_missing_protected_literals() -> None:
+    document = _document()
+    for field in ("rawText", "normalizedText", "displayText"):
+        document["segments"][0][field] = "Version 2"
+    lattice = build_semantic_candidate_lattice_from_document(document)
+
+    class LiteralRetryProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            return {
+                "choiceIndexes": [0] * prompt["targetGroupCount"],
+                "translationTexts": (
+                    ["版本 2", "世界"]
+                    if "correction" in prompt
+                    else ["版本", "世界"]
+                ),
+            }
+
+    provider = LiteralRetryProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=32,
+        translation_targets=("zh-CN",),
+    ).run(document, candidate_lattice=lattice)
+
+    assert artifact["status"] == "ready-to-compose"
+    assert provider.prompts[1]["correction"][
+        "translationValidationDetails"
+    ] == {"missingProtectedLiterals": ["2"]}
 
 
 def test_job_runner_retries_one_invalid_batch_with_fixed_feedback() -> None:
@@ -922,7 +1188,7 @@ def test_job_runner_retries_one_invalid_batch_with_fixed_feedback() -> None:
         "validationFailureCode": "LATTICE_BINDING_INVALID",
         "requiredLatticeId": lattice["latticeId"],
         "requiredLatticeSha256": lattice["latticeSha256"],
-        "requiredTargetGroupIds": first_prompt["targetGroupIds"],
+        "requiredTargetGroupCount": first_prompt["targetGroupCount"],
     }
     assert "previousResponse" not in retry_prompt
 
@@ -1089,12 +1355,13 @@ def test_translation_retry_supplies_selected_candidate_bindings() -> None:
         if group["domain"] != "asr-text":
             continue
         selected = candidates[decision["selectedCandidateId"]]
+        translated_text = ("第一段译文", "第二段译文")[len(translations)]
         translations.append(
             {
                 "segmentId": selected["payload"]["segmentId"],
                 "selectedCandidateId": selected["candidateId"],
                 "targetLanguage": "zh-CN",
-                "text": "译文-" + selected["payload"]["segmentId"],
+                "text": translated_text,
             }
         )
     invalid_translations = copy.deepcopy(translations)
@@ -1364,7 +1631,8 @@ def test_runner_rearbitrates_unchanged_groups_when_cross_domain_lattice_changes(
     )
 
     assert artifact["metrics"]["selectedGroupCount"] == 8
-    assert set(json.loads(provider.requests[0]["user_prompt"])["targetGroupIds"]) == {
+    first_prompt = json.loads(provider.requests[0]["user_prompt"])
+    assert set(_prompt_target_group_ids(extended, first_prompt)) == {
         selection["groupId"] for selection in complete["selections"]
     }
     selected = {

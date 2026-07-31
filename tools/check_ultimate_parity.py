@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 
 SCHEMA_VERSION = "1.0.0"
@@ -44,11 +44,13 @@ DEFAULT_EXCLUDED_PARTS = {
     ".git",
     ".codex",
     ".pytest_cache",
+    ".runtime_cache",
     "__pycache__",
     "node_modules",
     "dist",
     "target",
 }
+_EXCLUDED_PART_PREFIXES = (".git.corrupt-backup-",)
 REAL_MEDIA_ARTIFACT_CONTRACTS: dict[str, dict[str, str]] = {
     "transcript": {
         "extension": ".json",
@@ -1341,6 +1343,34 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
+def _iter_repository_files(
+    root: Path,
+    *,
+    excluded_parts: set[str],
+) -> Iterator[Path]:
+    """Yield files without descending into generated or backup directory trees."""
+
+    if root.is_file():
+        yield root
+        return
+    if not root.exists():
+        return
+    for directory, names, filenames in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+    ):
+        names[:] = sorted(
+            name
+            for name in names
+            if name not in excluded_parts
+            and not name.startswith(_EXCLUDED_PART_PREFIXES)
+        )
+        current = Path(directory)
+        for filename in sorted(filenames):
+            yield current / filename
+
+
 def _repo_check(repo_root: Path, check: Mapping[str, Any]) -> dict[str, Any]:
     check_id = str(check["id"])
     check_type = str(check["type"])
@@ -1397,8 +1427,11 @@ def _repo_check(repo_root: Path, check: Mapping[str, Any]) -> dict[str, Any]:
         elif check_type == "readmes_english":
             excluded = set(check.get("excludeParts", [])) | DEFAULT_EXCLUDED_PARTS
             violations: list[str] = []
-            for path in sorted(repo_root.rglob("README*")):
-                if not path.is_file() or any(part in excluded for part in path.parts):
+            for path in _iter_repository_files(
+                repo_root,
+                excluded_parts=excluded,
+            ):
+                if not path.name.startswith("README"):
                     continue
                 try:
                     text = _read_text(path)
@@ -1417,12 +1450,12 @@ def _repo_check(repo_root: Path, check: Mapping[str, Any]) -> dict[str, Any]:
             violations: list[dict[str, Any]] = []
             for root_value in check["roots"]:
                 root = _resolve_under(repo_root, str(root_value))
-                candidates = [root] if root.is_file() else root.rglob("*") if root.exists() else []
-                for path in candidates:
+                for path in _iter_repository_files(
+                    root,
+                    excluded_parts=excluded,
+                ):
                     if (
-                        not path.is_file()
-                        or any(part in excluded for part in path.parts)
-                        or len(violations) >= 100
+                        len(violations) >= 100
                     ):
                         continue
                     try:

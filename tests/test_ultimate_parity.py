@@ -71,6 +71,42 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     )
 
 
+def test_repository_checks_prune_generated_and_git_backup_trees(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "README.md").write_text("English only\n", encoding="utf-8")
+    for directory in (
+        tmp_path / ".runtime_cache",
+        tmp_path / ".git.corrupt-backup-20260726",
+    ):
+        directory.mkdir()
+        (directory / "README-private.md").write_text(
+            "不应扫描\n",
+            encoding="utf-8",
+        )
+        (directory / "generated.txt").write_text(
+            "forbidden-generated-marker\n",
+            encoding="utf-8",
+        )
+
+    readme = parity._repo_check(
+        tmp_path,
+        {"id": "readmes", "type": "readmes_english"},
+    )
+    patterns = parity._repo_check(
+        tmp_path,
+        {
+            "id": "patterns",
+            "type": "text_patterns_absent",
+            "roots": ["."],
+            "patterns": ["forbidden-generated-marker"],
+        },
+    )
+
+    assert readme["passed"] is True
+    assert patterns["passed"] is True
+
+
 def _artifact_for_role(
     attestation: dict[str, Any], role: str
 ) -> dict[str, Any]:

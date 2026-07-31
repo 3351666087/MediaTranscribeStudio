@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 
 import pytest
 
@@ -42,6 +44,35 @@ class _RecordingOpener:
         self.requests.append(request)
         self.timeouts.append(timeout)
         return _FakeResponse(self.body)
+
+
+class _RejectingOpener:
+    def open(self, request: object, *, timeout: float) -> _FakeResponse:
+        del timeout
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "error": json.dumps(
+                            {
+                                "error": {
+                                    "code": 400,
+                                    "message": (
+                                        "Failed to initialize samplers: "
+                                        "failed to parse grammar"
+                                    ),
+                                    "type": "invalid_request_error",
+                                }
+                            }
+                        )
+                    }
+                ).encode("utf-8")
+            ),
+        )
 
 
 def _envelope(
@@ -191,6 +222,36 @@ def test_worker_scoped_provider_release_does_not_unload(
     assert opener.calls == 0
 
 
+def test_stage_scoped_provider_can_reload_after_intermediate_unload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, opener = _provider_with_body(
+        monkeypatch,
+        _envelope({"answer": "ok"}, done=True),
+        config=LocalLLMConfig(
+            model="round-model",
+            keep_alive="5m",
+            release_on_close=True,
+        ),
+    )
+
+    for _ in range(2):
+        assert provider.generate_json(
+            system_prompt="system",
+            user_prompt="user",
+            model="round-model",
+        ) == {"answer": "ok"}
+        provider.release_resources()
+        provider.release_resources()
+
+    assert [request.full_url for request in opener.requests] == [
+        "http://127.0.0.1:11434/api/chat",
+        "http://127.0.0.1:11434/api/generate",
+        "http://127.0.0.1:11434/api/chat",
+        "http://127.0.0.1:11434/api/generate",
+    ]
+
+
 def test_release_on_close_must_be_boolean() -> None:
     with pytest.raises(ValueError, match="release_on_close"):
         LocalLLMConfig(release_on_close=1)  # type: ignore[arg-type]
@@ -239,13 +300,25 @@ def test_response_schema_mismatch_fails_closed_and_valid_output_is_accepted(
         monkeypatch,
         _envelope({"answer": 7}, done=True),
     )
-    with pytest.raises(LocalLLMError, match="failed response schema"):
+    with pytest.raises(
+        LocalLLMError,
+        match="failed response schema",
+    ) as captured:
         invalid_provider.generate_json(
             system_prompt="system",
             user_prompt="user",
             model=invalid_provider.config.model,
             response_schema=schema,
         )
+    assert captured.value.diagnostics == {
+        "failureStage": "response-schema",
+        "responseFields": ["answer"],
+        "decisionCount": None,
+        "translationCount": None,
+        "schemaErrorPath": "$.answer",
+        "schemaValidator": "type",
+        "responseContentPersisted": False,
+    }
     assert invalid_opener.calls == 1
 
     valid_provider, valid_opener = _provider_with_body(
@@ -259,6 +332,40 @@ def test_response_schema_mismatch_fails_closed_and_valid_output_is_accepted(
         response_schema=schema,
     ) == {"answer": "ok"}
     assert valid_opener.calls == 1
+
+
+def test_http_schema_grammar_rejection_is_classified_without_raw_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = _RejectingOpener()
+    monkeypatch.setattr(
+        "backend.local_llm.urllib.request.build_opener",
+        lambda *handlers: opener,
+    )
+    provider = OllamaLocalProvider()
+
+    with pytest.raises(
+        LocalLLMError,
+        match="request was rejected",
+    ) as captured:
+        provider.generate_json(
+            system_prompt="system",
+            user_prompt="user",
+            model=provider.config.model,
+            response_schema={
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+            },
+        )
+
+    assert captured.value.diagnostics == {
+        "failureStage": "transport-http",
+        "httpStatus": 400,
+        "providerErrorCode": 400,
+        "providerErrorType": "invalid_request_error",
+        "providerErrorCategory": "schema-grammar-initialization",
+        "responseContentPersisted": False,
+    }
 
 
 def test_invalid_response_schema_is_rejected_before_transport(

@@ -11,7 +11,7 @@ from backend.semantic_composition import (
     build_semantic_composition,
     build_semantic_job_arbitration,
 )
-from tests.test_semantic_composition import (
+from test_semantic_composition import (
     _document,
     _full_lattice,
     _ready_response,

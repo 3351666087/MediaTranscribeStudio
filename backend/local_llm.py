@@ -36,6 +36,15 @@ from .errors import JobCancelled
 class LocalLLMError(RuntimeError):
     """Raised when a local provider cannot produce a valid JSON response."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+
 
 class LocalLLMContextWindowError(LocalLLMError):
     """Raised before transport when a request cannot fit the model context."""
@@ -306,8 +315,23 @@ def _validate_response_against_schema(
     location = "$"
     for part in error.absolute_path:
         location += f"[{part}]" if isinstance(part, int) else f".{part}"
+    decisions = value.get("decisions")
+    translations = value.get("translations")
     raise LocalLLMError(
-        f"local LLM output failed response schema at {location}: {error.message}"
+        f"local LLM output failed response schema at {location}: {error.message}",
+        diagnostics={
+            "failureStage": "response-schema",
+            "responseFields": sorted(str(key) for key in value),
+            "decisionCount": (
+                len(decisions) if isinstance(decisions, list) else None
+            ),
+            "translationCount": (
+                len(translations) if isinstance(translations, list) else None
+            ),
+            "schemaErrorPath": location,
+            "schemaValidator": str(error.validator),
+            "responseContentPersisted": False,
+        },
     )
 
 
@@ -347,6 +371,52 @@ def _assert_complete_generation(
         raise LocalLLMError(
             "local LLM provider exhausted the structured-output token budget"
         )
+
+
+def _http_error_diagnostics(exc: urllib.error.HTTPError) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "failureStage": "transport-http",
+        "httpStatus": int(exc.code),
+        "responseContentPersisted": False,
+    }
+    try:
+        body = exc.read(16_384).decode("utf-8", errors="strict")
+        envelope = parse_strict_json_object(body)
+        error: Any = envelope.get("error")
+        if isinstance(error, str):
+            try:
+                error = parse_strict_json_object(error)
+            except LocalLLMError:
+                error = None
+        if isinstance(error, Mapping) and isinstance(
+            error.get("error"),
+            Mapping,
+        ):
+            error = error["error"]
+        if isinstance(error, Mapping):
+            code = error.get("code")
+            if (
+                not isinstance(code, bool)
+                and isinstance(code, int)
+                and code >= 0
+            ):
+                diagnostics["providerErrorCode"] = code
+            error_type = error.get("type")
+            if isinstance(error_type, str) and error_type:
+                diagnostics["providerErrorType"] = error_type[:100]
+            message = error.get("message")
+            if isinstance(message, str):
+                normalized = message.casefold()
+                if (
+                    "initialize samplers" in normalized
+                    and "parse grammar" in normalized
+                ):
+                    diagnostics["providerErrorCategory"] = (
+                        "schema-grammar-initialization"
+                    )
+    except (LocalLLMError, UnicodeError, OSError):
+        pass
+    return diagnostics
 
 
 class OllamaLocalProvider:
@@ -444,6 +514,8 @@ class OllamaLocalProvider:
         cancellation_check: Any = None,
     ) -> Mapping[str, Any]:
         _check_cancelled(cancellation_check)
+        with self._release_lock:
+            self._released = False
         selected_model = model.strip() or self.config.model
         if selected_model != self.config.model:
             raise LocalLLMError(
@@ -524,6 +596,11 @@ class OllamaLocalProvider:
                 body = response.read().decode("utf-8", errors="strict")
         except LocalLLMError:
             raise
+        except urllib.error.HTTPError as exc:
+            raise LocalLLMError(
+                "loopback local LLM request was rejected",
+                diagnostics=_http_error_diagnostics(exc),
+            ) from exc
         except (OSError, urllib.error.URLError, UnicodeError) as exc:
             raise LocalLLMError("loopback local LLM request failed") from exc
         _check_cancelled(cancellation_check)

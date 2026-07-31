@@ -43,7 +43,7 @@ from .persistence import (
 BUSINESS_SCHEMA_VERSION = "1.1.0"
 BUSINESS_REQUEST_SCHEMA_VERSION = "1.2.0"
 BUSINESS_PROMPT_VERSION = "business-v3"
-_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v7"
+_BUSINESS_EXECUTION_REVISION = "business-semantic-guard-v8"
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _SPEAKER_ID_PATTERN = re.compile(r"^speaker-[1-9][0-9]*$")
 _TRANSLATION_PROGRESS_KIND = "translation-segment-progress"
@@ -74,6 +74,9 @@ _SEMANTIC_LITERAL_PATTERN = re.compile(
     )
     """,
     re.VERBOSE,
+)
+_SPACED_DIGIT_RUN_PATTERN = re.compile(
+    r"(?<!\d)(?:\d[\s\u00a0]+){2,}\d(?!\d)"
 )
 _TRANSFORMED_SEGMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1222,11 +1225,87 @@ def _normalized_semantic_literal(value: str) -> str:
 
 
 def _semantic_literal_inventory(text: str) -> Counter[str]:
+    normalized_text = unicodedata.normalize("NFKC", text)
+    normalized_text = _SPACED_DIGIT_RUN_PATTERN.sub(
+        lambda match: re.sub(r"[\s\u00a0]+", "", match.group(0)),
+        normalized_text,
+    )
+    normalized_text = re.sub(r"(?<=\d)[\s\u00a0]+(?=[%‰])", "", normalized_text)
     return Counter(
         normalized
-        for match in _SEMANTIC_LITERAL_PATTERN.finditer(text)
+        for match in _SEMANTIC_LITERAL_PATTERN.finditer(normalized_text)
         if (normalized := _normalized_semantic_literal(match.group(0)))
     )
+
+
+def validate_translation_text(
+    *,
+    source_text: str,
+    translated_text: str,
+    source_language: str,
+    target_language: str,
+    label: str,
+) -> str:
+    """Validate translation semantics shared by standalone and co-generated paths."""
+
+    if not isinstance(translated_text, str) or not translated_text.strip():
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} text must be non-empty",
+            retryable=True,
+        )
+    normalized = translated_text.strip()
+    if _translation_text_remains_source_language(
+        source_text=source_text,
+        translated_text=normalized,
+        source_language=source_language,
+        target_language=target_language,
+    ):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} text remains in the source language",
+            details={
+                "sourceLanguage": source_language,
+                "targetLanguage": target_language,
+            },
+            retryable=True,
+        )
+    ordinary_translation_text = _SEMANTIC_LITERAL_PATTERN.sub("", normalized)
+    translated_profile = _script_profile(ordinary_translation_text)
+    target_script_score = _expected_script_score(
+        translated_profile,
+        target_language,
+    )
+    translated_letters = sum(translated_profile.values())
+    if (
+        target_script_score is not None
+        and translated_letters > 0
+        and target_script_score * 2 < translated_letters
+    ):
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} prose does not match the requested target-language script",
+            details={
+                "guard": "target-script",
+                "targetLanguage": target_language,
+                "expectedScriptLetters": target_script_score,
+                "totalLetters": translated_letters,
+            },
+            retryable=True,
+        )
+    source_literals = _semantic_literal_inventory(source_text)
+    translated_literals = _semantic_literal_inventory(normalized)
+    missing_literals = source_literals - translated_literals
+    if missing_literals:
+        raise WorkerError(
+            "BUSINESS_OUTPUT_INVALID",
+            f"{label} dropped protected semantic literals",
+            details={
+                "missingProtectedLiterals": list(missing_literals.elements()),
+            },
+            retryable=True,
+        )
+    return normalized
 
 
 def _normalize_translation_segment(
@@ -1271,35 +1350,13 @@ def _normalize_translation_segment(
         source,
         label=label,
     )
-    if _translation_text_remains_source_language(
+    normalized["text"] = validate_translation_text(
         source_text=source["sourceText"],
         translated_text=normalized["text"],
         source_language=source["sourceLanguage"],
         target_language=target,
-    ):
-        raise WorkerError(
-            "BUSINESS_OUTPUT_INVALID",
-            f"{label} text remains in the source language",
-            details={
-                "segmentId": source["id"],
-                "sourceLanguage": source["sourceLanguage"],
-                "targetLanguage": target,
-            },
-            retryable=True,
-        )
-    source_literals = _semantic_literal_inventory(source["sourceText"])
-    translated_literals = _semantic_literal_inventory(normalized["text"])
-    missing_literals = source_literals - translated_literals
-    if missing_literals:
-        raise WorkerError(
-            "BUSINESS_OUTPUT_INVALID",
-            f"{label} dropped protected semantic literals",
-            details={
-                "segmentId": source["id"],
-                "missingProtectedLiterals": list(missing_literals.elements()),
-            },
-            retryable=True,
-        )
+        label=label,
+    )
     return normalized
 
 
@@ -1312,6 +1369,7 @@ def _validate_business_artifact(
     segments: tuple[dict[str, Any], ...],
     config: BusinessProcessingConfig,
     provider: LocalLLMProvider,
+    expected_provenance: Mapping[str, Any] | None = None,
 ) -> None:
     """Apply the public schema and source-bound semantic invariants."""
 
@@ -1326,16 +1384,23 @@ def _validate_business_artifact(
         ) from exc
 
     prompt_set = _prompt_set(config.prompt_version)
-    expected_provider = {
-        "id": provider.provider_id,
-        "version": provider.provider_version,
-        "networkPolicy": "loopback-only",
-    }
+    if expected_provenance is None:
+        expected_model = config.model
+        expected_prompt_version = prompt_set.version
+        expected_provider = {
+            "id": provider.provider_id,
+            "version": provider.provider_version,
+            "networkPolicy": "loopback-only",
+        }
+    else:
+        expected_model = expected_provenance.get("model")
+        expected_prompt_version = expected_provenance.get("promptVersion")
+        expected_provider = expected_provenance.get("provider")
     if (
         value["variant"] != variant
         or value["inputHash"] != input_hash
-        or value["model"] != config.model
-        or value["promptVersion"] != prompt_set.version
+        or value["model"] != expected_model
+        or value["promptVersion"] != expected_prompt_version
         or value["provider"] != expected_provider
         or value["temperature"] != 0
     ):
@@ -1435,6 +1500,123 @@ def _validate_business_artifact(
     raise WorkerError(
         "BUSINESS_OUTPUT_INVALID",
         f"unsupported business artifact variant {variant!r}",
+    )
+
+
+def _translation_from_semantic_arbitration(
+    *,
+    document: Mapping[str, Any],
+    segments: tuple[dict[str, Any], ...],
+    config: BusinessProcessingConfig,
+    arbitration: Mapping[str, Any],
+    target: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        arbitration.get("schemaVersion") != "1.1.0"
+        or arbitration.get("artifactType") != "semantic-job-arbitration"
+        or arbitration.get("status") != "ready-to-compose"
+        or arbitration.get("model") != config.model
+        or arbitration.get("translationTargets")
+        != list(config.translation_targets)
+        or not isinstance(arbitration.get("translations"), list)
+    ):
+        raise WorkerError(
+            "BUSINESS_SEMANTIC_TRANSLATION_INVALID",
+            "semantic arbitration does not contain the requested final translations",
+        )
+    provider = arbitration.get("provider")
+    prompt_version = arbitration.get("promptVersion")
+    if (
+        not isinstance(provider, Mapping)
+        or set(provider) != {"id", "version", "networkPolicy"}
+        or provider.get("networkPolicy") != "loopback-only"
+        or not isinstance(prompt_version, str)
+        or not prompt_version
+    ):
+        raise WorkerError(
+            "BUSINESS_SEMANTIC_TRANSLATION_INVALID",
+            "semantic translation provenance is invalid",
+        )
+    drafts = [
+        item
+        for item in arbitration["translations"]
+        if isinstance(item, Mapping)
+        and item.get("targetLanguage") == target
+    ]
+    by_segment = {
+        str(item.get("segmentId")): item
+        for item in drafts
+        if isinstance(item.get("segmentId"), str)
+    }
+    if len(by_segment) != len(drafts) or set(by_segment) != {
+        str(item["id"]) for item in segments
+    }:
+        raise WorkerError(
+            "BUSINESS_SEMANTIC_TRANSLATION_INVALID",
+            "semantic translations do not cover the final segment set exactly",
+            details={"targetLanguage": target},
+        )
+    output_segments: list[dict[str, Any]] = []
+    for source in segments:
+        draft = by_segment[str(source["id"])]
+        if (
+            draft.get("sourceTextSha256") != source["sourceTextHash"]
+            or not isinstance(draft.get("selectedCandidateId"), str)
+        ):
+            raise WorkerError(
+                "BUSINESS_SEMANTIC_TRANSLATION_INVALID",
+                "semantic translation is rebound to another selected ASR text",
+                details={"segmentId": source["id"]},
+            )
+        output_segments.append(
+            _normalize_translation_segment(
+                {
+                    "id": source["id"],
+                    "speakerId": source["speakerId"],
+                    "startMs": source["startMs"],
+                    "endMs": source["endMs"],
+                    "humanLocked": source["humanLocked"],
+                    "sourceTextHash": source["sourceTextHash"],
+                    "text": draft.get("text"),
+                    "language": target,
+                },
+                source,
+                target=target,
+                label="semantic co-generated translation",
+            )
+        )
+    variant = f"translation:{target}"
+    input_hash = _variant_input_hash(
+        document=document,
+        segments=segments,
+        variant=variant,
+    )
+    provenance = {
+        "model": arbitration["model"],
+        "promptVersion": prompt_version,
+        "provider": dict(provider),
+    }
+    return (
+        {
+            "schemaVersion": BUSINESS_SCHEMA_VERSION,
+            "variant": variant,
+            "inputHash": input_hash,
+            **provenance,
+            "temperature": 0.0,
+            "applicationPolicy": "suggestion-only",
+            "requiresHumanApproval": True,
+            "status": (
+                "skipped-same-language"
+                if all(
+                    item["sourceLanguage"] == target for item in segments
+                )
+                else "completed"
+            ),
+            "sourceLanguage": _document_language(document),
+            "targetLanguage": target,
+            "segments": output_segments,
+        },
+        provenance,
     )
 
 
@@ -2804,6 +2986,7 @@ class BusinessProcessingRunner:
         *,
         output_directory: Path,
         config: BusinessProcessingConfig,
+        semantic_arbitration: Mapping[str, Any] | None = None,
     ) -> tuple[Path, ...]:
         if not config.enabled:
             return ()
@@ -2845,8 +3028,48 @@ class BusinessProcessingRunner:
         segments = _transcript_input(document_snapshot)
         artifacts: list[Path] = []
         translation_completeness: dict[str, dict[str, Any]] = {}
+        translation_execution: dict[str, str] = {}
         tasks: list[tuple[str, str, Callable[[], dict[str, Any]], str]] = []
         for target in config.translation_targets:
+            if semantic_arbitration is not None:
+                value, provenance = _translation_from_semantic_arbitration(
+                    document=document_snapshot,
+                    segments=segments,
+                    config=config,
+                    arbitration=semantic_arbitration,
+                    target=target,
+                )
+                variant = f"translation:{target}"
+                input_hash = _variant_input_hash(
+                    document=document_snapshot,
+                    segments=segments,
+                    variant=variant,
+                )
+                _validate_business_artifact(
+                    value,
+                    variant=variant,
+                    input_hash=input_hash,
+                    document_language=document_language,
+                    segments=segments,
+                    config=config,
+                    provider=self.provider,
+                    expected_provenance=provenance,
+                )
+                artifact = _artifact_path(
+                    output_directory,
+                    f"translation-{target}.v1.json",
+                )
+                atomic_write_json(artifact, value)
+                translation_completeness[target] = (
+                    _translation_artifact_completeness(
+                        value,
+                        segments=segments,
+                        target=target,
+                    )
+                )
+                translation_execution[target] = "semantic-co-generation"
+                artifacts.append(artifact)
+                continue
             task_id = f"translation-{target}"
             tasks.append(
                 (
@@ -2864,6 +3087,7 @@ class BusinessProcessingRunner:
                     f"translation:{target}",
                 )
             )
+            translation_execution[target] = "standalone-business"
         if config.summary:
             tasks.append(
                 (
@@ -2975,6 +3199,7 @@ class BusinessProcessingRunner:
             "config": config.as_dict(),
             "completeness": {
                 "translations": translation_completeness,
+                "translationExecution": translation_execution,
                 "allRequestedTasksCompleted": True,
             },
         }
@@ -2990,4 +3215,5 @@ __all__ = [
     "BUSINESS_SCHEMA_VERSION",
     "BusinessProcessingConfig",
     "BusinessProcessingRunner",
+    "validate_translation_text",
 ]

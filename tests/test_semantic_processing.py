@@ -392,7 +392,7 @@ def test_semantic_runner_proposes_only_top_k_and_presentation_safe_text() -> Non
         "proposalPlannedBatchCount": 1,
         "proposalPlannedMaxBatchSize": 2,
         "contextTokenBudget": 3072,
-        "maxEstimatedInputTokens": 3034,
+        "maxEstimatedInputTokens": 2898,
         "suggestionCount": 2,
         "speakerSuggestionCount": 1,
         "textSuggestionCount": 1,
@@ -469,7 +469,7 @@ def test_token_budget_aware_packing_avoids_known_context_overflow() -> None:
     assert artifact["metrics"]["plannedBatchCount"] == 3
     assert artifact["metrics"]["plannedMaxBatchSize"] == 1
     assert artifact["metrics"]["contextTokenBudget"] == 3_072
-    assert artifact["metrics"]["maxEstimatedInputTokens"] == 2_666
+    assert artifact["metrics"]["maxEstimatedInputTokens"] == 2_558
     assert artifact["metrics"]["contextSplitCount"] == 0
 
 

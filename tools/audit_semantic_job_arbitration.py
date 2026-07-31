@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from backend.errors import WorkerError
 from backend.local_llm import LocalLLMConfig, OllamaLocalProvider
 from backend.persistence import (
     atomic_write_json_no_replace,
@@ -37,7 +38,7 @@ class _RecordingProvider:
         self.provider_version = delegate.provider_version
         self.network_policy = delegate.network_policy
         self.config = delegate.config
-        self.responses: list[dict[str, Any]] = []
+        self.response_shapes: list[dict[str, Any]] = []
 
     @property
     def generation_metrics(self) -> Mapping[str, int]:
@@ -45,7 +46,67 @@ class _RecordingProvider:
 
     def generate_json(self, **kwargs: Any) -> Mapping[str, Any]:
         result = dict(self._delegate.generate_json(**kwargs))
-        self.responses.append(result)
+        decisions = result.get("decisions")
+        translations = result.get("translations")
+        choice_indexes = result.get("choiceIndexes")
+        translation_texts = result.get("translationTexts")
+        translation_text_kinds = (
+            [
+                (
+                    "null"
+                    if item is None
+                    else (
+                        "non-empty-text"
+                        if isinstance(item, str) and item.strip()
+                        else "blank-text"
+                        if isinstance(item, str)
+                        else "other"
+                    )
+                )
+                for item in translation_texts
+            ]
+            if isinstance(translation_texts, list)
+            else None
+        )
+        choice_value_counts = (
+            {
+                str(choice): choice_indexes.count(choice)
+                for choice in sorted(set(choice_indexes))
+            }
+            if isinstance(choice_indexes, list)
+            and all(
+                isinstance(choice, int) and not isinstance(choice, bool)
+                for choice in choice_indexes
+            )
+            else None
+        )
+        self.response_shapes.append(
+            {
+                "responseFields": sorted(str(key) for key in result),
+                "responseSha256": canonical_json_sha256(result),
+                "decisionCount": (
+                    len(decisions) if isinstance(decisions, list) else None
+                ),
+                "translationCount": (
+                    len(translations)
+                    if isinstance(translations, list)
+                    else None
+                ),
+                "choiceCount": (
+                    len(choice_indexes)
+                    if isinstance(choice_indexes, list)
+                    else None
+                ),
+                "choiceValueCounts": choice_value_counts,
+                "translationTextCount": (
+                    len(translation_texts)
+                    if isinstance(translation_texts, list)
+                    else None
+                ),
+                "translationTextKinds": translation_text_kinds,
+                "responseContentPersisted": False,
+            }
+        )
         return result
 
     def release_resources(self) -> None:
@@ -64,7 +125,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--context-tokens", type=int, default=32768)
     parser.add_argument("--output-tokens", type=int, default=8192)
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--translation-target",
+        action="append",
+        default=[],
+    )
     return parser
 
 
@@ -74,6 +140,7 @@ def _summary(
     lattice: dict[str, Any],
     arbitration: dict[str, Any],
     elapsed_seconds: float,
+    provider_generation: Mapping[str, int],
 ) -> dict[str, Any]:
     return {
         "schemaVersion": "1.0.0",
@@ -91,6 +158,7 @@ def _summary(
         "metrics": {
             **arbitration["metrics"],
             "elapsedSeconds": round(elapsed_seconds, 6),
+            "providerGeneration": dict(provider_generation),
         },
         "requestedDomains": sorted(
             {
@@ -165,6 +233,7 @@ def main() -> int:
         context_tokens=args.context_tokens,
         output_tokens=args.output_tokens,
         batch_size=args.batch_size,
+        translation_targets=tuple(args.translation_target),
     )
     started = time.monotonic()
     output = args.output_directory.resolve()
@@ -184,10 +253,11 @@ def main() -> int:
                 lattice,
             )
             atomic_write_json_no_replace(
-                output / "raw-model-responses.v1.json",
+                output / "model-response-shapes.v1.json",
                 {
                     "schemaVersion": "1.0.0",
-                    "responses": provider.responses,
+                    "responseShapes": provider.response_shapes,
+                    "responseContentPersisted": False,
                 },
             )
             atomic_write_json_no_replace(
@@ -199,10 +269,19 @@ def main() -> int:
                     "model": args.model,
                     "latticeSha256": lattice["latticeSha256"],
                     "elapsedSeconds": round(elapsed, 6),
-                    "completedProviderCalls": len(provider.responses),
+                    "completedProviderCalls": len(
+                        provider.response_shapes
+                    ),
+                    "providerGeneration": provider.generation_metrics,
                     "errorType": type(exc).__name__,
                     "error": str(exc),
+                    "errorDetails": (
+                        dict(exc.details)
+                        if isinstance(exc, WorkerError)
+                        else {}
+                    ),
                     "claimsFinalQualityImprovement": False,
+                    "responseContentPersisted": False,
                 },
             )
             raise
@@ -214,6 +293,7 @@ def main() -> int:
         lattice=lattice,
         arbitration=arbitration,
         elapsed_seconds=elapsed,
+        provider_generation=provider.generation_metrics,
     )
     output.mkdir(parents=True, exist_ok=False)
     atomic_write_json_no_replace(
@@ -229,10 +309,11 @@ def main() -> int:
         report,
     )
     atomic_write_json_no_replace(
-        output / "raw-model-responses.v1.json",
+        output / "model-response-shapes.v1.json",
         {
             "schemaVersion": "1.0.0",
-            "responses": provider.responses,
+            "responseShapes": provider.response_shapes,
+            "responseContentPersisted": False,
         },
     )
     print(

@@ -134,12 +134,69 @@ class SemanticCompositionOrchestrator:
                 )
                 resumed_count += 1
             else:
-                arbitration = self.arbitrator.run(
-                    document,
-                    candidate_lattice=current_lattice,
-                    carried_lattice=carried_lattice,
-                    carried_arbitration=carried_arbitration,
-                )
+                try:
+                    arbitration = self.arbitrator.run(
+                        document,
+                        candidate_lattice=current_lattice,
+                        carried_lattice=carried_lattice,
+                        carried_arbitration=carried_arbitration,
+                    )
+                except WorkerError as exc:
+                    if exc.code == "SEMANTIC_JOB_PROVIDER_FAILED":
+                        failure_root = round_root / "arbitration-failures"
+                        failure_index = 1
+                        while True:
+                            failure_path = (
+                                failure_root
+                                / (
+                                    "semantic-arbitration-failure-"
+                                    f"{failure_index:04d}.v1.json"
+                                )
+                            )
+                            failure = {
+                                "schemaVersion": "1.0.0",
+                                "artifactType": (
+                                    "semantic-arbitration-failure"
+                                ),
+                                "jobId": str(document.get("jobId") or ""),
+                                "round": round_number,
+                                "failureIndex": failure_index,
+                                "model": str(
+                                    getattr(
+                                        self.arbitrator,
+                                        "model",
+                                        "unknown",
+                                    )
+                                ),
+                                "input": {
+                                    "transcriptSha256": transcript_sha,
+                                    "sourceMediaSha256": current_lattice[
+                                        "binding"
+                                    ]["sourceMediaSha256"],
+                                    "latticeSha256": current_lattice[
+                                        "latticeSha256"
+                                    ],
+                                },
+                                "error": exc.as_payload(),
+                                "responseContentPersisted": False,
+                            }
+                            try:
+                                atomic_write_json_no_replace(
+                                    failure_path,
+                                    failure,
+                                )
+                            except FileExistsError:
+                                failure_index += 1
+                                continue
+                            failure_sha256 = canonical_json_sha256(failure)
+                            exc.details["diagnosticArtifactPath"] = str(
+                                failure_path
+                            )
+                            exc.details[
+                                "diagnosticArtifactSha256"
+                            ] = failure_sha256
+                            break
+                    raise
                 arbitration = validate_semantic_job_arbitration(
                     arbitration,
                     expected_job_id=str(document.get("jobId") or ""),
@@ -181,6 +238,7 @@ class SemanticCompositionOrchestrator:
                     resumed_artifact_count=resumed_count,
                 )
 
+            self.arbitrator.release_resources()
             generation_path = (
                 round_root / "semantic-candidate-generation.v1.json"
             )

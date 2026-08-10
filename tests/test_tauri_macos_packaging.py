@@ -545,7 +545,7 @@ def test_macos_workflow_pins_python_and_isolates_unsigned_signing_identity() -> 
     assert workflow.index("Build the locked OpenHTMLtoPDF sidecar") < workflow.index(
         "Install macOS packaging verifier dependencies"
     )
-    assert 'tar -czf "$archive"' in workflow
+    assert 'COPYFILE_DISABLE=1 tar -czf "$archive"' in workflow
     assert 'shasum -a 256 "$(basename "$archive")"' in workflow
     assert workflow.count("--release-directory") == 1
     assert workflow.count("--release-archive") == 2
@@ -649,6 +649,41 @@ def test_macos_transport_archive_rejects_traversal_before_extraction(
         )
 
     assert not (tmp_path / "escape").exists()
+    assert not (tmp_path / "roundtrip").exists()
+
+
+def test_macos_transport_archive_rejects_appledouble_metadata(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_verify_module()
+    archive = tmp_path / "macos-universal2.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as stream:
+        root = tarfile.TarInfo("macos-universal2")
+        root.type = tarfile.DIRTYPE
+        stream.addfile(root)
+        appledouble = tarfile.TarInfo(
+            "macos-universal2/artifacts/dmg/._MediaTranscribe Studio.dmg"
+        )
+        payload = b"appledouble-metadata"
+        appledouble.size = len(payload)
+        stream.addfile(appledouble, io.BytesIO(payload))
+    checksum = tmp_path / "macos-universal2.tar.gz.sha256"
+    checksum.write_text(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(
+        verifier.ReleaseVerificationError,
+        match="non-portable macOS metadata",
+    ):
+        verifier._extract_transport_archive(
+            archive,
+            checksum,
+            tmp_path / "roundtrip",
+            "macos-universal2",
+        )
+
     assert not (tmp_path / "roundtrip").exists()
 
 

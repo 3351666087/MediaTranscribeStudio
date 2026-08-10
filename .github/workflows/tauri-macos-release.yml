@@ -229,7 +229,7 @@ jobs:
           release_name="$(basename "$MTS_RELEASE_OUTPUT")"
           archive="$archive_root/${release_name}.tar.gz"
           mkdir -p "$archive_root"
-          tar -czf "$archive" -C "$(dirname "$MTS_RELEASE_OUTPUT")" "$release_name"
+          COPYFILE_DISABLE=1 tar -czf "$archive" -C "$(dirname "$MTS_RELEASE_OUTPUT")" "$release_name"
           (
             cd "$archive_root"
             shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256"

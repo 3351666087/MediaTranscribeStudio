@@ -89,6 +89,13 @@ def _transport_member_path(raw: str, expected_root: str) -> PurePosixPath:
         or any(part in {"", ".", ".."} for part in raw_parts)
     ):
         raise ReleaseVerificationError(f"Unsafe transport archive member: {raw!r}")
+    if any(
+        part == ".DS_Store" or part == "__MACOSX" or part.startswith("._")
+        for part in raw_parts
+    ):
+        raise ReleaseVerificationError(
+            f"Transport archive contains non-portable macOS metadata: {raw!r}"
+        )
     path = PurePosixPath(value)
     if path.is_absolute() or not path.parts or path.parts[0] != expected_root:
         raise ReleaseVerificationError(

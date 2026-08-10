@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ko_kr_validation_030-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-030-postref-text-0001",
+      "reason": "Post-reference Codex adjudication confirms the semantic text exactly matches the official FLEURS rawTranscript.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ko_kr_validation_030", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "고립된 산간 지형에 위치한 포인트 마리온과 페어몬트 사이의 길은 버팔로 피츠버그 고속도로 중에서 가장 운전하기 힘든 곳으로 알려져 있다.",
+      "displayText": "고립된 산간 지형에 위치한 포인트 마리온과 페어몬트 사이의 길은 버팔로 피츠버그 고속도로 중에서 가장 운전하기 힘든 곳으로 알려져 있다.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-030-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:2fde4f80d0ca634ec94cfed8fc18f581e167c3147b830a3ca5858d48f631a396"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

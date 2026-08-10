@@ -23,7 +23,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "contract": {
       "const": "mts-tauri-release/v1"
@@ -145,7 +145,8 @@
           "required": [
             "mode",
             "publisherThumbprint",
-            "signedFiles"
+            "signedFiles",
+            "manifestSignature"
           ],
           "properties": {
             "mode": {
@@ -153,7 +154,7 @@
             },
             "publisherThumbprint": {
               "type": "string",
-              "pattern": "^[A-F0-9]{40,64}$"
+              "pattern": "^[A-F0-9]{40}$"
             },
             "signedFiles": {
               "type": "array",
@@ -162,6 +163,26 @@
               "items": {
                 "type": "string",
                 "pattern": "^(payload|installers)/[^\\\\:]+$"
+              }
+            },
+            "manifestSignature": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "format",
+                "digestAlgorithm"
+              ],
+              "properties": {
+                "path": {
+                  "const": "release-manifest.json.p7s"
+                },
+                "format": {
+                  "const": "cms-detached"
+                },
+                "digestAlgorithm": {
+                  "const": "sha256"
+                }
               }
             }
           }
@@ -172,7 +193,8 @@
           "required": [
             "mode",
             "publisherThumbprint",
-            "signedFiles"
+            "signedFiles",
+            "manifestSignature"
           ],
           "properties": {
             "mode": {
@@ -184,6 +206,9 @@
             "signedFiles": {
               "type": "array",
               "maxItems": 0
+            },
+            "manifestSignature": {
+              "type": "null"
             }
           }
         }

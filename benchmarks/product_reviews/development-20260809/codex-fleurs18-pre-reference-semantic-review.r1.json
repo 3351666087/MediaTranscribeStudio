@@ -1,0 +1,242 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "codex-pre-reference-semantic-review",
+  "reviewId": "codex-fleurs18-pre-reference-semantic-review-r1",
+  "createdAt": "2026-08-09T07:45:09Z",
+  "reviewer": {
+    "actorId": "codex-semantic-adjudicator",
+    "authority": "manual-semantic-review"
+  },
+  "blindness": {
+    "referenceTextConsulted": false,
+    "referenceManifestConsulted": false,
+    "audioManifestContainsReferenceText": false,
+    "reviewBasis": [
+      "truth-redacted source manifest",
+      "production raw ASR and semantic transcript",
+      "language-level grammatical and semantic coherence",
+      "production terminal status"
+    ],
+    "limitation": "This is a pre-reference semantic review, not a claim of acoustic transcription truth. Exact human final text is frozen only after reference unblinding and explicit manual decisions."
+  },
+  "input": {
+    "blindManifestPath": "D:\\MediaTranscribeStudio\\.runtime_cache\\sample-library\\global\\blind-product-fleurs-development.v1.json",
+    "blindManifestFileSha256": "efb6916db45df86f9f8589a31f7869bd1df3fc2f946018a6d9001c8f991cf1b8",
+    "runRoot": "D:\\mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+    "speakerCountPolicy": "manual-reference-count-without-reference-text",
+    "expectedSpeakerCount": 1,
+    "semanticModel": "qwen3.5:9b",
+    "semanticModelDigest": "sha256:6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7",
+    "promptVersion": "semantic-job-candidate-arbitration-v12"
+  },
+  "summary": {
+    "caseCount": 18,
+    "passCount": 7,
+    "minorCount": 2,
+    "majorCount": 7,
+    "blockerCount": 2,
+    "semanticCompositionCompletedCount": 16,
+    "semanticCompositionFailedCount": 2,
+    "verdict": "qwen3.5-9b-is-not-an-adequate-multilingual-semantic-baseline"
+  },
+  "cases": [
+    {
+      "caseId": "fleurs_ar_eg_validation_030",
+      "artifactId": "fleurs_ar_eg_validation_030-manual",
+      "language": "ar-EG",
+      "documentFileSha256": "cebb12f3b6d9107955a6c3f24ef8d78113ea9f57a96eb090fbe61ce8c4e88d17",
+      "terminalStatus": "review-required",
+      "observedText": "يحتوي الامتداد بين بوينت مافيون وفيلموند الأصعب ذوقي القيادة على طريق بافلو بتسيربك السريع، حيث يمر بشكل منتظم عبر تضاريس غابات معزولة.",
+      "severity": "major",
+      "judgment": "The sentence topic is recoverable, but the place names and phrase around driving difficulty are internally implausible Arabic and likely contain consequential ASR errors.",
+      "requiredSemanticAction": "request-bounded-asr-challenger"
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_060",
+      "artifactId": "fleurs_ar_eg_validation_060-manual",
+      "language": "ar-EG",
+      "documentFileSha256": "7cb4d03257c668335a3f190c25b5ad12cbb368293696c25583c3a1585cf2a5f9",
+      "terminalStatus": "review-required",
+      "observedText": "نهر الأمازون هو أيضاً أعرض نهر على الأرض. يصل عرضه في أوقات إلى ست أميال.",
+      "severity": "pass",
+      "judgment": "The statement is grammatical, semantically complete, and preserves the numeric fact.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_090",
+      "artifactId": "fleurs_ar_eg_validation_090-manual",
+      "language": "ar-EG",
+      "documentFileSha256": "b5e0a63fa01380e130ea97541b1ca7199e86942c0d71dc5f5e20703a6d836f2d",
+      "terminalStatus": "review-required",
+      "observedText": "شراكة بين مصلحة المتنزهات الوطنية والحياة البرية وجمعية الرماة الرياضيين في أستراليا اختير متطوعون مؤهلون في إطار برنامج. الصيد التابعة للجمعية.",
+      "severity": "major",
+      "judgment": "A dependent phrase was split into a sentence and its agreement is broken; the output is not report-ready even though the broad meaning is visible.",
+      "requiredSemanticAction": "repair-or-request-text-and-merge"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_009",
+      "artifactId": "fleurs_es_419_validation_009-manual",
+      "language": "es-419",
+      "documentFileSha256": "e589dbcb1b659c4b283323f04d510a1a3dc9ea8a4e813fdff37748292f9f819c",
+      "terminalStatus": "review-required",
+      "observedText": "En cuatro años es el quinto sep de Martelli.",
+      "severity": "major",
+      "judgment": "The utterance is grammatically and semantically incoherent; 'quinto sep' is not supportable from context and the model should not accept it as final text.",
+      "requiredSemanticAction": "request-bounded-asr-challenger"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_080",
+      "artifactId": "fleurs_es_419_validation_080-manual",
+      "language": "es-419",
+      "documentFileSha256": "b506d22f2d09ef1dce4bca07a23b9824693f2daa8042ca327800885b3c34e537",
+      "terminalStatus": "review-required",
+      "observedText": "Él dijo que construyó un timbre Wi-Fi.",
+      "severity": "pass",
+      "judgment": "The sentence is fluent, complete, and retains the Wi-Fi product term.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_232",
+      "artifactId": "fleurs_es_419_validation_232-manual",
+      "language": "es-419",
+      "documentFileSha256": "df2f0fd784a2cdebd5bfdc6c1eab4caca10935019e78087fa2cc1fa6d45dda5f",
+      "terminalStatus": "review-required",
+      "observedText": "A mí me pareció que esto no tenía sentido. Definitivamente no fue justo.",
+      "severity": "pass",
+      "judgment": "Both propositions are natural and the negation is preserved.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_030",
+      "artifactId": "fleurs_hi_in_validation_030-manual",
+      "language": "hi-IN",
+      "documentFileSha256": "4825692b91129e89db47ead365451f12cc3cb038a686f8b340f9d52655fef645",
+      "terminalStatus": "review-required",
+      "observedText": "इससे पहले रिंग के सीईओ जेमी सिमिनोव ने बताया था कि कंपनी तब शुरू हुई जब उसके दरवाजे की घंटी उसके गैराज में स्थित तू कान से सुनाई नहीं देती थी",
+      "severity": "major",
+      "judgment": "The final location phrase is nonsensical Hindi and damages the causal explanation of how the company began.",
+      "requiredSemanticAction": "request-bounded-asr-challenger"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_060",
+      "artifactId": "fleurs_hi_in_validation_060-manual",
+      "language": "hi-IN",
+      "documentFileSha256": "3d8e67ddea94c23a34bbcb4b86c145f5b8bbd94f4b4a4ca9796955f940056b0d",
+      "terminalStatus": "review-required",
+      "observedText": "कुछ रिपोर्ट आधिकारिक मृत्युदर आठ बताती हैं और आधिकारिक रिपोर्टों से पुष्टि होती है कि तीस तक घायल हुए हैं लेकिन अंतिम संख्या अभी तक ज्ञात नहीं है।",
+      "severity": "pass",
+      "judgment": "The casualty statement is coherent and preserves eight, thirty, and the uncertainty of the final count.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_090",
+      "artifactId": "fleurs_hi_in_validation_090-manual",
+      "language": "hi-IN",
+      "documentFileSha256": "7111c5c2df7ec2052bec19577cc1acd401e13281c8a98c04c0fe5ae3e57c7751",
+      "terminalStatus": "semantic-composition-round-limit",
+      "observedText": "जैसे ही आप धारा से निकल आते हैं पीछे की ओर तैरने में कोई खास मुश्किल नहीं होती है।",
+      "severity": "blocker",
+      "judgment": "The ASR text is coherent, but the semantic model exhausted all composition rounds instead of accepting or resolving it, so the product cannot produce a final artifact.",
+      "requiredSemanticAction": "select-existing-text-without-unbounded-escalation"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_030",
+      "artifactId": "fleurs_ja_jp_validation_030-manual",
+      "language": "ja-JP",
+      "documentFileSha256": "f1503dad5378c76f64c2448189849a083fdb2ed7df2771a9cafd62189213772c",
+      "terminalStatus": "review-required",
+      "observedText": "最終スコア二十一対二十の一点差勝利でオールブラックスの十五連勝に終止符が打たれました。",
+      "severity": "pass",
+      "judgment": "The sports result is natural and preserves 21-20, one point, the team, and the 15-match streak.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_060",
+      "artifactId": "fleurs_ja_jp_validation_060-manual",
+      "language": "ja-JP",
+      "documentFileSha256": "0f0509a3c84ecebf42745b70d383eb568602f0f176a5e68e0d064e6ffa02a03b",
+      "terminalStatus": "review-required",
+      "observedText": "報告書の冒頭は、公開討論と中東政策について米国内のコンセンサス形成を淡然する一節で始まっています。",
+      "severity": "major",
+      "judgment": "The verb '淡然する' is semantically unnatural in this construction and likely replaces a consequential policy verb.",
+      "requiredSemanticAction": "request-bounded-asr-challenger"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_090",
+      "artifactId": "fleurs_ja_jp_validation_090-manual",
+      "language": "ja-JP",
+      "documentFileSha256": "c3ce99696feab0cceb09e37771940f18f533be789c322abd663f17af450f3772",
+      "terminalStatus": "review-required",
+      "observedText": "警察によれば、写真カを跳ねた車の運転手が刑事告訴される可能性は低いとのことです。",
+      "severity": "major",
+      "judgment": "'写真カ' is an obvious invalid character/homophone rendering in a person reference and requires repair or a challenger.",
+      "requiredSemanticAction": "repair-clear-homophone-or-request-challenger"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_030",
+      "artifactId": "fleurs_ko_kr_validation_030-manual",
+      "language": "ko-KR",
+      "documentFileSha256": "a9a74767a12bb6dc8ae1687e5af110b2941bc2a041c5a0836fc0d80270beab06",
+      "terminalStatus": "review-required",
+      "observedText": "고립된 산간 지형에 위치한 포인트 마리온과 페어몬트 사이의 길은 버팔로 피츠버그 고속도로 중에서 가장 운전하기 힘든 곳으로 알려져 있다.",
+      "severity": "pass",
+      "judgment": "The sentence is grammatical, complete, and keeps the place and highway names in a coherent relation.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_060",
+      "artifactId": "fleurs_ko_kr_validation_060-manual",
+      "language": "ko-KR",
+      "documentFileSha256": "330b1e825e4e06fa011d0a2f49e7bfa0de5186ab9f7f8b1abaeedcd9637b78ad",
+      "terminalStatus": "review-required",
+      "observedText": "이 역동적인 수송 셔틀은 어떤 식으로든 모든 사람들이 자가용을 기반으로 하는 수송 시스템과 연결되고 이를 지원하도록 한다.",
+      "severity": "pass",
+      "judgment": "The wording is translation-like but remains grammatically interpretable and semantically complete.",
+      "requiredSemanticAction": "select-current-text"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_090",
+      "artifactId": "fleurs_ko_kr_validation_090-manual",
+      "language": "ko-KR",
+      "documentFileSha256": "b4c743ddac1b5e5c6a6f602309f19bcc6b8fc626362cf275d52648ec80361c31",
+      "terminalStatus": "semantic-composition-round-limit",
+      "observedText": "우주에 있는 위성은 신호를 받고 나서 거의 즉각적으로 반사해 내려보낸다.",
+      "severity": "blocker",
+      "judgment": "The ASR statement is coherent, but the semantic model exhausted its bounded rounds and prevented final delivery.",
+      "requiredSemanticAction": "select-existing-text-without-unbounded-escalation"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_030",
+      "artifactId": "fleurs_yue_hant_hk_validation_030-manual",
+      "language": "yue-Hant-HK",
+      "documentFileSha256": "8a6d6adcf50abc08aef6a54218b947f1bc9d5a40edc8ae80fb838e9c54cf9e14",
+      "terminalStatus": "review-required",
+      "observedText": "对我来说，这似乎不合理，这肯定不公平。",
+      "severity": "minor",
+      "judgment": "The meaning and negation are intact, but a yue-Hant-HK delivery should not silently normalize the final text to Simplified Chinese script.",
+      "requiredSemanticAction": "preserve-language-script-or-request-review"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_060",
+      "artifactId": "fleurs_yue_hant_hk_validation_060-manual",
+      "language": "yue-Hant-HK",
+      "documentFileSha256": "43ef7a7ffe456f14a52c9cdfcb5a4fd1347188f8fa5ce35cd9e5a017ff35c267",
+      "terminalStatus": "review-required",
+      "observedText": "最后以二十一比二十的比分一分获胜，终止了纽西兰国家橄榄球队的十五场连胜。",
+      "severity": "minor",
+      "judgment": "The sports facts are coherent, but the final script is mostly Simplified Chinese despite the explicit yue-Hant-HK language binding.",
+      "requiredSemanticAction": "preserve-language-script-or-request-review"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_090",
+      "artifactId": "fleurs_yue_hant_hk_validation_090-manual",
+      "language": "yue-Hant-HK",
+      "documentFileSha256": "9cd356a0abd1a078cccf7ef81279116bc67af74773d5512f952a3a5f494525ea",
+      "terminalStatus": "review-required",
+      "observedText": "它们在夜晚拥有良好的夜视能力，还可以静悄悄地移动。虎猫狩猎的方式是与周围环境 景融為一體，然後再撲向獵物。",
+      "severity": "major",
+      "judgment": "The output mixes Simplified and Traditional scripts and contains a duplicated/broken '环境 景' boundary, so it is not report-ready despite recoverable meaning.",
+      "requiredSemanticAction": "repair-script-and-duplicate-boundary-or-request-challenger"
+    }
+  ]
+}

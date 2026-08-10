@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mediatranscribestudio.local/contracts/semantic-candidate-generation/1.0.0",
   "title": "Bounded semantic candidate generation",
-  "description": "Registered challenger results and the deterministically extended candidate lattice produced for job-level arbitration requests.",
+  "description": "Registered challenger results and the deterministically extended candidate lattice produced for job-level arbitration requests. A partial result may contain no supplements when every one-shot generator payload was already present.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -84,7 +84,6 @@
     },
     "fulfilledRequests": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "$ref": "#/$defs/fulfilledRequest"
       }
@@ -97,7 +96,6 @@
     },
     "supplementalGroups": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "$ref": "#/$defs/supplementalGroup"
       }
@@ -123,7 +121,7 @@
         },
         "fulfilledRequestCount": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 0
         },
         "unfulfilledRequestCount": {
           "type": "integer",
@@ -131,7 +129,7 @@
         },
         "generatedCandidateCount": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 0
         },
         "inputAvailableGroupCount": {
           "type": "integer",

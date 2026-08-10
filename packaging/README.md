@@ -90,3 +90,23 @@ New release work should target the active desktop architecture under
 or archive legacy packaging only after the replacement path has passed its
 documented parity, installation, upgrade, rollback, offline-runtime, and
 artifact-integrity gates.
+
+The active Tauri packaging entry points are documented separately:
+
+- Windows: `docs/refactor/NATIVE_PACKAGING.md`
+- Linux AppImage/deb/rpm: `docs/refactor/NATIVE_LINUX_PACKAGING.md`
+- macOS app/DMG/portable ZIP: `docs/refactor/NATIVE_MACOS_PACKAGING.md`
+
+The macOS Tauri entry point is `tauri/build_tauri_macos_release.py`. It is
+independent of the legacy `build_macos.py` PyInstaller/DMG flow, injects the
+same weight-free runtime bootstrap payload used by the native release paths,
+and emits `macos-release-manifest.json` plus its SHA-256 checksum. A real
+compile must run on macOS; Linux/Windows callers can use `--dry-run` to inspect
+the locked plan without producing a misleading cross-platform binary.
+Unsigned candidates default to the `development` channel. The macOS `stable`
+channel is fail-closed to Developer ID Application signing plus notarization
+and currently publishes app/DMG only; the standard-library portable ZIP stays
+outside stable releases until native macOS metadata preservation is verified.
+The manual Apple workflow transports a mode-preserving tar plus SHA-256 and
+uses a dependent same-architecture job to download, safely extract, and rerun
+native app/DMG trust, runtime bootstrap, and LaunchServices checks.

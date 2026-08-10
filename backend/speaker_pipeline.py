@@ -118,6 +118,8 @@ _PYANNOTE_COUNT_PRIOR_OBJECTIVE_TOLERANCE = 0.12
 _PYANNOTE_COUNT_PRIOR_MIN_STABILITY = 0.60
 _PYANNOTE_COUNT_PRIOR_MIN_BOOTSTRAP_SUPPORT = 0.60
 _ASR_NON_LEXICAL_DISPOSITION = "rejected-non-lexical"
+_PREPARED_AUDIO_CACHE_METADATA = "_preparedAudioCache"
+_PREPARED_AUDIO_CACHE_SCHEMA = "output-bound-prepared-audio-v1"
 
 
 def _normalized_overlap_evidence(
@@ -1238,7 +1240,7 @@ class SpeakerPipelineConfig:
     overlap_recovery_max_interval_ms: int = 12_000
     overlap_recovery_asr_max_new_tokens: int = 96
     local_llm_mode: str = "disabled"
-    local_llm_model: str = "qwen3.5:9b"
+    local_llm_model: str = "qwen3.5:27b-q4_K_M"
     model_residency: str = "stage"
 
     def __post_init__(self) -> None:
@@ -4676,6 +4678,13 @@ class SpeakerPipeline:
         source_fingerprint: str,
     ) -> tuple[PreparedAudio, dict[str, dict[str, int]], float]:
         identity = _adapter_identity(self.preparation_adapter)
+        output_root = context.output_directory.expanduser().resolve()
+        output_root_key = _digest(
+            {
+                "schema": _PREPARED_AUDIO_CACHE_SCHEMA,
+                "outputDirectory": os.path.normcase(str(output_root)),
+            }
+        )
         normalize_key = _digest(
             {
                 "stage": "normalize",
@@ -4696,6 +4705,8 @@ class SpeakerPipeline:
                 "stage": "boundary",
                 "vadKey": vad_key,
                 "adapter": identity,
+                "outputRootKey": output_root_key,
+                "schema": _PREPARED_AUDIO_CACHE_SCHEMA,
             }
         )
         started = time.perf_counter()
@@ -4754,26 +4765,84 @@ class SpeakerPipeline:
                 "contentKey": content_key,
             }
 
+        def boundary_from_mapping(
+            value: Any,
+        ) -> tuple[PreparedAudio, str | None]:
+            if not isinstance(value, Mapping):
+                raise ValueError("boundary cache entry must be an object")
+            metadata = value.get(_PREPARED_AUDIO_CACHE_METADATA)
+            if (
+                not isinstance(metadata, Mapping)
+                or metadata.get("schema") != _PREPARED_AUDIO_CACHE_SCHEMA
+                or metadata.get("outputRootKey") != output_root_key
+            ):
+                raise ValueError("boundary cache output binding is invalid")
+            prepared_audio = PreparedAudio.from_mapping(value)
+            audio_sha256 = metadata.get("audioSha256")
+            if prepared_audio.audio_path is None:
+                if audio_sha256 is not None:
+                    raise ValueError("pathless boundary cache has an audio digest")
+                return prepared_audio, None
+            if not isinstance(audio_sha256, str) or len(audio_sha256) != 64:
+                raise ValueError("boundary cache audio digest is invalid")
+            try:
+                resolved_audio = Path(prepared_audio.audio_path).resolve(strict=True)
+                resolved_audio.relative_to(output_root)
+                if not resolved_audio.is_file():
+                    raise ValueError("boundary cache audio path is not a file")
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    "boundary cache audio path is unavailable or outside the output root"
+                ) from exc
+            return (
+                replace(prepared_audio, audio_path=str(resolved_audio)),
+                audio_sha256,
+            )
+
+        def boundary_cache_value(
+            prepared_audio: PreparedAudio,
+            audio_sha256: str | None,
+        ) -> dict[str, Any]:
+            value = prepared_audio.as_dict()
+            value[_PREPARED_AUDIO_CACHE_METADATA] = {
+                "schema": _PREPARED_AUDIO_CACHE_SCHEMA,
+                "outputRootKey": output_root_key,
+                "audioSha256": audio_sha256,
+            }
+            return value
+
         normalization, normalize_hit, normalize_corrupt = self._cache_item(
             "normalize", normalize_key, normalization_from_mapping
         )
         vad, vad_hit, vad_corrupt = self._cache_item(
             "vad", vad_key, vad_from_mapping
         )
-        prepared, boundary_hit, boundary_corrupt = self._cache_item(
-            "boundary", boundary_key, PreparedAudio.from_mapping
+        boundary_entry, boundary_hit, boundary_corrupt = self._cache_item(
+            "boundary", boundary_key, boundary_from_mapping
         )
+        prepared: PreparedAudio | None
+        prepared_audio_sha256: str | None
+        if boundary_entry is None:
+            prepared = None
+            prepared_audio_sha256 = None
+        else:
+            prepared, prepared_audio_sha256 = boundary_entry
         if boundary_hit and (
             prepared.source_fingerprint != source_fingerprint
             or prepared.normalization_profile != self.config.normalization_profile
-            or (
-                prepared.audio_path is not None
-                and not Path(prepared.audio_path).is_file()
-            )
         ):
             prepared = None
+            prepared_audio_sha256 = None
             boundary_hit = False
             boundary_corrupt = True
+        if boundary_hit and prepared.audio_path is not None:
+            actual_audio_sha256 = _sha256_file(Path(prepared.audio_path), context)
+            if actual_audio_sha256 != prepared_audio_sha256:
+                raise WorkerError(
+                    "PREPARED_AUDIO_CACHE_INTEGRITY_FAILED",
+                    "cached prepared audio does not match its recorded digest",
+                    details={"stage": "boundary"},
+                )
 
         if prepared is None:
             context.raise_if_cancelled()
@@ -4805,7 +4874,28 @@ class SpeakerPipeline:
                     "PREPARATION_FINGERPRINT_MISMATCH",
                     "prepared audio does not match the requested source/profile",
                 )
-            self.cache.write("boundary", boundary_key, prepared.as_dict())
+            if prepared.audio_path is not None:
+                try:
+                    prepared_audio_path = Path(prepared.audio_path).resolve(strict=True)
+                    prepared_audio_path.relative_to(output_root)
+                    if not prepared_audio_path.is_file():
+                        raise ValueError("prepared audio path is not a file")
+                except (OSError, ValueError) as exc:
+                    raise WorkerError(
+                        "PREPARATION_OUTPUT_PATH_INVALID",
+                        "prepared audio must be an existing file inside the job "
+                        "output directory",
+                    ) from exc
+                prepared = replace(prepared, audio_path=str(prepared_audio_path))
+                prepared_audio_sha256 = _sha256_file(
+                    prepared_audio_path,
+                    context,
+                )
+            self.cache.write(
+                "boundary",
+                boundary_key,
+                boundary_cache_value(prepared, prepared_audio_sha256),
+            )
         assert prepared is not None
 
         expected_normalization = {
@@ -4821,9 +4911,8 @@ class SpeakerPipeline:
             ),
         }
         if prepared.audio_path is not None:
-            expected_normalization["audioSha256"] = _sha256_file(
-                Path(prepared.audio_path), context
-            )
+            assert prepared_audio_sha256 is not None
+            expected_normalization["audioSha256"] = prepared_audio_sha256
         if normalization != expected_normalization:
             if normalize_hit:
                 normalize_hit = False
@@ -8740,7 +8829,9 @@ class SpeakerPipeline:
                 )
                 cache_hit = bool(cache_hits.get(candidate.segment_id, False))
                 latency_ms = float(latencies.get(candidate.segment_id, 0.0))
-                provider = str(identity.get("id") or "ERes2NetV2")
+                provider = str(
+                    identity.get("id") or "secondary-speaker-verifier"
+                )
                 metrics.record_escalation(
                     stage="secondary-review",
                     segment_id=candidate.segment_id,
@@ -8888,7 +8979,9 @@ class SpeakerPipeline:
             )
             cache_hit = bool(cache_hits.get(segment.segment_id, False))
             latency_ms = float(latencies.get(segment.segment_id, 0.0))
-            provider = str(identity.get("id") or "ERes2NetV2")
+            provider = str(
+                identity.get("id") or "secondary-speaker-verifier"
+            )
             metrics.record_escalation(
                 stage="secondary-review",
                 segment_id=segment.segment_id,
@@ -9134,7 +9227,10 @@ class SpeakerPipeline:
         secondary_identity = (
             _adapter_identity(self.secondary_adapter)
             if self.secondary_adapter is not None
-            else {"id": "ERes2NetV2", "version": "unavailable"}
+            else {
+                "id": "secondary-speaker-verifier",
+                "version": "unavailable",
+            }
         )
         secondary_invoked = False
         unresolved: list[ReviewCandidate] = []
@@ -10061,6 +10157,21 @@ class SpeakerPipeline:
             maxSecondaryFraction=self.config.max_secondary_fraction,
             speakerCountMode=request.speaker_policy.mode.value,
             overlapRecoveryMode=self.config.overlap_recovery_mode,
+            secondaryVoiceprint=(
+                _adapter_identity(self.secondary_adapter)["id"]
+                if self.secondary_adapter is not None
+                else "unconfigured"
+            ),
+            secondaryDeploymentSlot=(
+                getattr(self.secondary_adapter, "deployment_slot", None)
+                if self.secondary_adapter is not None
+                else None
+            ),
+            secondaryRegistryModelId=(
+                getattr(self.secondary_adapter, "registry_model_id", None)
+                if self.secondary_adapter is not None
+                else None
+            ),
         )
         context.raise_if_cancelled()
         language_validator = getattr(
@@ -10533,11 +10644,32 @@ class SpeakerPipeline:
             },
         ]
         if self.secondary_adapter is not None:
+            secondary_identity = _adapter_identity(self.secondary_adapter)
             models.append(
                 {
                     "role": "secondary-voiceprint",
-                    "name": _adapter_identity(self.secondary_adapter)["id"],
-                    "version": _adapter_identity(self.secondary_adapter)["version"],
+                    "name": secondary_identity["id"],
+                    "version": secondary_identity["version"],
+                    "deploymentSlot": getattr(
+                        self.secondary_adapter,
+                        "deployment_slot",
+                        None,
+                    ),
+                    "registryModelId": getattr(
+                        self.secondary_adapter,
+                        "registry_model_id",
+                        None,
+                    ),
+                    "manifestModelKey": getattr(
+                        self.secondary_adapter,
+                        "manifest_model_key",
+                        None,
+                    ),
+                    "manifestSha256": getattr(
+                        self.secondary_adapter,
+                        "manifest_sha256",
+                        None,
+                    ),
                     "scope": "difficult-segments-only",
                     "fullCorpusRun": False,
                     "offline": True,

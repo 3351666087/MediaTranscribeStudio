@@ -28,6 +28,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reference-rttm", type=Path)
     parser.add_argument("--reference-recording-id")
     parser.add_argument("--target-speaker-count", type=int)
+    parser.add_argument(
+        "--evaluation-split",
+        choices=("development", "held-out"),
+        default="development",
+    )
+    parser.add_argument(
+        "--source-reference",
+        action="append",
+        type=Path,
+        default=[],
+        help="JSON source evidence, one per source (required for held-out)",
+    )
     return parser
 
 
@@ -45,6 +57,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         reference_rttm=args.reference_rttm,
         reference_recording_id=args.reference_recording_id,
         target_speaker_count=args.target_speaker_count,
+        evaluation_split=args.evaluation_split,
+        source_reference_paths=args.source_reference,
     )
     print(
         json.dumps(

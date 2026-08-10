@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_es_419_validation_232-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-es-419-232-postref-text-0001",
+      "reason": "Post-reference Codex adjudication restores the official demonstrative and clause punctuation exactly.",
+      "evidence": ["fleurs-raw-transcript:fleurs_es_419_validation_232", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "A mí me pareció que eso no tenía sentido; definitivamente no fue justo.",
+      "displayText": "A mí me pareció que eso no tenía sentido; definitivamente no fue justo.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-es-419-232-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:55c763a9efb3b7d93f05405a47bfd7e66df5a87775b776c8f8935ff8229ca55e"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

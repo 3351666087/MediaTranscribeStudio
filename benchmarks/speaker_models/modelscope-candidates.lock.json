@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "1.0.0",
+  "provider": "modelscope",
+  "models": [
+    {
+      "key": "eres2netV2Wide",
+      "repoId": "iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common",
+      "revision": "v1.0.1",
+      "target": "D:/models/speaker-candidates/eres2netv2-wide",
+      "totalBytes": 217058921,
+      "fileCount": 9,
+      "license": "apache-2.0",
+      "files": [
+        {
+          "path": ".gitattributes",
+          "size": 1578,
+          "sha256": "70d84d16e08703b9973b7e87832f476de23dbbdb41843a6d6c004144c662a9bd"
+        },
+        {
+          "path": "configuration.json",
+          "size": 472,
+          "sha256": "178056c3af4cf8249b77815cdfa809b0d906ea1c3d93be57f13d03846212888d"
+        },
+        {
+          "path": "images/ding.png",
+          "size": 78786,
+          "sha256": "f351dc222490a12cadbaa654343cccfce23d7d4f0208fb91d9701e2191bcfaff"
+        },
+        {
+          "path": "images/ERes2NetV2.png",
+          "size": 1839085,
+          "sha256": "3712282374b348902f9e67f3e119b3d6c0b746f94f3bb756ac851eca71d67ff4"
+        },
+        {
+          "path": "pretrained_eres2netv2w24s4ep4.ckpt",
+          "size": 214688240,
+          "sha256": "740bb6584a99ee4cf910101536acba38c15a8017ea6a3a2813ec668fb62981f1"
+        },
+        {
+          "path": "README.md",
+          "size": 4742,
+          "sha256": "3e16e90a6f020a93a9dcbc5befa4d76132e983103345267e7692533d792c6823"
+        },
+        {
+          "path": "examples/speaker1_a_cn_16k.wav",
+          "size": 118932,
+          "sha256": "5f20ce0ddc378ca3239d3ce864b1142726a46a1221ae553912e4e142045df58b"
+        },
+        {
+          "path": "examples/speaker1_b_cn_16k.wav",
+          "size": 157058,
+          "sha256": "20745dc08a4281894d146140b99b9ef7417ac681119b7f7202f553cdf1a85f65"
+        },
+        {
+          "path": "examples/speaker2_a_cn_16k.wav",
+          "size": 170028,
+          "sha256": "8a6cffa452df32ef10503f7992f22ffcdd7f16c4e0273d13311bc5cdcb13abf4"
+        }
+      ]
+    }
+  ]
+}

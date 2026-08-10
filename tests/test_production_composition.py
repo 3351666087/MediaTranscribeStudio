@@ -17,9 +17,11 @@ from backend.composition import (
     ProductionFactories,
     build_production_composition,
 )
+from backend.local_llm import AnthropicProvider, create_llm_provider
 from backend.production_config import (
     ProductionConfig,
     ProductionConfigError,
+    _probe_python_cuda_available,
     _probe_runtime_import,
     production_diagnostics,
     run_production_preflight,
@@ -105,9 +107,11 @@ class ProductionCompositionTests(unittest.TestCase):
                 "org/apache/pdfbox/pdmodel/PDDocument.class", b""
             )
         self.ffmpeg = self.root / "ffmpeg.exe"
+        self.ffprobe = self.root / "ffprobe.exe"
         self.java = self.root / "java.exe"
         self.pyannote_python = self.root / "pyannote-python.exe"
         self.ffmpeg.write_bytes(b"fixture")
+        self.ffprobe.write_bytes(b"fixture")
         self.java.write_bytes(b"fixture")
         self.pyannote_python.write_bytes(b"fixture")
         self.config_path = self.root / "production.json"
@@ -161,6 +165,13 @@ class ProductionCompositionTests(unittest.TestCase):
                 "pyannoteMode": pyannote_mode,
                 "overlapRecoveryAsrMaxNewTokens": 72,
                 "localLlmMode": "suggestion-only",
+                "localLlmModel": "qwen3.5:9b",
+                "localLlmModelDigest": "a" * 64,
+                "localLlmTimeoutSeconds": 444,
+                "localLlmContextTokens": 32_768,
+                "localLlmOutputTokens": 4_096,
+                "localLlmBatchSize": 6,
+                "localLlmMaxRounds": 4,
             },
             "pdf": {
                 "minimumScore": 85,
@@ -174,6 +185,31 @@ class ProductionCompositionTests(unittest.TestCase):
             encoding="utf-8",
         )
         return ProductionConfig.load(self.config_path)
+
+    def explicit_secondary_mapping(
+        self,
+        *,
+        model_path: Path,
+        registry_model_id: str,
+        manifest_model_key: str,
+        manifest_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        value = self.mapping()
+        del value["models"]["eres2netV2"]
+        manifest_path = model_path / ".mts-model-manifest.json"
+        value["models"]["secondarySpeakerVerifier"] = {
+            "path": str(model_path),
+            "deploymentSlot": "secondary-speaker-verification",
+            "registryModelId": registry_model_id,
+            "manifestModelKey": manifest_model_key,
+            "manifestSha256": (
+                manifest_sha256
+                if manifest_sha256 is not None
+                else hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            ),
+            "adapterId": "modelscope-eres2netv2",
+        }
+        return value
 
     def test_load_resolves_relative_local_paths_and_dynamic_cardinality(self) -> None:
         config = self.load()
@@ -193,6 +229,15 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(config.speaker.pyannote_mode, "fallback")
         self.assertEqual(
+            config.speaker.local_llm_model_digest,
+            "sha256:" + "a" * 64,
+        )
+        self.assertEqual(config.speaker.local_llm_timeout_seconds, 444.0)
+        self.assertEqual(config.speaker.local_llm_context_tokens, 32_768)
+        self.assertEqual(config.speaker.local_llm_output_tokens, 4_096)
+        self.assertEqual(config.speaker.local_llm_batch_size, 6)
+        self.assertEqual(config.speaker.local_llm_max_rounds, 4)
+        self.assertEqual(
             config.speaker.overlap_recovery_asr_max_new_tokens,
             72,
         )
@@ -200,6 +245,226 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(config.runtime.model_residency, "worker")
         self.assertEqual(config.runtime.heartbeat_interval_seconds, 7.5)
         self.assertTrue(config.offline)
+        self.assertEqual(
+            config.models.secondary_speaker_verifier.deployment_slot,
+            "secondary-speaker-verification",
+        )
+        self.assertEqual(
+            config.models.secondary_speaker_verifier.registry_model_id,
+            "eres2netv2",
+        )
+        self.assertIsNone(
+            config.models.secondary_speaker_verifier.manifest_sha256
+        )
+        self.assertTrue(
+            config.models.secondary_speaker_verifier.legacy_binding
+        )
+
+    def test_configurable_remote_native_provider_uses_preset_without_network(self) -> None:
+        value = self.mapping()
+        value["mode"] = "configurable-production"
+        value["offline"] = False
+        value["runtime"]["pyannoteDevice"] = "cpu"
+        del value["speaker"]["localLlmModelDigest"]
+        value["speaker"]["localLlmModel"] = "claude-sonnet-4-5"
+        value["llm"] = {
+            "provider": "anthropic",
+            "endpoint": "https://api.anthropic.com/v1",
+            "apiKeyEnv": "MTS_TEST_ANTHROPIC_KEY",
+            "requireApiKey": True,
+        }
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        config = ProductionConfig.load(self.config_path)
+
+        self.assertEqual(config.llm.provider, "anthropic")
+        self.assertEqual(config.llm.model, "claude-sonnet-4-5")
+        self.assertEqual(config.llm.network_policy, "remote-explicit")
+        self.assertEqual(config.llm.api_key_env, "MTS_TEST_ANTHROPIC_KEY")
+        self.assertIsNone(config.speaker.local_llm_model_digest)
+        # Factory construction is side-effect free; no HTTP call occurs until
+        # generate_json is explicitly invoked.
+        provider = create_llm_provider(config.llm)
+        self.assertIsInstance(provider, AnthropicProvider)
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        self.assertTrue(report.passed)
+
+    def test_configurable_remote_provider_can_use_model_different_from_offline_default(self) -> None:
+        value = self.mapping()
+        value["mode"] = "configurable-production"
+        value["offline"] = False
+        value["runtime"]["pyannoteDevice"] = "cpu"
+        # Keep the audited offline champion in the legacy speaker field while
+        # selecting a replaceable remote deployment in the provider block.
+        value["speaker"]["localLlmModel"] = "qwen3.5:27b-q4_K_M"
+        del value["speaker"]["localLlmModelDigest"]
+        value["llm"] = {
+            "provider": "enterprise-relay",
+            "model": "deployment-b",
+            "endpoint": "https://relay.example/v1",
+            "apiKeyEnv": "RELAY_API_KEY",
+        }
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        config = ProductionConfig.load(self.config_path)
+
+        self.assertEqual(config.llm.provider, "enterprise-relay")
+        self.assertEqual(config.llm.model, "deployment-b")
+        self.assertEqual(config.speaker.local_llm_model, "qwen3.5:27b-q4_K_M")
+        self.assertTrue(config.llm.require_api_key)
+
+    def test_composition_remote_provider_factory_is_native_and_does_not_touch_network(self) -> None:
+        value = self.mapping()
+        value["mode"] = "configurable-production"
+        value["offline"] = False
+        value["runtime"]["pyannoteDevice"] = "cpu"
+        del value["speaker"]["localLlmModelDigest"]
+        value["speaker"]["localLlmModel"] = "claude-sonnet-4-5"
+        value["llm"] = {
+            "provider": "anthropic",
+            "endpoint": "https://api.anthropic.com/v1",
+            "apiKeyEnv": "MTS_TEST_ANTHROPIC_KEY",
+            "requireApiKey": True,
+        }
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        config = ProductionConfig.load(self.config_path)
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        factories = ProductionFactories(
+            preparation=RecordingFactory(),
+            asr=RecordingFactory(),
+            embedding=RecordingFactory(),
+            secondary=RecordingFactory(),
+            pyannote=RecordingFactory(),
+            separation=RecordingFactory(),
+            cache=RecordingFactory(),
+            pipeline=FakePipeline,
+            assembler=RecordingFactory(),
+            java_client_from_jar=RecordingFactory(),
+            renderer=RecordingFactory(),
+            media_probe=RecordingFactory(),
+            subtitle_delivery_executor=RecordingFactory(),
+            subtitle_visual_qa=RecordingFactory(),
+            service=FakeService,
+        )
+        composition = build_production_composition(
+            config,
+            preflight_report=report,
+            factories=factories,
+        )
+        request = SimpleNamespace(
+            business_config=SimpleNamespace(
+                model="claude-sonnet-4-5",
+                translation_targets=(),
+            ),
+            local_llm_model="claude-sonnet-4-5",
+            local_llm_endpoint="https://api.anthropic.com/v1",
+        )
+
+        provider = composition.service.kwargs["business_provider_factory"](request)
+
+        self.assertIsInstance(provider, AnthropicProvider)
+        self.assertEqual(provider.config.endpoint, "https://api.anthropic.com/v1")
+
+    def test_configurable_loopback_provider_still_requires_digest(self) -> None:
+        value = self.mapping()
+        value["mode"] = "configurable-production"
+        value["offline"] = False
+        value["runtime"]["pyannoteDevice"] = "cpu"
+        del value["speaker"]["localLlmModelDigest"]
+        value["llm"] = {
+            "provider": "ollama-loopback",
+            "model": "qwen3.5:27b-q4_K_M",
+            "endpoint": "http://127.0.0.1:11434",
+        }
+        value["speaker"]["localLlmModel"] = "qwen3.5:27b-q4_K_M"
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "localLlmModelDigest",
+        ):
+            ProductionConfig.load(self.config_path)
+
+    def test_explicit_challenger_binding_controls_manifest_and_fingerprint(
+        self,
+    ) -> None:
+        challenger = self.root / "eres-wide"
+        challenger.mkdir()
+        self._write_model_fixture(
+            challenger,
+            model_key="eres2netV2LargeCandidate",
+        )
+        value = self.explicit_secondary_mapping(
+            model_path=challenger,
+            registry_model_id="eres2netv2-w24s4ep4",
+            manifest_model_key="eres2netV2LargeCandidate",
+        )
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+
+        challenger_config = ProductionConfig.load(self.config_path)
+        binding = challenger_config.models.secondary_speaker_verifier
+        self.assertEqual(binding.path, challenger)
+        self.assertEqual(binding.registry_model_id, "eres2netv2-w24s4ep4")
+        self.assertEqual(
+            binding.manifest_model_key,
+            "eres2netV2LargeCandidate",
+        )
+        self.assertTrue(binding.manifest_sha256.startswith("sha256:"))
+        self.assertFalse(binding.legacy_binding)
+        report = run_production_preflight(
+            challenger_config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        by_id = {check.check_id: check for check in report.checks}
+        self.assertTrue(report.passed)
+        self.assertTrue(
+            by_id["secondary-speaker-verifier-model-integrity"].passed
+        )
+        self.assertNotEqual(challenger_config.fingerprint(), self.load().fingerprint())
+
+    def test_secondary_binding_is_exclusive_and_manifest_pinned(self) -> None:
+        value = self.mapping()
+        value["models"]["secondarySpeakerVerifier"] = {
+            "path": "eres",
+            "deploymentSlot": "secondary-speaker-verification",
+            "registryModelId": "eres2netv2",
+            "manifestModelKey": "eres2netV2",
+            "manifestSha256": "a" * 64,
+            "adapterId": "modelscope-eres2netv2",
+        }
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ProductionConfigError, "exactly one"):
+            ProductionConfig.load(self.config_path)
+
+        del value["models"]["eres2netV2"]
+        value["models"]["secondarySpeakerVerifier"]["manifestSha256"] = (
+            "b" * 64
+        )
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        config = ProductionConfig.load(self.config_path)
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        by_id = {check.check_id: check for check in report.checks}
+        self.assertFalse(
+            by_id["secondary-speaker-verifier-model-integrity"].passed
+        )
+
+        del value["models"]["secondarySpeakerVerifier"]
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ProductionConfigError, "exactly one"):
+            ProductionConfig.load(self.config_path)
 
     def test_rejects_pdf_font_not_bundled_by_renderer(self) -> None:
         mapping = self.mapping()
@@ -235,6 +500,44 @@ class ProductionCompositionTests(unittest.TestCase):
             config.speaker.local_llm_model,
             "candidate-structural:14b",
         )
+
+    def test_local_model_generation_limits_fail_closed(self) -> None:
+        value = self.mapping()
+        del value["speaker"]["localLlmModelDigest"]
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "missing required fields",
+        ):
+            ProductionConfig.load(self.config_path)
+
+        value = self.mapping()
+        value["speaker"]["localLlmModelDigest"] = "not-a-digest"
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "localLlmModelDigest",
+        ):
+            ProductionConfig.load(self.config_path)
+
+        value = self.mapping()
+        value["speaker"]["localLlmContextTokens"] = 1024
+        value["speaker"]["localLlmOutputTokens"] = 2048
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "localLlmOutputTokens",
+        ):
+            ProductionConfig.load(self.config_path)
+
+        value = self.mapping()
+        value["speaker"]["localLlmBatchSize"] = 33
+        self.config_path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ProductionConfigError,
+            "localLlmBatchSize must be between 1 and 32",
+        ):
+            ProductionConfig.load(self.config_path)
 
     def test_pyannote_mode_and_model_must_agree(self) -> None:
         value = self.mapping(pyannote_mode="fallback")
@@ -323,6 +626,81 @@ class ProductionCompositionTests(unittest.TestCase):
         code = run.call_args.args[0][-1]
         self.assertLess(code.index("import setuptools"), code.index("importlib"))
 
+    def test_isolated_python_cuda_probe_requires_available_sentinel(self) -> None:
+        completed = CompletedProcess(
+            args=[str(self.pyannote_python)],
+            returncode=0,
+            stdout=b"available\n",
+            stderr=b"",
+        )
+
+        with patch(
+            "backend.production_config.subprocess.run",
+            return_value=completed,
+        ) as run:
+            self.assertTrue(
+                _probe_python_cuda_available(str(self.pyannote_python))
+            )
+
+        self.assertEqual(run.call_args.args[0][0], str(self.pyannote_python))
+        self.assertIn("torch.cuda.is_available()", run.call_args.args[0][-1])
+        self.assertEqual(run.call_args.kwargs["timeout"], 120.0)
+
+        completed.stdout = b"unavailable\n"
+        with patch(
+            "backend.production_config.subprocess.run",
+            return_value=completed,
+        ):
+            self.assertFalse(
+                _probe_python_cuda_available(str(self.pyannote_python))
+            )
+
+    def test_preflight_rejects_unavailable_isolated_pyannote_cuda(self) -> None:
+        config = self.load(pyannote_mode="fallback")
+
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            pyannote_cuda_probe=lambda _python: False,
+            probe_executables=False,
+        )
+        by_id = {check.check_id: check for check in report.checks}
+
+        self.assertFalse(report.passed)
+        self.assertFalse(by_id["runtime-pyannote-cuda"].passed)
+        self.assertEqual(
+            by_id["runtime-pyannote-cuda"].reason_code,
+            "ISOLATED_PYANNOTE_CUDA_REQUIRED",
+        )
+        with self.assertRaises(ProductionConfigError) as captured:
+            report.raise_if_failed()
+        self.assertIn(
+            "runtime-pyannote-cuda",
+            captured.exception.details["failedChecks"],
+        )
+
+    def test_preflight_skips_cuda_probe_for_cpu_pyannote(self) -> None:
+        config = self.load(pyannote_mode="fallback")
+        config = replace(
+            config,
+            runtime=replace(config.runtime, pyannote_device="cpu"),
+        )
+
+        cuda_probe = RecordingFactory(False)
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            pyannote_cuda_probe=cuda_probe,
+            probe_executables=False,
+        )
+
+        self.assertTrue(report.passed)
+        self.assertEqual(cuda_probe.calls, [])
+        self.assertNotIn(
+            "runtime-pyannote-cuda",
+            {check.check_id for check in report.checks},
+        )
+
     def test_preflight_checks_funasr_campplus_registration_module(self) -> None:
         config = self.load()
         probed: list[str] = []
@@ -356,6 +734,84 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(
             by_id["cam-plus-model-integrity"].reason_code,
             "LOCKED_MODEL_CONTENT_INTEGRITY",
+        )
+        self.assertFalse(report.passed)
+
+    def test_preflight_accepts_byte_preserving_reshard_manifest(self) -> None:
+        config = self.load()
+        manifest_path = (
+            config.models.qwen3_forced_aligner / ".mts-model-manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.update(
+            {
+                "schemaVersion": "1.1.0",
+                "kind": "derived-safetensors-reshard",
+                "reshard": {
+                    "schemaVersion": "1.0.0",
+                    "tool": "tools/reshard_safetensors.py",
+                    "exactTensorBytesPreserved": True,
+                    "modelQualityChanged": False,
+                    "source": {
+                        field: manifest[field]
+                        for field in (
+                            "modelKey",
+                            "provider",
+                            "repoId",
+                            "revision",
+                        )
+                    },
+                },
+            }
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+
+        self.assertTrue(report.passed)
+
+    def test_preflight_rejects_reshard_without_preservation_evidence(self) -> None:
+        config = self.load()
+        manifest_path = (
+            config.models.qwen3_forced_aligner / ".mts-model-manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.update(
+            {
+                "schemaVersion": "1.1.0",
+                "kind": "derived-safetensors-reshard",
+                "reshard": {
+                    "schemaVersion": "1.0.0",
+                    "tool": "tools/reshard_safetensors.py",
+                    "exactTensorBytesPreserved": False,
+                    "modelQualityChanged": False,
+                    "source": {
+                        field: manifest[field]
+                        for field in (
+                            "modelKey",
+                            "provider",
+                            "repoId",
+                            "revision",
+                        )
+                    },
+                },
+            }
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        report = run_production_preflight(
+            config,
+            runtime_probe=lambda _module: True,
+            probe_executables=False,
+        )
+        by_id = {check.check_id: check for check in report.checks}
+
+        self.assertFalse(
+            by_id["qwen3-forced-aligner-model-integrity"].passed
         )
         self.assertFalse(report.passed)
 
@@ -400,6 +856,12 @@ class ProductionCompositionTests(unittest.TestCase):
         assembler = RecordingFactory(SimpleNamespace())
         java_client = RecordingFactory(SimpleNamespace())
         renderer = RecordingFactory(SimpleNamespace(adapter_id="renderer"))
+        subtitle_delivery_executor = RecordingFactory(
+            SimpleNamespace(adapter_id="subtitle-delivery")
+        )
+        subtitle_visual_qa = RecordingFactory(
+            SimpleNamespace(adapter_id="subtitle-visual-qa")
+        )
         composition = build_production_composition(
             config,
             preflight_report=report,
@@ -414,6 +876,8 @@ class ProductionCompositionTests(unittest.TestCase):
                 assembler=assembler,
                 java_client_from_jar=java_client,
                 renderer=renderer,
+                subtitle_delivery_executor=subtitle_delivery_executor,
+                subtitle_visual_qa=subtitle_visual_qa,
                 service=FakeService,
             ),
         )
@@ -443,6 +907,18 @@ class ProductionCompositionTests(unittest.TestCase):
             128,
         )
         self.assertEqual(len(secondary.calls), 1)
+        secondary_kwargs = secondary.calls[0][1]
+        self.assertEqual(
+            secondary_kwargs["deployment_slot"],
+            "secondary-speaker-verification",
+        )
+        self.assertEqual(secondary_kwargs["registry_model_id"], "eres2netv2")
+        self.assertEqual(secondary_kwargs["manifest_model_key"], "eres2netV2")
+        self.assertIsNone(secondary_kwargs["manifest_sha256"])
+        self.assertEqual(
+            secondary_kwargs["adapter_id"],
+            "modelscope-eres2netv2",
+        )
         self.assertEqual(len(pyannote.calls), 1)
         self.assertEqual(
             pyannote.calls[0][1]["python_executable"],
@@ -456,6 +932,34 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(
             embedding.calls[0][1]["language_split_search_ms"],
             900,
+        )
+        self.assertEqual(len(subtitle_delivery_executor.calls), 1)
+        subtitle_delivery_kwargs = subtitle_delivery_executor.calls[0][1]
+        self.assertIs(
+            subtitle_delivery_kwargs["probe"],
+            service.kwargs["media_probe"],
+        )
+        self.assertEqual(
+            subtitle_delivery_kwargs["ffmpeg_command"],
+            (str(self.ffmpeg),),
+        )
+        self.assertIs(
+            service.kwargs["subtitle_delivery_executor"],
+            subtitle_delivery_executor.result,
+        )
+        self.assertEqual(len(subtitle_visual_qa.calls), 1)
+        subtitle_visual_qa_kwargs = subtitle_visual_qa.calls[0][1]
+        self.assertEqual(
+            subtitle_visual_qa_kwargs["ffmpeg_path"],
+            str(self.ffmpeg),
+        )
+        self.assertIs(
+            subtitle_visual_qa_kwargs["probe"],
+            service.kwargs["media_probe"],
+        )
+        self.assertIs(
+            service.kwargs["subtitle_visual_qa_hook"],
+            subtitle_visual_qa.result,
         )
         request = SimpleNamespace(
             business_config=SimpleNamespace(
@@ -474,9 +978,24 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual(business_provider.config.keep_alive, "10m")
         self.assertEqual(semantic_provider.config.keep_alive, "10m")
-        self.assertEqual(semantic_orchestrator.arbitrator.batch_size, 8)
+        self.assertEqual(business_provider.config.timeout_seconds, 444.0)
+        self.assertEqual(semantic_provider.config.context_tokens, 32_768)
+        self.assertEqual(semantic_provider.config.output_tokens, 4_096)
+        self.assertEqual(
+            semantic_provider.config.expected_model_digest,
+            "sha256:" + "a" * 64,
+        )
+        self.assertEqual(semantic_orchestrator.arbitrator.batch_size, 6)
+        self.assertEqual(semantic_orchestrator.max_rounds, 4)
         self.assertFalse(business_provider.config.release_on_close)
         self.assertFalse(semantic_provider.config.release_on_close)
+
+        request.business_config.model = "unpinned-candidate:latest"
+        with self.assertRaisesRegex(
+            ValueError,
+            "must match the digest-pinned local LLM model",
+        ):
+            service.kwargs["business_provider_factory"](request)
 
     def test_stage_residency_stays_warm_and_explicitly_releases(self) -> None:
         config = self.load()

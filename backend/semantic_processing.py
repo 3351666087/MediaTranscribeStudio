@@ -29,7 +29,8 @@ from .local_llm import (
     LocalLLMContextWindowError,
     LocalLLMError,
     LocalLLMProvider,
-    assert_loopback_provider,
+    PROVIDER_NETWORK_POLICIES,
+    assert_provider_network_policy,
     estimate_input_tokens,
     parse_strict_json_object,
 )
@@ -669,7 +670,7 @@ def _provider_identity(provider: LocalLLMProvider) -> dict[str, str]:
     return {
         "id": str(getattr(provider, "provider_id", "unknown")),
         "version": str(getattr(provider, "provider_version", "unknown")),
-        "networkPolicy": assert_loopback_provider(provider),
+        "networkPolicy": assert_provider_network_policy(provider),
     }
 
 
@@ -1763,7 +1764,7 @@ def validate_semantic_suggestions_artifact(
     provider = value.get("provider")
     if (
         not isinstance(provider, Mapping)
-        or provider.get("networkPolicy") != "loopback-only"
+        or provider.get("networkPolicy") not in PROVIDER_NETWORK_POLICIES
         or not isinstance(provider.get("id"), str)
         or not provider["id"]
         or not isinstance(provider.get("version"), str)

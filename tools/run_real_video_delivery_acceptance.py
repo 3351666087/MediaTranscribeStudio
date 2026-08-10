@@ -453,7 +453,9 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         rendered_path: Path,
         arrangement: Any,
         delivery_receipt: Any,
+        execution_plan: Any | None = None,
     ) -> dict[str, Any]:
+        del execution_plan
         mode = delivery_receipt.mode.value
         qa_root = output_root / "representative-frames" / mode
         qa_root.mkdir(parents=True, exist_ok=True)

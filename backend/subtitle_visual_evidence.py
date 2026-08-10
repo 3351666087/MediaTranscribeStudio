@@ -57,6 +57,13 @@ SUBTITLE_RENDER_EVIDENCE_RESULT_KIND = "subtitle-render-evidence-result"
 SUBTITLE_RENDER_EVIDENCE_STRATEGY = (
     "cue-interior-contrast-candidates-v1"
 )
+CONTRAST_MATTE_TRANSFORM_NAME = "canonical-ass-contrast-mattes"
+CONTRAST_MATTE_TRANSFORM_VERSION = "1.0.0"
+CONTRAST_BACKGROUND_STRATEGY = "background-only-ass-v1"
+GLYPH_FILL_MATTE_STRATEGY = "opaque-white-fill-ass-v1"
+GLYPH_CORE_COMPONENT_STRATEGY = "glyph-fill-core-component-q05-v2"
+TINY_COMPONENT_MAX_PIXELS = 6
+TINY_COMPONENT_MINIMUM_ALPHA = 0.50
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -383,6 +390,7 @@ class CueFrameObservation:
     edge_touching_pixel_count: int
     overflow_detected: bool
     contrast_samples: tuple[ContrastObservation, ...]
+    contrast_diagnostics: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +409,8 @@ class FrameAnalyzer(Protocol):
         *,
         rendered_frame_path: Path,
         source_frame_path: Path,
+        contrast_background_frame_path: Path | None,
+        glyph_fill_matte_frame_path: Path | None,
         frame_id: str,
         timestamp_ms: int,
         width_px: int,
@@ -420,6 +430,12 @@ class PillowAnalysisPolicy:
     minimum_component_pixels: int = 4
     minimum_strong_ink_pixels: int = 4
     minimum_ink_pixels: int = 8
+    minimum_paired_core_pixels: int = 32
+    glyph_core_minimum_alpha: float = 0.80
+    glyph_core_quantile: float = 0.75
+    component_contrast_quantile: float = 0.05
+    tiny_component_max_pixels: int = TINY_COMPONENT_MAX_PIXELS
+    tiny_component_minimum_alpha: float = TINY_COMPONENT_MINIMUM_ALPHA
     search_margin_px: int = 8
     maximum_analyzed_pixels_per_cue: int = 20_000_000
     maximum_candidate_pixels_per_cue: int = 2_000_000
@@ -449,6 +465,31 @@ class PillowAnalysisPolicy:
             )
         if not 1 <= self.minimum_ink_pixels <= 1_000_000:
             raise ValueError("minimum_ink_pixels must be 1..1000000")
+        if not 1 <= self.minimum_paired_core_pixels <= 1_000_000:
+            raise ValueError(
+                "minimum_paired_core_pixels must be 1..1000000"
+            )
+        if not 0.0 < self.glyph_core_minimum_alpha <= 1.0:
+            raise ValueError("glyph_core_minimum_alpha must be in (0, 1]")
+        if not 0.0 < self.glyph_core_quantile <= 1.0:
+            raise ValueError("glyph_core_quantile must be in (0, 1]")
+        if not 0.0 < self.component_contrast_quantile <= 1.0:
+            raise ValueError(
+                "component_contrast_quantile must be in (0, 1]"
+            )
+        if self.tiny_component_max_pixels != TINY_COMPONENT_MAX_PIXELS:
+            raise ValueError(
+                "tiny_component_max_pixels is fixed at 6 for the v2 "
+                "glyph-matte strategy"
+            )
+        if (
+            self.tiny_component_minimum_alpha
+            != TINY_COMPONENT_MINIMUM_ALPHA
+        ):
+            raise ValueError(
+                "tiny_component_minimum_alpha is fixed at 0.50 for the v2 "
+                "glyph-matte strategy"
+            )
         if not 0 <= self.search_margin_px <= 128:
             raise ValueError("search_margin_px must be 0..128")
         if not (
@@ -504,6 +545,18 @@ class PillowFrameAnalyzer:
                 self.policy.minimum_strong_ink_pixels
             ),
             "minimumInkPixels": self.policy.minimum_ink_pixels,
+            "minimumPairedCorePixels": (
+                self.policy.minimum_paired_core_pixels
+            ),
+            "glyphCoreMinimumAlpha": self.policy.glyph_core_minimum_alpha,
+            "glyphCoreQuantile": self.policy.glyph_core_quantile,
+            "componentContrastQuantile": (
+                self.policy.component_contrast_quantile
+            ),
+            "tinyComponentMaxPixels": self.policy.tiny_component_max_pixels,
+            "tinyComponentMinimumAlpha": (
+                self.policy.tiny_component_minimum_alpha
+            ),
             "searchMarginPx": self.policy.search_margin_px,
             "maximumAnalyzedPixelsPerCue": (
                 self.policy.maximum_analyzed_pixels_per_cue
@@ -513,8 +566,8 @@ class PillowFrameAnalyzer:
             ),
         }
         self._descriptor = ComponentDescriptor(
-            name="pillow-source-render-delta",
-            version="1.1.0",
+            name="pillow-source-render-and-glyph-matte",
+            version="2.1.0",
             configuration_sha256=deterministic_sha256(configuration),
         )
 
@@ -537,6 +590,8 @@ class PillowFrameAnalyzer:
         *,
         rendered_frame_path: Path,
         source_frame_path: Path,
+        contrast_background_frame_path: Path | None = None,
+        glyph_fill_matte_frame_path: Path | None = None,
         frame_id: str,
         timestamp_ms: int,
         width_px: int,
@@ -553,6 +608,20 @@ class PillowFrameAnalyzer:
             with image_module.open(source_frame_path) as source_image:
                 source_image.load()
                 source = source_image.convert("RGB")
+            contrast_background = None
+            glyph_fill_matte = None
+            if contrast_background_frame_path is not None:
+                with image_module.open(
+                    contrast_background_frame_path
+                ) as background_image:
+                    background_image.load()
+                    contrast_background = background_image.convert("RGB")
+            if glyph_fill_matte_frame_path is not None:
+                with image_module.open(
+                    glyph_fill_matte_frame_path
+                ) as matte_image:
+                    matte_image.load()
+                    glyph_fill_matte = matte_image.convert("RGB")
         except SubtitleVisualEvidenceError:
             raise
         except Exception as exc:
@@ -567,6 +636,21 @@ class PillowFrameAnalyzer:
                 SubtitleVisualEvidenceErrorCode.VIDEO_MISMATCH,
                 "Rendered and source representative frames differ in size.",
             )
+        if (contrast_background is None) != (glyph_fill_matte is None):
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Contrast background and glyph-fill matte frames must be "
+                "supplied together.",
+            )
+        if contrast_background is not None and (
+            contrast_background.size != rendered.size
+            or glyph_fill_matte is None
+            or glyph_fill_matte.size != rendered.size
+        ):
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.VIDEO_MISMATCH,
+                "Contrast evidence frames differ from the rendered frame size.",
+            )
         if rendered.size != (width_px, height_px):
             raise SubtitleVisualEvidenceError(
                 SubtitleVisualEvidenceErrorCode.VIDEO_MISMATCH,
@@ -575,10 +659,20 @@ class PillowFrameAnalyzer:
 
         rendered_pixels = rendered.load()
         source_pixels = source.load()
+        contrast_background_pixels = (
+            contrast_background.load()
+            if contrast_background is not None
+            else None
+        )
+        glyph_fill_matte_pixels = (
+            glyph_fill_matte.load() if glyph_fill_matte is not None else None
+        )
         instances = tuple(
             self._analyze_cue(
                 rendered_pixels=rendered_pixels,
                 source_pixels=source_pixels,
+                contrast_background_pixels=contrast_background_pixels,
+                glyph_fill_matte_pixels=glyph_fill_matte_pixels,
                 width_px=width_px,
                 height_px=height_px,
                 cue=cue,
@@ -597,6 +691,8 @@ class PillowFrameAnalyzer:
         *,
         rendered_pixels: Any,
         source_pixels: Any,
+        contrast_background_pixels: Any | None,
+        glyph_fill_matte_pixels: Any | None,
         width_px: int,
         height_px: int,
         cue: Mapping[str, Any],
@@ -773,6 +869,54 @@ class PillowFrameAnalyzer:
             minimum=0.0,
             maximum=1.0,
         )
+        if (
+            contrast_background_pixels is not None
+            and glyph_fill_matte_pixels is not None
+        ):
+            samples, diagnostics = self._glyph_matte_contrast_samples(
+                rendered_pixels=rendered_pixels,
+                source_pixels=source_pixels,
+                contrast_background_pixels=contrast_background_pixels,
+                glyph_fill_matte_pixels=glyph_fill_matte_pixels,
+                bounds=bounds,
+                dark_maximum=dark_maximum,
+                light_minimum=light_minimum,
+                cue_id=str(cue["cueId"]),
+            )
+        else:
+            samples = self._legacy_contrast_samples(
+                inside=inside,
+                dark_maximum=dark_maximum,
+                light_minimum=light_minimum,
+            )
+            diagnostics = None
+
+        return CueFrameObservation(
+            cue_id=str(cue["cueId"]),
+            bounds=bounds,
+            ink_bounds=ink_bounds,
+            clipped_pixel_count=frame_edge_count,
+            edge_touching_pixel_count=frame_edge_count,
+            overflow_detected=outside_count > 0 or touches_declared_edge,
+            contrast_samples=tuple(samples),
+            contrast_diagnostics=diagnostics,
+        )
+
+    def _legacy_contrast_samples(
+        self,
+        *,
+        inside: Sequence[
+            tuple[
+                int,
+                int,
+                tuple[int, int, int],
+                tuple[int, int, int],
+                int,
+            ]
+        ],
+        dark_maximum: float,
+        light_minimum: float,
+    ) -> list[ContrastObservation]:
         buckets: dict[
             str,
             list[
@@ -818,15 +962,269 @@ class PillowFrameAnalyzer:
                 )
             )
 
-        return CueFrameObservation(
-            cue_id=str(cue["cueId"]),
-            bounds=bounds,
-            ink_bounds=ink_bounds,
-            clipped_pixel_count=frame_edge_count,
-            edge_touching_pixel_count=frame_edge_count,
-            overflow_detected=outside_count > 0 or touches_declared_edge,
-            contrast_samples=tuple(samples),
+        return samples
+
+    def _glyph_matte_contrast_samples(
+        self,
+        *,
+        rendered_pixels: Any,
+        source_pixels: Any,
+        contrast_background_pixels: Any,
+        glyph_fill_matte_pixels: Any,
+        bounds: Mapping[str, int],
+        dark_maximum: float,
+        light_minimum: float,
+        cue_id: str,
+    ) -> tuple[list[ContrastObservation], dict[str, Any]]:
+        right = bounds["x"] + bounds["width"]
+        bottom = bounds["y"] + bounds["height"]
+        alpha_pixels: dict[tuple[int, int], int] = {}
+        for y_coord in range(bounds["y"], bottom):
+            for x_coord in range(bounds["x"], right):
+                matte_rgb = glyph_fill_matte_pixels[x_coord, y_coord]
+                alpha_byte = max(matte_rgb)
+                if alpha_byte > 0:
+                    alpha_pixels[(x_coord, y_coord)] = alpha_byte
+        if len(alpha_pixels) > self.policy.maximum_candidate_pixels_per_cue:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                f"Cue {cue_id!r} exceeds the bounded glyph-matte allowance.",
+            )
+
+        components = self._coordinate_components(alpha_pixels)
+        meaningful = [
+            component
+            for component in components
+            if len(component) >= self.policy.minimum_component_pixels
+        ]
+        if not meaningful:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                f"Cue {cue_id!r} has no meaningful glyph-fill components.",
+            )
+
+        alpha_q75 = _nearest_rank_quantile(
+            tuple(alpha_pixels.values()),
+            self.policy.glyph_core_quantile,
         )
+        core_alpha = max(
+            round(self.policy.glyph_core_minimum_alpha * 255),
+            alpha_q75,
+        )
+        component_rows: list[dict[str, Any]] = []
+        tiny_component_fallback_count = 0
+        paired_by_class: dict[str, list[dict[str, Any]]] = {
+            "dark": [],
+            "light": [],
+        }
+        all_core_coordinates: list[tuple[int, int]] = []
+        underlying_classes: set[str] = set()
+        effective_classes: set[str] = set()
+
+        for component_index, component in enumerate(meaningful):
+            core_alpha_threshold = core_alpha
+            core_coordinates = sorted(
+                (
+                    coordinate
+                    for coordinate in component
+                    if alpha_pixels[coordinate] >= core_alpha
+                ),
+                key=lambda coordinate: (coordinate[1], coordinate[0]),
+            )
+            tiny_component_fallback = False
+            if not core_coordinates and (
+                len(component) <= self.policy.tiny_component_max_pixels
+            ):
+                # Small punctuation can be entirely antialiased by libass at
+                # low raster resolutions. Keep it auditable without allowing
+                # a larger, low-alpha component to bypass the global core
+                # threshold: use the component-local Q75 only for <=6 pixels,
+                # with a minimum alpha floor of 0.50.
+                component_alpha_q75 = _nearest_rank_quantile(
+                    tuple(alpha_pixels[coordinate] for coordinate in component),
+                    self.policy.glyph_core_quantile,
+                )
+                local_core_alpha = max(
+                    round(
+                        self.policy.tiny_component_minimum_alpha * 255
+                    ),
+                    component_alpha_q75,
+                )
+                fallback_coordinates = sorted(
+                    (
+                        coordinate
+                        for coordinate in component
+                        if alpha_pixels[coordinate] >= local_core_alpha
+                    ),
+                    key=lambda coordinate: (coordinate[1], coordinate[0]),
+                )
+                if fallback_coordinates:
+                    core_coordinates = fallback_coordinates
+                    core_alpha_threshold = local_core_alpha
+                    tiny_component_fallback = True
+                    tiny_component_fallback_count += 1
+            if not core_coordinates:
+                raise SubtitleVisualEvidenceError(
+                    SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                    f"Cue {cue_id!r} has an uncovered glyph component.",
+                )
+            all_core_coordinates.extend(core_coordinates)
+            row = {
+                "componentIndex": component_index,
+                "pixelCount": len(component),
+                "corePixelCount": len(core_coordinates),
+                "coreAlphaThreshold": core_alpha_threshold,
+                "tinyComponentFallback": tiny_component_fallback,
+                "bounds": _coordinate_bounds(component),
+            }
+            component_rows.append(row)
+            for x_coord, y_coord in core_coordinates:
+                foreground_rgb = rendered_pixels[x_coord, y_coord]
+                background_rgb = contrast_background_pixels[x_coord, y_coord]
+                source_rgb = source_pixels[x_coord, y_coord]
+                effective_class = _luminance_class(
+                    background_rgb,
+                    dark_maximum=dark_maximum,
+                    light_minimum=light_minimum,
+                )
+                underlying_class = _luminance_class(
+                    source_rgb,
+                    dark_maximum=dark_maximum,
+                    light_minimum=light_minimum,
+                )
+                if underlying_class is not None:
+                    underlying_classes.add(underlying_class)
+                if effective_class is None:
+                    continue
+                effective_classes.add(effective_class)
+                paired_by_class[effective_class].append(
+                    {
+                        "componentIndex": component_index,
+                        "x": x_coord,
+                        "y": y_coord,
+                        "foregroundRgb": foreground_rgb,
+                        "backgroundRgb": background_rgb,
+                        "ratio": contrast_ratio(
+                            _rgb_hex(foreground_rgb),
+                            _rgb_hex(background_rgb),
+                        ),
+                    }
+                )
+
+        if len(all_core_coordinates) < self.policy.minimum_paired_core_pixels:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                f"Cue {cue_id!r} has fewer than "
+                f"{self.policy.minimum_paired_core_pixels} paired glyph-core "
+                "pixels.",
+            )
+
+        samples: list[ContrastObservation] = []
+        for background_class in ("dark", "light"):
+            pixels = paired_by_class[background_class]
+            if not pixels:
+                continue
+            by_component: dict[int, list[dict[str, Any]]] = {}
+            for pixel in pixels:
+                by_component.setdefault(pixel["componentIndex"], []).append(
+                    pixel
+                )
+            component_q05 = [
+                _quantile_pixel(
+                    component_pixels,
+                    self.policy.component_contrast_quantile,
+                )
+                for _index, component_pixels in sorted(by_component.items())
+            ]
+            representative = min(
+                component_q05,
+                key=lambda item: (
+                    item["ratio"],
+                    item["componentIndex"],
+                    item["y"],
+                    item["x"],
+                ),
+            )
+            samples.append(
+                ContrastObservation(
+                    background_class=background_class,
+                    foreground_rgb=_rgb_hex(representative["foregroundRgb"]),
+                    background_rgb=_rgb_hex(representative["backgroundRgb"]),
+                    foreground_pixel_count=len(pixels),
+                    background_pixel_count=len(pixels),
+                )
+            )
+
+        coverage_core = [
+            {
+                "bounds": row["bounds"],
+                "corePixelCount": row["corePixelCount"],
+                "pixelCount": row["pixelCount"],
+                "coreAlphaThreshold": row["coreAlphaThreshold"],
+                "tinyComponentFallback": row["tinyComponentFallback"],
+            }
+            for row in component_rows
+        ]
+        diagnostics = {
+            "strategy": GLYPH_CORE_COMPONENT_STRATEGY,
+            "glyphComponentCount": len(meaningful),
+            "glyphComponentsCovered": len(component_rows),
+            "pairedCorePixelCount": len(all_core_coordinates),
+            "glyphCoreAlphaThreshold": round(core_alpha / 255.0, 6),
+            "glyphNonzeroAlphaQuantile75": round(alpha_q75 / 255.0, 6),
+            "componentContrastQuantile": (
+                self.policy.component_contrast_quantile
+            ),
+            "tinyComponentFallbackCount": tiny_component_fallback_count,
+            "tinyComponentMaxPixels": self.policy.tiny_component_max_pixels,
+            "tinyComponentMinimumAlpha": (
+                self.policy.tiny_component_minimum_alpha
+            ),
+            "minimumComponentCorePixelCount": min(
+                row["corePixelCount"] for row in component_rows
+            ),
+            "effectiveBackgroundClasses": sorted(effective_classes),
+            "underlyingSceneClasses": sorted(underlying_classes),
+            "componentCoverageSha256": deterministic_sha256(coverage_core),
+        }
+        return samples, diagnostics
+
+    @staticmethod
+    def _coordinate_components(
+        pixels: Mapping[tuple[int, int], int],
+    ) -> list[list[tuple[int, int]]]:
+        remaining = set(pixels)
+        components: list[list[tuple[int, int]]] = []
+        while remaining:
+            start = min(remaining, key=lambda item: (item[1], item[0]))
+            remaining.remove(start)
+            stack = [start]
+            component = [start]
+            while stack:
+                x_coord, y_coord = stack.pop()
+                for y_offset in (-1, 0, 1):
+                    for x_offset in (-1, 0, 1):
+                        if x_offset == 0 and y_offset == 0:
+                            continue
+                        neighbor = (
+                            x_coord + x_offset,
+                            y_coord + y_offset,
+                        )
+                        if neighbor not in remaining:
+                            continue
+                        remaining.remove(neighbor)
+                        component.append(neighbor)
+                        stack.append(neighbor)
+            component.sort(key=lambda item: (item[1], item[0]))
+            components.append(component)
+        components.sort(
+            key=lambda component: (
+                component[0][1],
+                component[0][0],
+                len(component),
+            )
+        )
+        return components
 
     def _coherent_ink_components(
         self,
@@ -990,8 +1388,18 @@ class _RenderEvidenceContext:
     overlay_path: Path | None
     overlay_snapshot: Mapping[str, Any] | None
     overlay_sha256: str | None
+    contrast_background_ass: bytes | None
+    glyph_fill_matte_ass: bytes | None
+    contrast_matte_evidence: Mapping[str, Any] | None
     delivery_receipt_sha256: str | None
     effective_render_configuration_sha256: str
+
+
+@dataclass(frozen=True)
+class _StagedAssOverlays:
+    canonical: Path
+    contrast_background: Path
+    glyph_fill_matte: Path
 
 
 def default_subtitle_visual_evidence_sampling() -> dict[str, Any]:
@@ -1117,13 +1525,14 @@ class SubtitleVisualEvidenceCollector:
             "deliveryReceiptSha256": (
                 render_context.delivery_receipt_sha256
             ),
+            "contrastMatte": render_context.contrast_matte_evidence,
             "privatePathsIncluded": False,
         }
         request_sha256 = deterministic_sha256(request_binding)
 
         temporary_root = self._make_same_directory_temp(rendered_path)
         try:
-            staged_ass_overlay = self._stage_ass_overlay(
+            staged_ass_overlays = self._stage_ass_overlay(
                 render_context,
                 temporary_root=temporary_root,
             )
@@ -1163,7 +1572,7 @@ class SubtitleVisualEvidenceCollector:
                 cues=normalized["cues"],
                 contrast_policy=normalized["policy"]["contrast"],
                 temporary_root=temporary_root,
-                staged_ass_overlay=staged_ass_overlay,
+                staged_ass_overlays=staged_ass_overlays,
                 render_context=render_context,
             )
             selection_core = {
@@ -1256,6 +1665,10 @@ class SubtitleVisualEvidenceCollector:
                 "qaRequest": qa_request,
                 "qaRequestSha256": qa_request_sha256,
             }
+            if render_context.contrast_matte_evidence is not None:
+                payload["contrastMatte"] = copy.deepcopy(
+                    render_context.contrast_matte_evidence
+                )
             payload["evidenceArtifactSha256"] = deterministic_sha256(
                 payload
             )
@@ -1307,16 +1720,16 @@ class SubtitleVisualEvidenceCollector:
 
         if has_overlay_path and receipt_payload is None:
             _invalid(
-                "soft-mux overlay evidence requires a delivery receipt"
+                "canonical ASS overlay evidence requires a delivery receipt"
             )
-        if delivery_mode == "soft-mux" and not has_overlay_path:
+        if delivery_mode in {"soft-mux", "burn-in"} and not has_overlay_path:
             _invalid(
-                "soft-mux visual evidence requires the canonical private "
-                "ASS overlay"
+                "media visual evidence requires the canonical private ASS "
+                "carrier for glyph-matte contrast analysis"
             )
-        if has_overlay_path and delivery_mode != "soft-mux":
+        if has_overlay_path and delivery_mode not in {"soft-mux", "burn-in"}:
             _invalid(
-                "canonical ASS overlay evidence is only valid for soft-mux "
+                "canonical ASS overlay evidence requires soft-mux or burn-in "
                 "delivery"
             )
         if delivery_mode not in {None, "soft-mux", "burn-in"}:
@@ -1327,6 +1740,9 @@ class SubtitleVisualEvidenceCollector:
         overlay_path: Path | None = None
         overlay_snapshot: Mapping[str, Any] | None = None
         overlay_sha256: str | None = None
+        contrast_background_ass: bytes | None = None
+        glyph_fill_matte_ass: bytes | None = None
+        contrast_matte_evidence: dict[str, Any] | None = None
         if has_overlay_path:
             assert canonical_ass_overlay_path is not None
             assert canonical_ass_overlay_sha256 is not None
@@ -1356,6 +1772,51 @@ class SubtitleVisualEvidenceCollector:
                 overlay_path,
                 maximum_bytes=self.policy.maximum_overlay_bytes,
             )
+            if receipt_payload is None:
+                _invalid("canonical ASS carrier requires a delivery receipt")
+            receipt_subtitle_value = receipt_payload.get("subtitlePath")
+            if not isinstance(receipt_subtitle_value, str):
+                _invalid(
+                    "delivery_receipt.subtitlePath must bind the canonical "
+                    "ASS carrier"
+                )
+            receipt_subtitle_path = _canonical_private_ass_path(
+                receipt_subtitle_value,
+                maximum_bytes=self.policy.maximum_overlay_bytes,
+            )
+            if not os.path.samefile(receipt_subtitle_path, overlay_path):
+                _invalid(
+                    "canonical ASS overlay does not match the delivery "
+                    "receipt subtitlePath"
+                )
+            ass_text = _read_ass_text(
+                overlay_path,
+                maximum_bytes=self.policy.maximum_overlay_bytes,
+            )
+            (
+                contrast_background_ass,
+                glyph_fill_matte_ass,
+                transform_descriptor,
+            ) = _build_contrast_ass_variants(ass_text)
+            contrast_background_sha256 = hashlib.sha256(
+                contrast_background_ass
+            ).hexdigest()
+            glyph_fill_matte_sha256 = hashlib.sha256(
+                glyph_fill_matte_ass
+            ).hexdigest()
+            contrast_matte_evidence = {
+                "transform": transform_descriptor.to_dict(),
+                "canonicalAssOverlaySha256": overlay_sha256,
+                "contrastBackground": {
+                    "strategy": CONTRAST_BACKGROUND_STRATEGY,
+                    "assSha256": contrast_background_sha256,
+                },
+                "glyphFillMatte": {
+                    "strategy": GLYPH_FILL_MATTE_STRATEGY,
+                    "assSha256": glyph_fill_matte_sha256,
+                },
+                "inlineOverridePolicy": "fail-closed",
+            }
 
         declared_configuration_sha256 = normalized["renderArtifact"][
             "renderConfigurationSha256"
@@ -1372,6 +1833,7 @@ class SubtitleVisualEvidenceCollector:
                     "deliveryMode": delivery_mode,
                     "canonicalAssOverlaySha256": overlay_sha256,
                     "deliveryReceiptSha256": receipt_sha256,
+                    "contrastMatte": contrast_matte_evidence,
                     "representativeFrameRendering": (
                         "ffmpeg-libass-single-png-absolute-pts-v1"
                         if delivery_mode == "soft-mux"
@@ -1389,6 +1851,9 @@ class SubtitleVisualEvidenceCollector:
             overlay_path=overlay_path,
             overlay_snapshot=overlay_snapshot,
             overlay_sha256=overlay_sha256,
+            contrast_background_ass=contrast_background_ass,
+            glyph_fill_matte_ass=glyph_fill_matte_ass,
+            contrast_matte_evidence=contrast_matte_evidence,
             delivery_receipt_sha256=receipt_sha256,
             effective_render_configuration_sha256=(
                 effective_configuration_sha256
@@ -1400,7 +1865,7 @@ class SubtitleVisualEvidenceCollector:
         context: _RenderEvidenceContext,
         *,
         temporary_root: Path,
-    ) -> Path | None:
+    ) -> _StagedAssOverlays | None:
         if context.overlay_path is None:
             return None
         destination = temporary_root / "canonical-overlay.ass"
@@ -1434,7 +1899,57 @@ class SubtitleVisualEvidenceCollector:
                 SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED,
                 "The canonical ASS overlay changed while it was staged.",
             )
-        return destination
+        if (
+            context.contrast_background_ass is None
+            or context.glyph_fill_matte_ass is None
+            or context.contrast_matte_evidence is None
+        ):
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Canonical ASS contrast transformations are unavailable.",
+            )
+        contrast_background = temporary_root / "contrast-background.ass"
+        glyph_fill_matte = temporary_root / "glyph-fill-matte.ass"
+        try:
+            with contrast_background.open("xb") as handle:
+                handle.write(context.contrast_background_ass)
+            with glyph_fill_matte.open("xb") as handle:
+                handle.write(context.glyph_fill_matte_ass)
+        except OSError as exc:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "Derived ASS contrast evidence could not be staged.",
+                detail=str(exc),
+            ) from exc
+        expected_background_sha = context.contrast_matte_evidence[
+            "contrastBackground"
+        ]["assSha256"]
+        expected_matte_sha = context.contrast_matte_evidence[
+            "glyphFillMatte"
+        ]["assSha256"]
+        if (
+            _hash_bounded_file(
+                contrast_background,
+                maximum=self.policy.maximum_overlay_bytes,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            != expected_background_sha
+            or _hash_bounded_file(
+                glyph_fill_matte,
+                maximum=self.policy.maximum_overlay_bytes,
+                chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            != expected_matte_sha
+        ):
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED,
+                "Derived ASS contrast evidence changed while it was staged.",
+            )
+        return _StagedAssOverlays(
+            canonical=destination,
+            contrast_background=contrast_background,
+            glyph_fill_matte=glyph_fill_matte,
+        )
 
     def _require_overlay_unchanged(
         self,
@@ -1651,7 +2166,9 @@ class SubtitleVisualEvidenceCollector:
                 decoded_ms = self._resolve_frame_timestamp(
                     rendered_path,
                     requested_ms,
-                    temporary_root,
+                    cue_start_ms=cue["startMs"],
+                    cue_end_ms=cue["endMs"],
+                    temporary_root=temporary_root,
                 )
                 if not cue["startMs"] <= decoded_ms <= cue["endMs"]:
                     raise SubtitleVisualEvidenceError(
@@ -1707,9 +2224,14 @@ class SubtitleVisualEvidenceCollector:
         self,
         rendered_path: Path,
         requested_ms: int,
+        *,
+        cue_start_ms: int,
+        cue_end_ms: int,
         temporary_root: Path,
     ) -> int:
-        interval = f"{_seconds_text(requested_ms)}%+#1"
+        interval = (
+            f"{_seconds_text(requested_ms)}%{_seconds_text(cue_end_ms)}"
+        )
         command = (
             str(self.ffprobe_path),
             "-v",
@@ -1741,21 +2263,39 @@ class SubtitleVisualEvidenceCollector:
                 SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE,
                 "FFprobe returned no representative video frame.",
             )
-        frame = _require_mapping(frames[0], "FFprobe frames[0]")
-        raw = frame.get("best_effort_timestamp_time")
-        try:
-            decoded_ms = round(float(raw) * 1_000)
-        except (TypeError, ValueError, OverflowError) as exc:
+        decoded_timestamps: list[int] = []
+        for index, value in enumerate(frames):
+            frame = _require_mapping(value, f"FFprobe frames[{index}]")
+            raw = frame.get("best_effort_timestamp_time")
+            try:
+                decoded_ms = round(float(raw) * 1_000)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise SubtitleVisualEvidenceError(
+                    SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE,
+                    "FFprobe returned an invalid frame timestamp.",
+                ) from exc
+            if not 0 <= decoded_ms <= 604_800_000:
+                raise SubtitleVisualEvidenceError(
+                    SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE,
+                    "FFprobe frame timestamp is outside supported bounds.",
+                )
+            if cue_start_ms <= decoded_ms <= cue_end_ms:
+                decoded_timestamps.append(decoded_ms)
+
+        if not decoded_timestamps:
             raise SubtitleVisualEvidenceError(
                 SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE,
-                "FFprobe returned an invalid frame timestamp.",
-            ) from exc
-        if not 0 <= decoded_ms <= 604_800_000:
-            raise SubtitleVisualEvidenceError(
-                SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE,
-                "FFprobe frame timestamp is outside supported bounds.",
+                "FFprobe returned no representative frame within the cue "
+                "interval.",
             )
-        return decoded_ms
+        return min(
+            decoded_timestamps,
+            key=lambda timestamp_ms: (
+                abs(timestamp_ms - requested_ms),
+                timestamp_ms < requested_ms,
+                timestamp_ms,
+            ),
+        )
 
     def _collect_frames(
         self,
@@ -1767,7 +2307,7 @@ class SubtitleVisualEvidenceCollector:
         cues: Sequence[Mapping[str, Any]],
         contrast_policy: Mapping[str, Any],
         temporary_root: Path,
-        staged_ass_overlay: Path | None,
+        staged_ass_overlays: _StagedAssOverlays | None,
         render_context: _RenderEvidenceContext,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         by_timestamp: dict[int, str] = {}
@@ -1785,19 +2325,60 @@ class SubtitleVisualEvidenceCollector:
         ):
             rendered_frame = temporary_root / f"{index:06d}-rendered.png"
             source_frame = temporary_root / f"{index:06d}-source.png"
-            self._extract_frame(
-                rendered_path,
-                timestamp_ms,
-                rendered_frame,
-                temporary_root,
-                ass_overlay_path=staged_ass_overlay,
-            )
+            contrast_background_frame: Path | None = None
+            glyph_fill_matte_frame: Path | None = None
             self._extract_frame(
                 source_path,
                 timestamp_ms,
                 source_frame,
                 temporary_root,
             )
+            if staged_ass_overlays is None:
+                self._extract_frame(
+                    rendered_path,
+                    timestamp_ms,
+                    rendered_frame,
+                    temporary_root,
+                )
+            else:
+                if render_context.delivery_mode == "soft-mux":
+                    self._render_ass_overlay_frame(
+                        base_frame_path=source_frame,
+                        timestamp_ms=timestamp_ms,
+                        output_path=rendered_frame,
+                        temporary_root=temporary_root,
+                        ass_overlay_path=staged_ass_overlays.canonical,
+                    )
+                else:
+                    self._extract_frame(
+                        rendered_path,
+                        timestamp_ms,
+                        rendered_frame,
+                        temporary_root,
+                    )
+                contrast_background_frame = temporary_root / (
+                    f"{index:06d}-contrast-background.png"
+                )
+                glyph_fill_matte_frame = temporary_root / (
+                    f"{index:06d}-glyph-fill-matte.png"
+                )
+                self._render_ass_overlay_frame(
+                    base_frame_path=source_frame,
+                    timestamp_ms=timestamp_ms,
+                    output_path=contrast_background_frame,
+                    temporary_root=temporary_root,
+                    ass_overlay_path=(
+                        staged_ass_overlays.contrast_background
+                    ),
+                )
+                self._render_ass_overlay_frame(
+                    base_frame_path=source_frame,
+                    timestamp_ms=timestamp_ms,
+                    output_path=glyph_fill_matte_frame,
+                    temporary_root=temporary_root,
+                    ass_overlay_path=staged_ass_overlays.glyph_fill_matte,
+                    black_base=True,
+                )
             rendered_image_sha256 = _hash_bounded_file(
                 rendered_frame,
                 maximum=self.policy.maximum_frame_bytes,
@@ -1807,6 +2388,24 @@ class SubtitleVisualEvidenceCollector:
                 source_frame,
                 maximum=self.policy.maximum_frame_bytes,
                 chunk_bytes=self.policy.hash_chunk_bytes,
+            )
+            contrast_background_image_sha256 = (
+                _hash_bounded_file(
+                    contrast_background_frame,
+                    maximum=self.policy.maximum_frame_bytes,
+                    chunk_bytes=self.policy.hash_chunk_bytes,
+                )
+                if contrast_background_frame is not None
+                else None
+            )
+            glyph_fill_matte_image_sha256 = (
+                _hash_bounded_file(
+                    glyph_fill_matte_frame,
+                    maximum=self.policy.maximum_frame_bytes,
+                    chunk_bytes=self.policy.hash_chunk_bytes,
+                )
+                if glyph_fill_matte_frame is not None
+                else None
             )
             active_cues = [
                 cue
@@ -1818,17 +2417,27 @@ class SubtitleVisualEvidenceCollector:
                     SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
                     f"Representative frame {frame_id!r} has no active cue.",
                 )
+            analyzer_kwargs: dict[str, Any] = {
+                "rendered_frame_path": rendered_frame,
+                "source_frame_path": source_frame,
+                "frame_id": frame_id,
+                "timestamp_ms": timestamp_ms,
+                "width_px": video["widthPx"],
+                "height_px": video["heightPx"],
+                "cues": active_cues,
+                "contrast_policy": contrast_policy,
+            }
+            if contrast_background_frame is not None:
+                analyzer_kwargs.update(
+                    contrast_background_frame_path=(
+                        contrast_background_frame
+                    ),
+                    glyph_fill_matte_frame_path=glyph_fill_matte_frame,
+                )
             observation = self.analyzer.analyze(
-                rendered_frame_path=rendered_frame,
-                source_frame_path=source_frame,
-                frame_id=frame_id,
-                timestamp_ms=timestamp_ms,
-                width_px=video["widthPx"],
-                height_px=video["heightPx"],
-                cues=active_cues,
-                contrast_policy=contrast_policy,
+                **analyzer_kwargs,
             )
-            instances = self._normalize_frame_observation(
+            instances, contrast_analysis = self._normalize_frame_observation(
                 observation=observation,
                 frame_id=frame_id,
                 timestamp_ms=timestamp_ms,
@@ -1837,6 +2446,12 @@ class SubtitleVisualEvidenceCollector:
                 source_frame=source_frame,
                 rendered_image_sha256=rendered_image_sha256,
                 source_image_sha256=source_image_sha256,
+                contrast_background_image_sha256=(
+                    contrast_background_image_sha256
+                ),
+                glyph_fill_matte_image_sha256=(
+                    glyph_fill_matte_image_sha256
+                ),
                 video=video,
                 bindings=bindings,
                 render_context=render_context,
@@ -1851,8 +2466,7 @@ class SubtitleVisualEvidenceCollector:
                     "instances": instances,
                 }
             )
-            frame_records.append(
-                {
+            frame_record = {
                     "frameId": frame_id,
                     "requestedTimestampMs": min(
                         item["requestedTimestampMs"]
@@ -1866,7 +2480,17 @@ class SubtitleVisualEvidenceCollector:
                     "renderedImageSha256": rendered_image_sha256,
                     "sourceImageSha256": source_image_sha256,
                 }
-            )
+            if contrast_background_image_sha256 is not None:
+                frame_record.update(
+                    contrastBackgroundImageSha256=(
+                        contrast_background_image_sha256
+                    ),
+                    glyphFillMatteImageSha256=(
+                        glyph_fill_matte_image_sha256
+                    ),
+                    contrastAnalysis=contrast_analysis,
+                )
+            frame_records.append(frame_record)
 
         represented = {
             instance["cueId"]
@@ -1988,10 +2612,58 @@ class SubtitleVisualEvidenceCollector:
             output_path=base_frame,
             temporary_root=temporary_root,
         )
-        filter_value = (
-            f"setpts=PTS+{_seconds_text(timestamp_ms)}/TB,"
-            "ass=filename=canonical-overlay.ass"
+        self._render_ass_overlay_frame(
+            base_frame_path=base_frame,
+            timestamp_ms=timestamp_ms,
+            output_path=output_path,
+            temporary_root=temporary_root,
+            ass_overlay_path=ass_overlay_path,
         )
+
+    def _render_ass_overlay_frame(
+        self,
+        *,
+        base_frame_path: Path,
+        timestamp_ms: int,
+        output_path: Path,
+        temporary_root: Path,
+        ass_overlay_path: Path,
+        black_base: bool = False,
+    ) -> None:
+        if output_path.exists():
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "Temporary ASS-rendered frame output unexpectedly exists.",
+            )
+        if base_frame_path.parent != temporary_root:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The ASS base frame escaped the evidence workspace.",
+            )
+        if ass_overlay_path.parent != temporary_root:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The staged ASS overlay escaped the evidence workspace.",
+            )
+        if ass_overlay_path.name not in {
+            "canonical-overlay.ass",
+            "contrast-background.ass",
+            "glyph-fill-matte.ass",
+        }:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+                "The staged ASS overlay name is not recognized.",
+            )
+        filters = []
+        if black_base:
+            filters.append("lutrgb=r=0:g=0:b=0")
+        filters.extend(
+            (
+                f"setpts=PTS+{_seconds_text(timestamp_ms)}/TB",
+                f"ass=filename={ass_overlay_path.name}",
+            )
+        )
+        filter_value = ",".join(filters)
         command = (
             str(self.ffmpeg_path),
             "-nostdin",
@@ -1999,7 +2671,7 @@ class SubtitleVisualEvidenceCollector:
             "-loglevel",
             "error",
             "-i",
-            str(base_frame),
+            str(base_frame_path),
             "-map",
             "0:v:0",
             "-vf",
@@ -2047,10 +2719,12 @@ class SubtitleVisualEvidenceCollector:
         source_frame: Path,
         rendered_image_sha256: str,
         source_image_sha256: str,
+        contrast_background_image_sha256: str | None,
+        glyph_fill_matte_image_sha256: str | None,
         video: Mapping[str, Any],
         bindings: list[dict[str, Any]],
         render_context: _RenderEvidenceContext,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if (
             observation.width_px != video["widthPx"]
             or observation.height_px != video["heightPx"]
@@ -2073,6 +2747,7 @@ class SubtitleVisualEvidenceCollector:
             )
 
         payloads: list[dict[str, Any]] = []
+        contrast_analysis: list[dict[str, Any]] = []
         for instance in sorted(
             observation.instances, key=lambda item: item.cue_id
         ):
@@ -2106,6 +2781,17 @@ class SubtitleVisualEvidenceCollector:
                     SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
                     "Analyzer overflow evidence must be boolean.",
                 )
+
+            diagnostics = self._normalize_contrast_diagnostics(
+                instance.contrast_diagnostics,
+                cue_id=cue["cueId"],
+                matte_required=(
+                    contrast_background_image_sha256 is not None
+                    or glyph_fill_matte_image_sha256 is not None
+                ),
+            )
+            if diagnostics is not None:
+                contrast_analysis.append(diagnostics)
 
             contrast_samples: list[dict[str, Any]] = []
             seen_classes: set[str] = set()
@@ -2154,6 +2840,13 @@ class SubtitleVisualEvidenceCollector:
                     "backgroundPixelCount": background_count,
                     "renderedImageSha256": rendered_image_sha256,
                     "sourceImageSha256": source_image_sha256,
+                    "contrastBackgroundImageSha256": (
+                        contrast_background_image_sha256
+                    ),
+                    "glyphFillMatteImageSha256": (
+                        glyph_fill_matte_image_sha256
+                    ),
+                    "contrastDiagnostics": diagnostics,
                 }
                 sample_sha256 = deterministic_sha256(sample_core)
                 contrast_samples.append(
@@ -2199,10 +2892,17 @@ class SubtitleVisualEvidenceCollector:
                 ).hexdigest(),
                 "renderedImageSha256": rendered_image_sha256,
                 "sourceImageSha256": source_image_sha256,
+                "contrastBackgroundImageSha256": (
+                    contrast_background_image_sha256
+                ),
+                "glyphFillMatteImageSha256": (
+                    glyph_fill_matte_image_sha256
+                ),
                 "bounds": bounds,
                 "inkBounds": ink_bounds,
                 "fontEvidence": font_evidence,
                 "contrastSamples": contrast_samples,
+                "contrastDiagnostics": diagnostics,
                 "renderConfigurationSha256": (
                     render_context.effective_render_configuration_sha256
                 ),
@@ -2225,7 +2925,165 @@ class SubtitleVisualEvidenceCollector:
                 }
             )
             payloads.append(payload)
-        return payloads
+        return payloads, contrast_analysis
+
+    def _normalize_contrast_diagnostics(
+        self,
+        value: Mapping[str, Any] | None,
+        *,
+        cue_id: str,
+        matte_required: bool,
+    ) -> dict[str, Any] | None:
+        if value is None:
+            if matte_required:
+                raise SubtitleVisualEvidenceError(
+                    SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                    "Glyph-matte analysis returned no component diagnostics.",
+                )
+            return None
+        if not matte_required:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Analyzer returned glyph-matte diagnostics without matte frames.",
+            )
+        item = _require_mapping(value, "contrast diagnostics")
+        required = {
+            "strategy",
+            "glyphComponentCount",
+            "glyphComponentsCovered",
+            "pairedCorePixelCount",
+            "glyphCoreAlphaThreshold",
+            "glyphNonzeroAlphaQuantile75",
+            "componentContrastQuantile",
+            "tinyComponentFallbackCount",
+            "tinyComponentMaxPixels",
+            "tinyComponentMinimumAlpha",
+            "minimumComponentCorePixelCount",
+            "effectiveBackgroundClasses",
+            "underlyingSceneClasses",
+            "componentCoverageSha256",
+        }
+        if set(item) != required:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Glyph-matte diagnostics contain missing or unknown fields.",
+            )
+        strategy = _require_text(
+            item["strategy"],
+            "contrast diagnostics strategy",
+            maximum=160,
+        )
+        if strategy != GLYPH_CORE_COMPONENT_STRATEGY:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Glyph-matte diagnostics use an unsupported strategy.",
+            )
+        component_count = _require_integer(
+            item["glyphComponentCount"],
+            "glyphComponentCount",
+            minimum=1,
+            maximum=1_000_000,
+        )
+        covered_count = _require_integer(
+            item["glyphComponentsCovered"],
+            "glyphComponentsCovered",
+            minimum=1,
+            maximum=1_000_000,
+        )
+        if covered_count != component_count:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Not every meaningful glyph component has core-pixel coverage.",
+            )
+        paired_count = _require_integer(
+            item["pairedCorePixelCount"],
+            "pairedCorePixelCount",
+            minimum=32,
+            maximum=1_000_000_000,
+        )
+        minimum_component_core = _require_integer(
+            item["minimumComponentCorePixelCount"],
+            "minimumComponentCorePixelCount",
+            minimum=1,
+            maximum=1_000_000_000,
+        )
+        alpha_threshold = _require_number(
+            item["glyphCoreAlphaThreshold"],
+            "glyphCoreAlphaThreshold",
+            minimum=0.80,
+            maximum=1.0,
+        )
+        alpha_q75 = _require_number(
+            item["glyphNonzeroAlphaQuantile75"],
+            "glyphNonzeroAlphaQuantile75",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        contrast_quantile = _require_number(
+            item["componentContrastQuantile"],
+            "componentContrastQuantile",
+            minimum=0.05,
+            maximum=0.05,
+        )
+        tiny_fallback_count = _require_integer(
+            item["tinyComponentFallbackCount"],
+            "tinyComponentFallbackCount",
+            minimum=0,
+            maximum=component_count,
+        )
+        tiny_max_pixels = _require_integer(
+            item["tinyComponentMaxPixels"],
+            "tinyComponentMaxPixels",
+            minimum=1,
+            maximum=1_000_000,
+        )
+        if tiny_max_pixels != TINY_COMPONENT_MAX_PIXELS:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Glyph-matte diagnostics use an unsupported tiny-component "
+                "pixel limit.",
+            )
+        tiny_minimum_alpha = _require_number(
+            item["tinyComponentMinimumAlpha"],
+            "tinyComponentMinimumAlpha",
+            minimum=0.50,
+            maximum=1.0,
+        )
+        if tiny_minimum_alpha != TINY_COMPONENT_MINIMUM_ALPHA:
+            raise SubtitleVisualEvidenceError(
+                SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+                "Glyph-matte diagnostics use an unsupported tiny-component "
+                "alpha floor.",
+            )
+        effective_classes = _normalize_background_classes(
+            item["effectiveBackgroundClasses"],
+            label="effectiveBackgroundClasses",
+        )
+        underlying_classes = _normalize_background_classes(
+            item["underlyingSceneClasses"],
+            label="underlyingSceneClasses",
+        )
+        coverage_sha256 = _require_sha256(
+            item["componentCoverageSha256"],
+            "componentCoverageSha256",
+        )
+        return {
+            "cueId": cue_id,
+            "strategy": strategy,
+            "glyphComponentCount": component_count,
+            "glyphComponentsCovered": covered_count,
+            "pairedCorePixelCount": paired_count,
+            "glyphCoreAlphaThreshold": alpha_threshold,
+            "glyphNonzeroAlphaQuantile75": alpha_q75,
+            "componentContrastQuantile": contrast_quantile,
+            "tinyComponentFallbackCount": tiny_fallback_count,
+            "tinyComponentMaxPixels": tiny_max_pixels,
+            "tinyComponentMinimumAlpha": tiny_minimum_alpha,
+            "minimumComponentCorePixelCount": minimum_component_core,
+            "effectiveBackgroundClasses": effective_classes,
+            "underlyingSceneClasses": underlying_classes,
+            "componentCoverageSha256": coverage_sha256,
+        }
 
     def _collect_font_evidence(
         self,
@@ -2890,6 +3748,252 @@ def _validate_ass_payload(path: Path, *, maximum_bytes: int) -> None:
         )
 
 
+def _read_ass_text(path: Path, *, maximum_bytes: int) -> str:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(maximum_bytes + 1)
+    except OSError as exc:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay could not be read for contrast analysis.",
+            detail=str(exc),
+        ) from exc
+    if not payload or len(payload) > maximum_bytes:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_PATH,
+            "The canonical ASS overlay is empty or exceeds its byte limit.",
+        )
+    try:
+        return payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.INVALID_REQUEST,
+            "The canonical ASS overlay must be strict UTF-8.",
+            detail=str(exc),
+        ) from exc
+
+
+def _build_contrast_ass_variants(
+    ass_text: str,
+) -> tuple[bytes, bytes, ComponentDescriptor]:
+    """Create deterministic box-only and glyph-fill-only ASS carriers."""
+
+    lines = ass_text.splitlines()
+    background_lines = list(lines)
+    glyph_lines = list(lines)
+    section: str | None = None
+    seen_sections: set[str] = set()
+    style_fields: list[str] | None = None
+    event_fields: list[str] | None = None
+    style_names: set[str] = set()
+    dialogue_styles: list[str] = []
+    style_count = 0
+    dialogue_count = 0
+    border_styles: set[int] = set()
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped.casefold()
+            if section in {"[v4+ styles]", "[events]"}:
+                if section in seen_sections:
+                    _invalid(
+                        "canonical ASS contains duplicate style or event sections"
+                    )
+                seen_sections.add(section)
+            continue
+
+        if section == "[v4+ styles]":
+            if stripped.casefold().startswith("format:"):
+                if style_fields is not None:
+                    _invalid("canonical ASS contains duplicate style formats")
+                style_fields = _ass_format_fields(stripped, label="style")
+                _require_ass_fields(
+                    style_fields,
+                    (
+                        "name",
+                        "primarycolour",
+                        "secondarycolour",
+                        "outlinecolour",
+                        "backcolour",
+                        "borderstyle",
+                        "outline",
+                        "shadow",
+                    ),
+                    label="style",
+                )
+                continue
+            if stripped.casefold().startswith("style:"):
+                if style_fields is None:
+                    _invalid("canonical ASS style appears before its format")
+                values = _ass_record_values(
+                    stripped,
+                    field_count=len(style_fields),
+                    label="style",
+                )
+                field_index = {
+                    name: position
+                    for position, name in enumerate(style_fields)
+                }
+                style_name = values[field_index["name"]].strip()
+                if not style_name or style_name in style_names:
+                    _invalid("canonical ASS style names must be unique and non-empty")
+                style_names.add(style_name)
+                try:
+                    border_style = int(
+                        values[field_index["borderstyle"]].strip()
+                    )
+                except ValueError as exc:
+                    raise SubtitleVisualEvidenceError(
+                        SubtitleVisualEvidenceErrorCode.INVALID_REQUEST,
+                        "canonical ASS BorderStyle must be an integer",
+                    ) from exc
+                if border_style not in {1, 3}:
+                    _invalid(
+                        "canonical ASS contrast mattes support only "
+                        "BorderStyle 1 or 3"
+                    )
+                border_styles.add(border_style)
+
+                background = list(values)
+                background[field_index["primarycolour"]] = "&HFF000000"
+                background[field_index["secondarycolour"]] = "&HFF000000"
+                background[field_index["shadow"]] = "0"
+                if border_style == 1:
+                    background[field_index["outlinecolour"]] = "&HFF000000"
+                    background[field_index["backcolour"]] = "&HFF000000"
+                    background[field_index["outline"]] = "0"
+
+                glyph = list(values)
+                glyph[field_index["primarycolour"]] = "&H00FFFFFF"
+                glyph[field_index["secondarycolour"]] = "&H00FFFFFF"
+                glyph[field_index["outlinecolour"]] = "&HFF000000"
+                glyph[field_index["backcolour"]] = "&HFF000000"
+                glyph[field_index["borderstyle"]] = "1"
+                glyph[field_index["outline"]] = "0"
+                glyph[field_index["shadow"]] = "0"
+
+                background_lines[index] = "Style: " + ",".join(background)
+                glyph_lines[index] = "Style: " + ",".join(glyph)
+                style_count += 1
+                continue
+
+        if section == "[events]":
+            if stripped.casefold().startswith("format:"):
+                if event_fields is not None:
+                    _invalid("canonical ASS contains duplicate event formats")
+                event_fields = _ass_format_fields(stripped, label="event")
+                _require_ass_fields(
+                    event_fields,
+                    ("style", "text"),
+                    label="event",
+                )
+                continue
+            if stripped.casefold().startswith("dialogue:"):
+                if event_fields is None:
+                    _invalid("canonical ASS dialogue appears before its format")
+                values = _ass_record_values(
+                    stripped,
+                    field_count=len(event_fields),
+                    label="dialogue",
+                )
+                field_index = {
+                    name: position
+                    for position, name in enumerate(event_fields)
+                }
+                dialogue_text = values[field_index["text"]]
+                if _contains_unescaped_ass_override(dialogue_text):
+                    _invalid(
+                        "canonical ASS inline override blocks cannot be "
+                        "normalized safely for contrast mattes"
+                    )
+                dialogue_styles.append(
+                    values[field_index["style"]].strip() or "Default"
+                )
+                dialogue_count += 1
+
+    if seen_sections != {"[v4+ styles]", "[events]"}:
+        _invalid("canonical ASS lacks unique V4+ Styles or Events sections")
+    if style_count < 1 or dialogue_count < 1:
+        _invalid("canonical ASS must contain styles and dialogue events")
+    missing_styles = sorted(set(dialogue_styles) - style_names)
+    if missing_styles:
+        _invalid(
+            "canonical ASS dialogue references undefined styles: "
+            + repr(missing_styles)
+        )
+
+    background_payload = ("\n".join(background_lines) + "\n").encode("utf-8")
+    glyph_payload = ("\n".join(glyph_lines) + "\n").encode("utf-8")
+    transform_configuration = {
+        "backgroundStrategy": CONTRAST_BACKGROUND_STRATEGY,
+        "glyphFillStrategy": GLYPH_FILL_MATTE_STRATEGY,
+        "supportedBorderStyles": sorted(border_styles),
+        "styleCount": style_count,
+        "dialogueCount": dialogue_count,
+        "inlineOverridePolicy": "fail-closed",
+        "backgroundRule": (
+            "transparent-fill-preserve-borderstyle-3-box-remove-shadow"
+        ),
+        "glyphRule": "opaque-white-fill-transparent-outline-box-shadow",
+    }
+    descriptor = ComponentDescriptor(
+        name=CONTRAST_MATTE_TRANSFORM_NAME,
+        version=CONTRAST_MATTE_TRANSFORM_VERSION,
+        configuration_sha256=deterministic_sha256(transform_configuration),
+    )
+    return background_payload, glyph_payload, descriptor
+
+
+def _ass_format_fields(line: str, *, label: str) -> list[str]:
+    _prefix, separator, payload = line.partition(":")
+    if not separator:
+        _invalid(f"canonical ASS {label} format is malformed")
+    fields = [field.strip().casefold() for field in payload.split(",")]
+    if not fields or any(not field for field in fields):
+        _invalid(f"canonical ASS {label} format contains an empty field")
+    if len(fields) != len(set(fields)):
+        _invalid(f"canonical ASS {label} format contains duplicate fields")
+    return fields
+
+
+def _require_ass_fields(
+    fields: Sequence[str],
+    required: Sequence[str],
+    *,
+    label: str,
+) -> None:
+    missing = sorted(set(required) - set(fields))
+    if missing:
+        _invalid(
+            f"canonical ASS {label} format lacks required fields: {missing!r}"
+        )
+
+
+def _ass_record_values(
+    line: str,
+    *,
+    field_count: int,
+    label: str,
+) -> list[str]:
+    _prefix, separator, payload = line.partition(":")
+    if not separator:
+        _invalid(f"canonical ASS {label} record is malformed")
+    values = payload.lstrip().split(",", field_count - 1)
+    if len(values) != field_count:
+        _invalid(
+            f"canonical ASS {label} record does not match its format"
+        )
+    return values
+
+
+def _contains_unescaped_ass_override(text: str) -> bool:
+    return any(
+        character in "{}" and (index == 0 or text[index - 1] != "\\")
+        for index, character in enumerate(text)
+    )
+
+
 def _canonical_delivery_receipt(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
         payload: Any = value
@@ -3111,6 +4215,64 @@ def _histogram_percentile(
     return len(histogram) - 1
 
 
+def _nearest_rank_quantile(
+    values: Sequence[int],
+    quantile: float,
+) -> int:
+    if not values:
+        raise ValueError("quantile requires at least one value")
+    ordered = sorted(values)
+    rank = max(1, int(len(ordered) * quantile + 0.999999999))
+    return ordered[min(len(ordered), rank) - 1]
+
+
+def _quantile_pixel(
+    pixels: Sequence[Mapping[str, Any]],
+    quantile: float,
+) -> dict[str, Any]:
+    if not pixels:
+        raise ValueError("pixel quantile requires at least one value")
+    ordered = sorted(
+        pixels,
+        key=lambda item: (
+            item["ratio"],
+            item["y"],
+            item["x"],
+        ),
+    )
+    rank = max(1, int(len(ordered) * quantile + 0.999999999))
+    return dict(ordered[min(len(ordered), rank) - 1])
+
+
+def _coordinate_bounds(
+    coordinates: Sequence[tuple[int, int]],
+) -> dict[str, int]:
+    if not coordinates:
+        raise ValueError("coordinate bounds require at least one point")
+    x_values = [coordinate[0] for coordinate in coordinates]
+    y_values = [coordinate[1] for coordinate in coordinates]
+    return {
+        "x": min(x_values),
+        "y": min(y_values),
+        "width": max(x_values) - min(x_values) + 1,
+        "height": max(y_values) - min(y_values) + 1,
+    }
+
+
+def _luminance_class(
+    color: tuple[int, int, int],
+    *,
+    dark_maximum: float,
+    light_minimum: float,
+) -> str | None:
+    luminance = _relative_luminance_tuple(color)
+    if luminance <= dark_maximum:
+        return "dark"
+    if luminance >= light_minimum:
+        return "light"
+    return None
+
+
 def _relative_luminance_tuple(color: tuple[int, int, int]) -> float:
     channels: list[float] = []
     for value in color:
@@ -3277,6 +4439,29 @@ def _require_enum(
     return value
 
 
+def _normalize_background_classes(value: Any, *, label: str) -> list[str]:
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+    ):
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+            f"{label} must be an array of observed background classes.",
+        )
+    classes = list(value)
+    if any(item not in {"dark", "light"} for item in classes):
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+            f"{label} contains an unsupported background class.",
+        )
+    if len(classes) != len(set(classes)) or classes != sorted(classes):
+        raise SubtitleVisualEvidenceError(
+            SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE,
+            f"{label} must be sorted and unique.",
+        )
+    return classes
+
+
 def _require_sha256(value: Any, label: str) -> str:
     if not isinstance(value, str) or not _SHA256.fullmatch(value):
         _invalid(f"{label} must be a lowercase SHA-256 digest")
@@ -3308,6 +4493,7 @@ __all__ = [
     "FontEvidenceProvider",
     "FrameAnalyzer",
     "FrameObservation",
+    "GLYPH_CORE_COMPONENT_STRATEGY",
     "NoFontEvidenceProvider",
     "PillowAnalysisPolicy",
     "PillowFrameAnalyzer",
@@ -3320,6 +4506,8 @@ __all__ = [
     "SubtitleVisualEvidenceError",
     "SubtitleVisualEvidenceErrorCode",
     "SubtitleVisualEvidencePolicy",
+    "TINY_COMPONENT_MAX_PIXELS",
+    "TINY_COMPONENT_MINIMUM_ALPHA",
     "VerifiedFontClaim",
     "canonical_json",
     "default_subtitle_visual_evidence_sampling",

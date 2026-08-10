@@ -533,6 +533,63 @@ def test_identical_format_across_three_plans_is_published_once(
     assert len(public_srt) == 1
 
 
+def test_sidecar_plan_owns_public_paths_when_media_carrier_names_differ(
+    tmp_path: Path,
+) -> None:
+    source, output, plans = _fixture(tmp_path)
+    public_paths = {
+        SubtitleFormat.ASS: output / "meeting-subtitle-ass.ass",
+        SubtitleFormat.SRT: output / "meeting-subtitle.srt",
+        SubtitleFormat.WEBVTT: output / "meeting-subtitle-webvtt.vtt",
+    }
+    media_paths = {
+        SubtitleFormat.ASS: output / "meeting-subtitle.ass",
+        SubtitleFormat.SRT: output / "meeting-subtitle-srt.srt",
+        SubtitleFormat.WEBVTT: output / "meeting-subtitle-webvtt.vtt",
+    }
+    plans[0] = _plan(
+        source,
+        output,
+        SubtitleOutputMode.SIDECAR,
+        sidecar_paths=public_paths,
+    )
+    plans[1] = _plan(
+        source,
+        output,
+        SubtitleOutputMode.SOFT_MUX,
+        sidecar_paths=media_paths,
+        media_output=output / "meeting-soft.mkv",
+    )
+    plans[2] = _plan(
+        source,
+        output,
+        SubtitleOutputMode.BURN_IN,
+        sidecar_paths=media_paths,
+        media_output=output / "meeting-burn.mp4",
+    )
+
+    result = publish_output_plans(
+        _recipe(
+            formats=["srt", "webvtt", "ass"],
+            modes=["sidecar", "soft-mux", "burn-in"],
+        ),
+        plans,
+        _document(),
+        executor=FakeExecutor(),
+        visual_qa_hook=_qa,
+    )
+
+    public = result.to_dict()["customerArtifacts"][:3]
+    assert {
+        item["subtitleFormat"]: Path(item["path"])
+        for item in public
+    } == {
+        "srt": public_paths[SubtitleFormat.SRT],
+        "webvtt": public_paths[SubtitleFormat.WEBVTT],
+        "ass": public_paths[SubtitleFormat.ASS],
+    }
+
+
 def test_conflicting_ass_payloads_fail_before_any_write(
     tmp_path: Path,
 ) -> None:
@@ -577,8 +634,8 @@ def test_same_public_format_with_different_targets_fails_closed(
     _, output, plans = _fixture(
         tmp_path,
         modes=(
-            SubtitleOutputMode.SIDECAR,
             SubtitleOutputMode.SOFT_MUX,
+            SubtitleOutputMode.BURN_IN,
         ),
     )
     changed = dict(plans[1].sidecar_paths)
@@ -586,16 +643,16 @@ def test_same_public_format_with_different_targets_fails_closed(
     plans[1] = _plan(
         plans[1].source_path,
         output,
-        SubtitleOutputMode.SOFT_MUX,
+        SubtitleOutputMode.BURN_IN,
         sidecar_paths=changed,
-        media_output=output / "meeting-soft.mkv",
+        media_output=output / "meeting-burn.mp4",
     )
 
     with pytest.raises(OutputPublicationError) as raised:
         publish_output_plans(
             _recipe(
                 formats=["srt"],
-                modes=["sidecar", "soft-mux"],
+                modes=["soft-mux", "burn-in"],
             ),
             plans,
             _document(),
@@ -969,7 +1026,7 @@ def test_source_hash_is_unchanged_on_success_and_receipts_are_exact(
     )
     before = hashlib.sha256(source.read_bytes()).hexdigest()
     result = publish_output_plans(
-        _recipe(formats=["srt", "webvtt"], modes=["sidecar"]),
+        _recipe(formats=["srt", "webvtt", "ass"], modes=["sidecar"]),
         plans,
         _document(),
         executor=FakeExecutor(),
@@ -977,6 +1034,10 @@ def test_source_hash_is_unchanged_on_success_and_receipts_are_exact(
     )
 
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+    assert [
+        item["subtitleFormat"]
+        for item in result.to_dict()["customerArtifacts"]
+    ] == ["srt", "webvtt", "ass"]
     for path, receipt in zip(
         _customer_paths(result),
         result.to_dict()["customerArtifacts"],

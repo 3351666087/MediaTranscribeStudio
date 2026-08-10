@@ -1,12 +1,17 @@
 Set-StrictMode -Version Latest
 
 $script:ReleaseContract = "mts-tauri-release/v1"
-$script:ReleaseSchemaVersion = "1.0.0"
+$script:ReleaseSchemaVersion = "1.1.0"
 $script:StateContract = "mts-tauri-install-state/v1"
 $script:StateEnvelopeContract = "mts-tauri-record-envelope/v1"
 $script:JournalContract = "mts-tauri-transaction/v1"
 $script:ReservedMetadataDirectory = ".mts-release"
 $script:ControlDirectoryName = ".mts-control"
+$script:ReleaseManifestName = "release-manifest.json"
+$script:ReleaseManifestChecksumName = "release-manifest.json.sha256"
+$script:ReleaseManifestSignatureName = "release-manifest.json.p7s"
+$script:Sha256Oid = "2.16.840.1.101.3.4.2.1"
+$script:CodeSigningEkuOid = "1.3.6.1.5.5.7.3.3"
 
 function Get-MtsUtf8NoBomEncoding {
     return New-Object System.Text.UTF8Encoding($false)
@@ -113,6 +118,150 @@ function Get-MtsFileSha256 {
     }
 
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function ConvertTo-MtsPublisherThumbprint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Thumbprint
+    )
+
+    $normalized = $Thumbprint.Replace(" ", "").ToUpperInvariant()
+    if ($normalized -notmatch "^[A-F0-9]{40}$") {
+        throw "Publisher thumbprint must be a 40-character SHA-1 certificate thumbprint."
+    }
+    return $normalized
+}
+
+function Assert-MtsCodeSigningCertificate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
+    )
+
+    $ekuOids = @(
+        $Certificate.EnhancedKeyUsageList |
+            ForEach-Object { [string]$_.ObjectId }
+    )
+    if ($ekuOids -notcontains $script:CodeSigningEkuOid) {
+        throw "Publisher certificate does not declare the Code Signing enhanced key usage."
+    }
+}
+
+function Import-MtsPkcsAssembly {
+    if ($null -ne ("System.Security.Cryptography.Pkcs.SignedCms" -as [type])) {
+        return
+    }
+
+    try {
+        Add-Type -AssemblyName System.Security.Cryptography.Pkcs -ErrorAction Stop
+    }
+    catch {
+        # Windows PowerShell 5.1 exposes SignedCms from the .NET Framework System.Security assembly.
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+    }
+
+    if ($null -eq ("System.Security.Cryptography.Pkcs.SignedCms" -as [type])) {
+        throw "The CMS/PKCS signing runtime is unavailable."
+    }
+}
+
+function Get-MtsPublisherCertificate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Thumbprint,
+
+        [switch]$RequirePrivateKey
+    )
+
+    $normalized = ConvertTo-MtsPublisherThumbprint $Thumbprint
+    $certificatePath = "Cert:\CurrentUser\My\$normalized"
+    if (-not (Test-Path -LiteralPath $certificatePath -PathType Leaf)) {
+        throw "Publisher certificate is not installed in Cert:\CurrentUser\My: $normalized"
+    }
+    $certificate = Get-Item -LiteralPath $certificatePath
+    if ($null -eq $certificate -or $certificate.Thumbprint.Replace(" ", "").ToUpperInvariant() -ne $normalized) {
+        throw "Publisher certificate lookup returned an unexpected certificate."
+    }
+    Assert-MtsCodeSigningCertificate $certificate
+    if ($RequirePrivateKey -and -not $certificate.HasPrivateKey) {
+        throw "Publisher certificate does not expose the private key required to sign the release manifest."
+    }
+    return $certificate
+}
+
+function Write-MtsDetachedManifestSignature {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SignaturePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PublisherThumbprint
+    )
+
+    Import-MtsPkcsAssembly
+    $certificate = Get-MtsPublisherCertificate -Thumbprint $PublisherThumbprint -RequirePrivateKey
+    $manifestBytes = [System.IO.File]::ReadAllBytes($ManifestPath)
+    $content = [System.Security.Cryptography.Pkcs.ContentInfo]::new($manifestBytes)
+    $signedCms = [System.Security.Cryptography.Pkcs.SignedCms]::new($content, $true)
+    $signer = [System.Security.Cryptography.Pkcs.CmsSigner]::new($certificate)
+    $signer.IncludeOption = [System.Security.Cryptography.X509Certificates.X509IncludeOption]::EndCertOnly
+    $signer.DigestAlgorithm = [System.Security.Cryptography.Oid]::new($script:Sha256Oid)
+    $signedCms.ComputeSignature($signer, $false)
+    [System.IO.File]::WriteAllBytes($SignaturePath, $signedCms.Encode())
+}
+
+function Assert-MtsDetachedManifestSignature {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SignaturePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPublisherThumbprint
+    )
+
+    if (-not (Test-Path -LiteralPath $SignaturePath -PathType Leaf)) {
+        throw "Detached publisher signature is missing: $SignaturePath"
+    }
+    $signatureLength = (Get-Item -LiteralPath $SignaturePath).Length
+    if ($signatureLength -le 0 -or $signatureLength -gt 1048576) {
+        throw "Detached publisher signature has an invalid size."
+    }
+
+    Import-MtsPkcsAssembly
+    $manifestBytes = [System.IO.File]::ReadAllBytes($ManifestPath)
+    $content = [System.Security.Cryptography.Pkcs.ContentInfo]::new($manifestBytes)
+    $signedCms = [System.Security.Cryptography.Pkcs.SignedCms]::new($content, $true)
+    try {
+        $signedCms.Decode([System.IO.File]::ReadAllBytes($SignaturePath))
+        $signedCms.CheckSignature($true)
+    }
+    catch {
+        throw "Detached publisher signature is invalid: $($_.Exception.Message)"
+    }
+
+    if ($signedCms.SignerInfos.Count -ne 1) {
+        throw "Detached publisher signature must contain exactly one signer."
+    }
+    $signer = $signedCms.SignerInfos[0]
+    if ($signer.DigestAlgorithm.Value -ne $script:Sha256Oid) {
+        throw "Detached publisher signature must use SHA-256."
+    }
+    if ($null -eq $signer.Certificate) {
+        throw "Detached publisher signature does not embed its signer certificate."
+    }
+    Assert-MtsCodeSigningCertificate $signer.Certificate
+    $actualThumbprint = ConvertTo-MtsPublisherThumbprint $signer.Certificate.Thumbprint
+    $expectedThumbprint = ConvertTo-MtsPublisherThumbprint $ExpectedPublisherThumbprint
+    if (-not [string]::Equals($actualThumbprint, $expectedThumbprint, [System.StringComparison]::Ordinal)) {
+        throw "Detached publisher signature signer does not match the configured publisher."
+    }
 }
 
 function Get-MtsCanonicalFullPath {
@@ -613,10 +762,7 @@ function Assert-MtsManifestContract {
     }
 
     if ($trustMode -eq "authenticode") {
-        $thumbprint = ([string](Get-MtsObjectProperty $trust "publisherThumbprint" -Required)).Replace(" ", "").ToUpperInvariant()
-        if ($thumbprint -notmatch "^[A-F0-9]{40,64}$") {
-            throw "publisherThumbprint is invalid."
-        }
+        $thumbprint = ConvertTo-MtsPublisherThumbprint ([string](Get-MtsObjectProperty $trust "publisherThumbprint" -Required))
         $signedFiles = @(Get-MtsObjectProperty $trust "signedFiles" -Required)
         if ($signedFiles.Count -eq 0) {
             throw "Authenticode releases must declare signedFiles."
@@ -631,6 +777,28 @@ function Assert-MtsManifestContract {
             }
             $separatorIndex = $signedPathValue.IndexOf("/")
             Assert-MtsRelativePayloadPath $signedPathValue.Substring($separatorIndex + 1) | Out-Null
+        }
+
+        $manifestSignature = Get-MtsObjectProperty $trust "manifestSignature" -Required
+        if ((Get-MtsObjectProperty $manifestSignature "path" -Required) -ne $script:ReleaseManifestSignatureName) {
+            throw "Manifest publisher signature path is invalid."
+        }
+        if ((Get-MtsObjectProperty $manifestSignature "format" -Required) -ne "cms-detached") {
+            throw "Manifest publisher signature format is invalid."
+        }
+        if ((Get-MtsObjectProperty $manifestSignature "digestAlgorithm" -Required) -ne "sha256") {
+            throw "Manifest publisher signature digest algorithm is invalid."
+        }
+    }
+    else {
+        if ($null -ne (Get-MtsObjectProperty $trust "publisherThumbprint" -Required)) {
+            throw "Unsigned development releases must not declare a publisher thumbprint."
+        }
+        if (@(Get-MtsObjectProperty $trust "signedFiles" -Required).Count -ne 0) {
+            throw "Unsigned development releases must not declare signed files."
+        }
+        if ($null -ne (Get-MtsObjectProperty $trust "manifestSignature" -Required)) {
+            throw "Unsigned development releases must not declare a publisher signature."
         }
     }
 
@@ -689,27 +857,46 @@ function Assert-MtsAuthenticodeTrust {
     )
 
     $trust = $Manifest.trust
+    $metadataRoot = if ($InstalledPayloadOnly) {
+        Join-Path $ReleaseRoot $script:ReservedMetadataDirectory
+    }
+    else {
+        $ReleaseRoot
+    }
+    $manifestPath = Join-Path $metadataRoot $script:ReleaseManifestName
+    $signaturePath = Join-Path $metadataRoot $script:ReleaseManifestSignatureName
+
     if ($trust.mode -eq "development-unsigned") {
         if (-not $AllowUnsignedDevelopment) {
             throw "Unsigned development releases are rejected unless -AllowUnsignedDevelopment is explicitly supplied."
         }
+        if (Test-Path -LiteralPath $signaturePath) {
+            throw "Unsigned development releases must not contain a detached publisher signature."
+        }
         return
     }
 
-    $manifestThumbprint = ([string]$trust.publisherThumbprint).Replace(" ", "").ToUpperInvariant()
-    if (
-        -not [string]::IsNullOrWhiteSpace($ExpectedPublisherThumbprint) -and
-        -not [string]::Equals(
-            $manifestThumbprint,
-            $ExpectedPublisherThumbprint.Replace(" ", "").ToUpperInvariant(),
-            [System.StringComparison]::Ordinal
-        )
-    ) {
+    if ([string]::IsNullOrWhiteSpace($ExpectedPublisherThumbprint)) {
+        throw "Production release validation requires -ExpectedPublisherThumbprint as a fixed publisher trust anchor."
+    }
+    $manifestThumbprint = ConvertTo-MtsPublisherThumbprint ([string]$trust.publisherThumbprint)
+    $expectedThumbprint = ConvertTo-MtsPublisherThumbprint $ExpectedPublisherThumbprint
+    if (-not [string]::Equals($manifestThumbprint, $expectedThumbprint, [System.StringComparison]::Ordinal)) {
         throw "Manifest publisher thumbprint does not match the configured publisher."
     }
+    Assert-MtsDetachedManifestSignature `
+        -ManifestPath $manifestPath `
+        -SignaturePath $signaturePath `
+        -ExpectedPublisherThumbprint $expectedThumbprint
 
     foreach ($signedFile in @($trust.signedFiles)) {
-        $scope, $relative = ([string]$signedFile).Split(@("/"), 2)
+        $signedFileValue = [string]$signedFile
+        $separatorIndex = $signedFileValue.IndexOf("/")
+        if ($separatorIndex -le 0 -or $separatorIndex -ge ($signedFileValue.Length - 1)) {
+            throw "Signed file scope is invalid: $signedFileValue"
+        }
+        $scope = $signedFileValue.Substring(0, $separatorIndex)
+        $relative = $signedFileValue.Substring($separatorIndex + 1)
         if ($InstalledPayloadOnly -and $scope -eq "installers") {
             continue
         }
@@ -729,16 +916,35 @@ function Assert-MtsAuthenticodeTrust {
         }
 
         $signature = Get-AuthenticodeSignature -LiteralPath $fullPath
-        if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid) {
+        $allowedStatuses = @(
+            [System.Management.Automation.SignatureStatus]::Valid,
+            [System.Management.Automation.SignatureStatus]::UnknownError
+        )
+        if ($signature.Status -notin $allowedStatuses) {
             throw "Authenticode signature is not valid for $signedFile. Status=$($signature.Status)"
         }
         if ($null -eq $signature.SignerCertificate) {
             throw "Authenticode signer certificate is missing for $signedFile."
         }
+        Assert-MtsCodeSigningCertificate $signature.SignerCertificate
 
         $actualThumbprint = $signature.SignerCertificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
         if (-not [string]::Equals($actualThumbprint, $manifestThumbprint, [System.StringComparison]::Ordinal)) {
-            throw "Authenticode signer thumbprint mismatch for $signedFile."
+            throw "Authenticode signer thumbprint mismatch for $signedFile. Expected=$manifestThumbprint Actual=$actualThumbprint"
+        }
+        if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::UnknownError) {
+            $chain = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+            try {
+                $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                $chain.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::AllowUnknownCertificateAuthority
+                if (-not $chain.Build($signature.SignerCertificate)) {
+                    $chainStatuses = @($chain.ChainStatus | ForEach-Object { [string]$_.Status }) -join ","
+                    throw "Authenticode signer chain is invalid for $signedFile. Status=$chainStatuses"
+                }
+            }
+            finally {
+                $chain.Dispose()
+            }
         }
     }
 }
@@ -803,8 +1009,9 @@ function Test-MtsReleaseBundle {
 
     Assert-MtsNoReparsePoints $releaseRoot
     $allowedRootEntries = @(
-        "release-manifest.json",
-        "release-manifest.json.sha256",
+        $script:ReleaseManifestName,
+        $script:ReleaseManifestChecksumName,
+        $script:ReleaseManifestSignatureName,
         "payload",
         "installers"
     )
@@ -815,8 +1022,8 @@ function Test-MtsReleaseBundle {
     }
 
     $manifestRecord = Read-MtsManifestFile `
-        -ManifestPath (Join-Path $releaseRoot "release-manifest.json") `
-        -ChecksumPath (Join-Path $releaseRoot "release-manifest.json.sha256")
+        -ManifestPath (Join-Path $releaseRoot $script:ReleaseManifestName) `
+        -ChecksumPath (Join-Path $releaseRoot $script:ReleaseManifestChecksumName)
     $manifest = $manifestRecord.Manifest
 
     if (
@@ -1029,19 +1236,27 @@ function Read-MtsInstalledManifest {
     $metadataRoot = Join-Path $AppPath $script:ReservedMetadataDirectory
     $metadataEntries = @(Get-ChildItem -LiteralPath $metadataRoot -Force)
     foreach ($entry in $metadataEntries) {
-        if ($entry.PSIsContainer -or $entry.Name -notin @("release-manifest.json", "release-manifest.json.sha256")) {
+        if (
+            $entry.PSIsContainer -or
+            $entry.Name -notin @(
+                $script:ReleaseManifestName,
+                $script:ReleaseManifestChecksumName,
+                $script:ReleaseManifestSignatureName
+            )
+        ) {
             throw "Installed release metadata contains an undeclared entry: $($entry.Name)"
         }
     }
-    if ($metadataEntries.Count -ne 2) {
-        throw "Installed release metadata must contain exactly the manifest and its checksum."
-    }
 
     $manifestRecord = Read-MtsManifestFile `
-        -ManifestPath (Join-Path $metadataRoot "release-manifest.json") `
-        -ChecksumPath (Join-Path $metadataRoot "release-manifest.json.sha256")
+        -ManifestPath (Join-Path $metadataRoot $script:ReleaseManifestName) `
+        -ChecksumPath (Join-Path $metadataRoot $script:ReleaseManifestChecksumName)
 
     $manifest = $manifestRecord.Manifest
+    $expectedMetadataCount = if ($manifest.trust.mode -eq "authenticode") { 3 } else { 2 }
+    if ($metadataEntries.Count -ne $expectedMetadataCount) {
+        throw "Installed release metadata entry count does not match its trust mode."
+    }
     # Validate the exact installed ledger without copying. Get-MtsPayloadLedger cannot exclude metadata,
     # so compare the manifest against a direct ledger of app files excluding the reserved directory.
     Assert-MtsNoReparsePoints $AppPath
@@ -1122,8 +1337,12 @@ function Copy-MtsReleaseToStage {
 
     $metadataRoot = Join-Path $StagePath $script:ReservedMetadataDirectory
     [System.IO.Directory]::CreateDirectory($metadataRoot) | Out-Null
-    Copy-Item -LiteralPath (Join-Path $Release.ReleaseRoot "release-manifest.json") -Destination $metadataRoot
-    Copy-Item -LiteralPath (Join-Path $Release.ReleaseRoot "release-manifest.json.sha256") -Destination $metadataRoot
+    Copy-Item -LiteralPath (Join-Path $Release.ReleaseRoot $script:ReleaseManifestName) -Destination $metadataRoot
+    Copy-Item -LiteralPath (Join-Path $Release.ReleaseRoot $script:ReleaseManifestChecksumName) -Destination $metadataRoot
+    $signaturePath = Join-Path $Release.ReleaseRoot $script:ReleaseManifestSignatureName
+    if (Test-Path -LiteralPath $signaturePath -PathType Leaf) {
+        Copy-Item -LiteralPath $signaturePath -Destination $metadataRoot
+    }
 }
 
 function Assert-MtsUpgradeCompatibility {
@@ -2087,6 +2306,9 @@ function New-MtsReleaseBundle {
     if ([string]::IsNullOrWhiteSpace($PublisherThumbprint) -and -not $AllowUnsignedDevelopment) {
         throw "Production release creation requires -PublisherThumbprint. Use -AllowUnsignedDevelopment only for local fixtures."
     }
+    if ($AllowUnsignedDevelopment -and -not [string]::IsNullOrWhiteSpace($PublisherThumbprint)) {
+        throw "-AllowUnsignedDevelopment cannot be combined with -PublisherThumbprint."
+    }
 
     $signedFiles = @()
     $trust = if ($AllowUnsignedDevelopment) {
@@ -2094,13 +2316,11 @@ function New-MtsReleaseBundle {
             mode = "development-unsigned"
             publisherThumbprint = $null
             signedFiles = @()
+            manifestSignature = $null
         }
     }
     else {
-        $normalizedThumbprint = $PublisherThumbprint.Replace(" ", "").ToUpperInvariant()
-        if ($normalizedThumbprint -notmatch "^[A-F0-9]{40,64}$") {
-            throw "PublisherThumbprint is invalid."
-        }
+        $normalizedThumbprint = ConvertTo-MtsPublisherThumbprint $PublisherThumbprint
 
         foreach ($file in $ledger) {
             if ([System.IO.Path]::GetExtension($file.path) -match "^(?i:\.exe|\.dll)$") {
@@ -2120,6 +2340,11 @@ function New-MtsReleaseBundle {
             mode = "authenticode"
             publisherThumbprint = $normalizedThumbprint
             signedFiles = @($signedFiles | Sort-Object)
+            manifestSignature = [pscustomobject][ordered]@{
+                path = $script:ReleaseManifestSignatureName
+                format = "cms-detached"
+                digestAlgorithm = "sha256"
+            }
         }
     }
 
@@ -2214,11 +2439,17 @@ function New-MtsReleaseBundle {
         }
 
         $manifestContent = (ConvertTo-MtsJson -Value $manifest) + "`n"
-        $manifestPath = Join-Path $stageRoot "release-manifest.json"
+        $manifestPath = Join-Path $stageRoot $script:ReleaseManifestName
         Write-MtsUtf8File -Path $manifestPath -Content $manifestContent
         Write-MtsUtf8File `
-            -Path (Join-Path $stageRoot "release-manifest.json.sha256") `
+            -Path (Join-Path $stageRoot $script:ReleaseManifestChecksumName) `
             -Content ((Get-MtsFileSha256 $manifestPath) + "`n")
+        if (-not $AllowUnsignedDevelopment) {
+            Write-MtsDetachedManifestSignature `
+                -ManifestPath $manifestPath `
+                -SignaturePath (Join-Path $stageRoot $script:ReleaseManifestSignatureName) `
+                -PublisherThumbprint $PublisherThumbprint
+        }
 
         $verified = Test-MtsReleaseBundle `
             -ReleaseDirectory $stageRoot `

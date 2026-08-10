@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import resource
+import math
 import sys
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - exercised by the Windows runtime
+    _resource = None
 
 # Keep direct ``python tools/run_real_semantic_acceptance.py`` invocation
 # consistent with the other repository acceptance tools.
@@ -34,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--transcript", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model", default="qwen3.5:9b")
+    parser.add_argument("--model", default="qwen3.5:27b-q4_K_M")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--context-tokens", type=int, default=8192)
@@ -51,10 +56,65 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _max_rss_mb() -> float:
-    # macOS reports ru_maxrss in bytes; Linux reports KiB.
-    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
-    return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / divisor, 3)
+def _max_rss_evidence() -> dict[str, Any]:
+    if _resource is not None:
+        try:
+            raw = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or not math.isfinite(float(raw))
+                or raw < 0
+            ):
+                raise ValueError("invalid ru_maxrss")
+            # macOS reports ru_maxrss in bytes; Linux reports KiB.
+            divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
+            return {
+                "available": True,
+                "source": "resource.getrusage.ru_maxrss",
+                "valueMb": round(float(raw) / divisor, 3),
+            }
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            raw_peak_bytes = getattr(
+                psutil.Process().memory_info(),
+                "peak_wset",
+                None,
+            )
+            if (
+                isinstance(raw_peak_bytes, bool)
+                or not isinstance(raw_peak_bytes, (int, float))
+                or not math.isfinite(float(raw_peak_bytes))
+                or raw_peak_bytes < 0
+            ):
+                raise ValueError("invalid peak working set")
+            return {
+                "available": True,
+                "source": "psutil.Process.memory_info.peak_wset",
+                "valueMb": round(
+                    float(raw_peak_bytes) / (1024 * 1024),
+                    3,
+                ),
+            }
+        except (psutil.Error, AttributeError, OSError, TypeError, ValueError):
+            pass
+    return {
+        "available": False,
+        "failureCode": "PROCESS_PEAK_RSS_UNAVAILABLE",
+    }
+
+
+def _max_rss_mb() -> float | None:
+    evidence = _max_rss_evidence()
+    value = evidence.get("valueMb")
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -106,6 +166,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise RuntimeError("source transcript changed during semantic run")
 
     atomic_write_json(artifact_path, artifact)
+    max_rss_evidence = _max_rss_evidence()
     summary = {
         "schemaVersion": "1.0.0",
         "status": artifact["status"],
@@ -123,7 +184,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "fileSha256": sha256_file(artifact_path),
         },
         "elapsedSeconds": round(elapsed, 3),
-        "maxRssMb": _max_rss_mb(),
+        "maxRssMb": max_rss_evidence.get("valueMb"),
+        "maxRssEvidence": max_rss_evidence,
         "execution": {
             "timeoutSeconds": args.timeout_seconds,
             "contextTokens": args.context_tokens,

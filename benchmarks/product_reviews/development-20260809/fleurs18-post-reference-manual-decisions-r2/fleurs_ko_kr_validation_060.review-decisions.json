@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ko_kr_validation_060-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-060-postref-text-0001",
+      "reason": "Post-reference Codex adjudication confirms the semantic text exactly matches the official FLEURS rawTranscript.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ko_kr_validation_060", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "이 역동적인 수송 셔틀은 어떤 식으로든 모든 사람들이 자가용을 기반으로 하는 수송 시스템과 연결되고 이를 지원하도록 한다.",
+      "displayText": "이 역동적인 수송 셔틀은 어떤 식으로든 모든 사람들이 자가용을 기반으로 하는 수송 시스템과 연결되고 이를 지원하도록 한다.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-060-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:c109d31aed98814cb74aff5a4c232eda897a62ec1432d5fe50d081c48f3925a9"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

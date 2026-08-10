@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ar_eg_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001.rf01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication restores the official FLEURS wording and punctuation for the first timed fragment.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ar_eg_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:80-11280ms"],
+      "confidence": 1.0,
+      "normalizedText": "في شراكة بين \"مصلحة المتنزهات الوطنية والحياة البرية\" و \"جمعية الرماة الرياضيين في أستراليا\"، اختير متطوعون مؤهلون في إطار برنامج",
+      "displayText": "في شراكة بين \"مصلحة المتنزهات الوطنية والحياة البرية\" و \"جمعية الرماة الرياضيين في أستراليا\"، اختير متطوعون مؤهلون في إطار برنامج",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf01:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-090-postref-speaker-0002",
+      "reason": "The first timed fragment belongs to the sole continuous reader.",
+      "evidence": ["audio:80-11280ms", "manifest:expected-speaker-count=1", "review-queue-file-sha256:26b9c57b1cbd75e474dd1f6d632adcc51a45984cc56b2e85fa9bf75e57823ccb"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf02:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-090-postref-text-0003",
+      "reason": "Post-reference Codex adjudication restores the official FLEURS wording for the closing timed fragment.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ar_eg_validation_090", "audio:11280-13240ms", "context:preceding-fragment"],
+      "confidence": 1.0,
+      "normalizedText": "الصيد التابع للجمعية.",
+      "displayText": "الصيد التابع للجمعية.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf02:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-090-postref-speaker-0004",
+      "reason": "The closing timed fragment belongs to the same sole continuous reader.",
+      "evidence": ["audio:11280-13240ms", "manifest:expected-speaker-count=1", "review-queue-file-sha256:26b9c57b1cbd75e474dd1f6d632adcc51a45984cc56b2e85fa9bf75e57823ccb"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

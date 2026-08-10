@@ -15,6 +15,11 @@ The implementation lives under `packaging/tauri/` and provides:
 - machine-readable JSON results and non-zero failure exits;
 - offline development fixtures and fast pytest coverage.
 
+The Tauri Windows build requires `apps/desktop/src-tauri/icons/icon.png`.
+This checked-in 256x256 RGBA asset is derived from the existing desktop scene
+artwork; the packaging tests reject a missing or undersized icon before a
+release build.
+
 ## 1. Boundary and threat model
 
 The lifecycle scripts manage only these paths below `InstallRoot`:
@@ -53,7 +58,7 @@ The implementation rejects:
 - duplicate paths under case-insensitive Windows comparison;
 - undeclared files in the release root, payload, installer ledger, or installed application;
 - missing, malformed, or mismatched hashes;
-- invalid or untrusted Authenticode signatures in production mode;
+- invalid Authenticode signatures or a signer that does not match the fixed production trust anchor;
 - an existing unmanaged `app/` directory;
 - same-version repacks;
 - implicit version downgrades;
@@ -68,8 +73,20 @@ The implementation rejects:
 release/
 ├── release-manifest.json
 ├── release-manifest.json.sha256
+├── release-manifest.json.p7s       # detached CMS publisher signature in production
 ├── payload/
-│   └── media-transcribe-studio.exe
+│   ├── media-transcribe-studio.exe
+│   ├── backend/                    # packaged worker code
+│   ├── contracts/                  # runtime JSON contracts
+│   ├── reporting/                  # report assembly runtime
+│   ├── pdf-renderer/target/pdf-renderer.jar
+│   ├── configs/                    # LLM provider presets and schema
+│   ├── configs/model-catalog.v1.json
+│   ├── configs/model-catalog.v1.schema.json
+│   ├── production.config.example.json
+│   ├── production.config.remote.example.json
+│   ├── tools/model_manager.py
+│   └── bootstrap/                  # runtime/model bootstrap entry points
 └── installers/                  # optional hashed NSIS/MSI artifacts
 ```
 
@@ -91,7 +108,60 @@ Important fields:
 | `nativeInstallers` | Exact ledger for optional NSIS/MSI artifacts. |
 | `trust` | `authenticode` or explicitly unsafe `development-unsigned`. |
 
-The manifest checksum authenticates the exact manifest bytes against accidental corruption. In production, authenticity is anchored by Authenticode: every declared executable, DLL, MSI, and the application entry point must have a valid signature from the exact configured publisher thumbprint. Replacing a payload and regenerating its plain SHA-256 files is therefore insufficient to pass production validation.
+The plain manifest checksum detects accidental corruption. In production,
+`release-manifest.json.p7s` signs the exact manifest bytes with detached CMS
+and SHA-256. Every validation, install, status, upgrade, rollback, and portable
+flow requires an externally configured publisher thumbprint; a manifest cannot
+declare its own trust anchor. The CMS signature therefore authenticates the
+complete Python, JAR, configuration, bootstrap, and native-artifact ledger.
+Replacing any payload and regenerating the manifest/checksum no longer passes.
+
+Declared PE, DLL, MSI, and NSIS files are additionally checked with
+Authenticode against the same exact certificate. A system-trusted chain is
+accepted normally. An enterprise/self-signed certificate may be accepted only
+when its exact thumbprint is the configured trust anchor, the Authenticode
+content signature is present, and an X.509 chain built while allowing only an
+unknown root has no other validation error. `HashMismatch`, wrong EKU, wrong
+publisher, missing signature, and chain errors other than the explicit unknown
+root fail closed; a normal valid timestamp chain remains acceptable.
+
+### Runtime and model bootstrap
+
+`New-WindowsReleasePayload.ps1` builds the payload from an explicit allowlist.
+It includes the worker code, contracts, PDF runtime, provider presets, reviewed
+portable model catalog, production configuration template, and model-manager entry
+point. The resulting files are part of the ordinary payload hash ledger.
+
+Model weights and Python environments are not silently copied from the build
+workstation. The generated `bootstrap/runtime-bootstrap.v1.json` records
+`bundledModelArtifacts: false` and the model-root selection policy:
+
+1. `MTS_MODEL_ROOT`;
+2. `D:\models` when drive D exists;
+3. `%LOCALAPPDATA%\MediaTranscribeStudio\models`.
+
+After installation, bind an existing worker runtime and seed a user-owned
+configuration without overwriting one that already exists:
+
+```powershell
+.\bootstrap\Initialize-MtsRuntime.ps1 `
+  -WorkerPython "D:\MediaTranscribeStudio\runtime\media-asr\python.exe" `
+  -ModelRoot "D:\models" `
+  -PersistUserEnvironment
+```
+
+Inspect or download models without putting tokens in command arguments or
+release artifacts:
+
+```powershell
+.\bootstrap\Manage-MtsModels.ps1 list
+.\bootstrap\Manage-MtsModels.ps1 pull --provider ollama --model qwen3.5:27b-q4_K_M
+.\bootstrap\Manage-MtsModels.ps1 pull --provider huggingface --model <repo> --revision <commit> --token-env HF_TOKEN
+```
+
+The provider catalog includes Ollama, Hugging Face Router, first-party APIs,
+and custom OpenAI-compatible relays. Configuration stores only the API-key
+environment-variable name. Raw keys are never packaged.
 
 ### Development fixtures
 
@@ -106,7 +176,8 @@ They can be used only with `-AllowUnsignedDevelopment`. Omitting that explicit s
 
 ## 3. Reproducible build plan
 
-`Build-TauriRelease.ps1` first verifies that these three application versions are identical:
+`Build-TauriRelease.ps1` is the active Windows entry point. It first verifies that
+these three application versions are identical:
 
 ```text
 apps/desktop/package.json
@@ -125,8 +196,30 @@ The declared build sequence is:
 
 ```powershell
 npm ci
-npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis,msi
+npm run tauri -- build --ci --target x86_64-pc-windows-msvc --bundles nsis,msi --config <temporary-windows-tauri-overlay.json> -- --locked
 ```
+
+Before invoking Tauri, the entry point stages a weight-free runtime payload and
+passes a temporary overlay mapping it to `resources/mts-runtime`. Consequently
+both the NSIS and MSI installers contain `backend/worker.py`, contracts, report
+runtime, provider/model catalogs, and bootstrap scripts. The overlay is created
+outside the repository and removed after the build; it never changes the tracked
+`tauri.conf.json`.
+
+The same command also emits a deterministic archive beside the release
+directory:
+
+```text
+<output-directory>.portable.zip
+<output-directory>.portable.zip.sha256
+```
+
+The archive is a compressed copy of the verified release directory and can be
+unpacked to a user-owned location before running
+`payload\bootstrap\Initialize-MtsRuntime.ps1`. It contains no Python runtime or
+model weights. Pass `-TargetDirectory D:\build-cache\cargo` to keep Rust build
+outputs off the system drive, and use `-Force` only for replacing an unpublished
+local candidate.
 
 Inspect the plan without compiling or writing an output:
 
@@ -136,8 +229,18 @@ Inspect the plan without compiling or writing an output:
   -Channel stable `
   -SourceDateEpoch 1784678400 `
   -PublisherThumbprint "EXPECTED_SIGNING_CERTIFICATE_THUMBPRINT" `
-  -DryRun
+    -DryRun
 ```
+
+On a Windows runner, the repository workflow
+`.github/workflows/tauri-windows-release.yml` builds x64 or arm64 candidates,
+expands both installer formats, and fails if the embedded runtime marker is not
+present. It is manual and uploads artifacts only; it does not publish a GitHub
+Release automatically. Signed candidates require these repository secrets:
+`WINDOWS_CODESIGN_PFX_BASE64`, `WINDOWS_CODESIGN_PFX_PASSWORD`, and
+`WINDOWS_CODESIGN_THUMBPRINT`. An unsigned candidate must be selected explicitly
+as `unsigned-development` and is rejected by validation unless
+`-AllowUnsignedDevelopment` is supplied.
 
 Create a production release after the Tauri executable and native installers are signed:
 
@@ -336,8 +439,7 @@ Run the focused suite with the repository-local temporary root:
 
 ```powershell
 $env:PYTHONIOENCODING = "utf-8"
-& "C:\Users\33516\.conda\envs\media-asr\python.exe" `
-  -m pytest -q `
+python -m pytest -q `
   tests/test_tauri_packaging.py `
   --basetemp ".codex/pytest-tauri-packaging"
 ```
@@ -349,6 +451,9 @@ The tests cover:
 - dry-run non-mutation;
 - deterministic manifest bytes;
 - explicit unsigned-development consent;
+- fixed production publisher trust-anchor enforcement;
+- detached CMS signature creation, preservation, and verification;
+- rejection of a missing CMS signature and payload replacement followed by a recomputed manifest/checksum;
 - install/data path separation;
 - traversal and undeclared-file rejection;
 - payload hash mismatch fail-closed behavior;

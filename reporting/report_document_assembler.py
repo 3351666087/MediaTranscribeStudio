@@ -1724,8 +1724,8 @@ class ReportDocumentAssembler:
         )
         if bool(speaker.get("locked")):
             return explicit if explicit in {"locked", "manually-reviewed"} else "locked"
-        if explicit == "manually-reviewed":
-            return explicit
+        if explicit == "manually-reviewed" or audio.get("status") == "human-reviewed":
+            return "manually-reviewed"
         if must_review:
             return "review-required"
         return explicit or "accepted"

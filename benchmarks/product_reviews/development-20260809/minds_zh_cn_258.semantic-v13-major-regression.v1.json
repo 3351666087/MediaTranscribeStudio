@@ -1,0 +1,99 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "semantic-major-regression-fixture",
+  "fixtureId": "minds-zh-cn-258-visible-speaker-continuity-v1",
+  "visibilityPolicy": {
+    "caseIdIsAuditOnly": true,
+    "referenceTranscriptVisibleToArbitrator": false,
+    "expectedDecisionVisibleToArbitrator": false,
+    "modelIdentityVisibleToArbitrator": false
+  },
+  "auditBinding": {
+    "caseId": "minds_zh_cn_258",
+    "caseAlias": "case-022",
+    "caseSha256": "800d114d9298ee89c783120783636d81769faf604dd3786870d0288de3ad67aa",
+    "blindReviewId": "multilingual22-four-model-codex-blind-review-v13-r2",
+    "blindReviewCanonicalSha256": "101de196eaa977a884322b3d909de356bbd69363fdd0e60946845e8a896b635a",
+    "defectAuditCanonicalSha256": "4b5424dacb01257a2eb14b97631c88534a6f298374da9b4fb24ef1347a4b5dd3",
+    "winnerFindingId": "1acc02d012313e6ff2ea37d20bb7d27f8ec3f7f4f38c17749fb200fbd21617bf",
+    "crossCandidateFindingId": "081830133051d0360028941612fa1ac4ba556d4e5756db8344780c4d6127ee8b"
+  },
+  "inputBinding": {
+    "sourceMediaSha256": "9eeb3d1be60d5c4ebc9643a65a54a79e6bcc53ec1bf688ee9c1b3c558039be0b",
+    "transcriptDocumentSha256": "3481bfeeb69673aa17818921ef601e1bd17369254fddbae0ba03167e148c6c38",
+    "candidateLatticeSha256": "6973172a16117e22e37b88731bd4f20afd62d5212a07fa1a76d36a0334266b84",
+    "sourceDurationMs": 2901
+  },
+  "visibleInput": {
+    "language": "zh-CN",
+    "speakerCount": 3,
+    "speakerIds": [
+      "speaker-1",
+      "speaker-2",
+      "speaker-3"
+    ],
+    "timelineSelectableCandidateCount": 3,
+    "speakerAssignmentSelectableCandidateCountPerSegment": 3,
+    "joinedText": "你好请冻结我的卡",
+    "segments": [
+      {
+        "segmentId": "window-000001.cardinality-01",
+        "startMs": 620,
+        "endMs": 1360,
+        "speakerId": "speaker-1",
+        "language": "zh-CN",
+        "text": "你好"
+      },
+      {
+        "segmentId": "window-000001.cardinality-02",
+        "startMs": 1360,
+        "endMs": 2126,
+        "speakerId": "speaker-2",
+        "language": "zh-CN",
+        "text": "请冻结我的"
+      },
+      {
+        "segmentId": "window-000001.cardinality-03",
+        "startMs": 2126,
+        "endMs": 2880,
+        "speakerId": "speaker-3",
+        "language": "zh-CN",
+        "text": "卡"
+      }
+    ]
+  },
+  "blindReviewFinding": {
+    "severity": "major",
+    "category": "speaker-continuity",
+    "observation": "The three visible fragments form one short coherent request; speaker continuity is the material defect.",
+    "reason": "ASR or language work cannot repair the three-speaker attribution error.",
+    "expectedRequests": [
+      {
+        "domain": "speaker-cardinality-timeline",
+        "scopeId": "media",
+        "requestKind": "timeline-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-01",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-02",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-03",
+        "requestKind": "speaker-assignment-challenger"
+      }
+    ],
+    "forbiddenSubstituteDomains": [
+      "language-span",
+      "asr-text",
+      "speech-disposition"
+    ]
+  },
+  "canonicalSha256": "90287b233671cb5e47f2b63cda676fcc41c55fea0dc7ad12366082d38c9c41ef"
+}

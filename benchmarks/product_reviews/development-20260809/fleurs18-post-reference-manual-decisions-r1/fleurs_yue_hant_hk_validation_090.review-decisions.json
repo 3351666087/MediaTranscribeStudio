@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_yue_hant_hk_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001.rf01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-yue-hant-hk-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication restores Traditional Chinese and removes the duplicated boundary character from the first timed fragment.",
+      "evidence": ["fleurs-raw-transcript:fleurs_yue_hant_hk_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:1500-12500ms"],
+      "confidence": 1.0,
+      "normalizedText": "牠們在夜晚擁有良好的夜視能力，還可以靜悄悄地移動。虎貓狩獵的方式是與周圍環境",
+      "displayText": "牠們在夜晚擁有良好的夜視能力，還可以靜悄悄地移動。虎貓狩獵的方式是與周圍環境",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf01:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-yue-hant-hk-090-postref-speaker-0002",
+      "reason": "The first timed fragment belongs to the sole continuous reader.",
+      "evidence": ["audio:1500-12500ms", "manifest:expected-speaker-count=1", "review-queue-file-sha256:6aa16322d100cc471d41a41606d0f2855a5e2c77b993205bcff15defac73a07e"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf02:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-yue-hant-hk-090-postref-text-0003",
+      "reason": "Post-reference Codex adjudication restores the exact official closing phrase for the second timed fragment.",
+      "evidence": ["fleurs-raw-transcript:fleurs_yue_hant_hk_validation_090", "audio:12500-15850ms", "context:preceding-fragment"],
+      "confidence": 1.0,
+      "normalizedText": "融為一體，然後再撲向獵物。",
+      "displayText": "融為一體，然後再撲向獵物。",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf02:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-yue-hant-hk-090-postref-speaker-0004",
+      "reason": "The closing timed fragment belongs to the same sole continuous reader.",
+      "evidence": ["audio:12500-15850ms", "manifest:expected-speaker-count=1", "review-queue-file-sha256:6aa16322d100cc471d41a41606d0f2855a5e2c77b993205bcff15defac73a07e"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

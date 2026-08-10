@@ -492,6 +492,20 @@
     "frameRecord": {
       "type": "object",
       "additionalProperties": false,
+      "dependentRequired": {
+        "contrastBackgroundImageSha256": [
+          "glyphFillMatteImageSha256",
+          "contrastAnalysis"
+        ],
+        "glyphFillMatteImageSha256": [
+          "contrastBackgroundImageSha256",
+          "contrastAnalysis"
+        ],
+        "contrastAnalysis": [
+          "contrastBackgroundImageSha256",
+          "glyphFillMatteImageSha256"
+        ]
+      },
       "required": [
         "frameId",
         "requestedTimestampMs",
@@ -528,6 +542,168 @@
         },
         "sourceImageSha256": {
           "$ref": "#/$defs/sha256"
+        },
+        "contrastBackgroundImageSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "glyphFillMatteImageSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contrastAnalysis": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/contrastAnalysis"
+          }
+        }
+      }
+    },
+    "contrastAnalysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cueId",
+        "strategy",
+        "glyphComponentCount",
+        "glyphComponentsCovered",
+        "pairedCorePixelCount",
+        "glyphCoreAlphaThreshold",
+        "glyphNonzeroAlphaQuantile75",
+        "componentContrastQuantile",
+        "tinyComponentFallbackCount",
+        "tinyComponentMaxPixels",
+        "tinyComponentMinimumAlpha",
+        "minimumComponentCorePixelCount",
+        "effectiveBackgroundClasses",
+        "underlyingSceneClasses",
+        "componentCoverageSha256"
+      ],
+      "properties": {
+        "cueId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "strategy": {
+          "const": "glyph-fill-core-component-q05-v2"
+        },
+        "glyphComponentCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "glyphComponentsCovered": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "pairedCorePixelCount": {
+          "type": "integer",
+          "minimum": 32,
+          "maximum": 1000000000
+        },
+        "glyphCoreAlphaThreshold": {
+          "type": "number",
+          "minimum": 0.8,
+          "maximum": 1.0
+        },
+        "glyphNonzeroAlphaQuantile75": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "componentContrastQuantile": {
+          "const": 0.05
+        },
+        "tinyComponentFallbackCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "tinyComponentMaxPixels": {
+          "const": 6
+        },
+        "tinyComponentMinimumAlpha": {
+          "const": 0.5
+        },
+        "minimumComponentCorePixelCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000
+        },
+        "effectiveBackgroundClasses": {
+          "$ref": "#/$defs/observedBackgroundClasses"
+        },
+        "underlyingSceneClasses": {
+          "$ref": "#/$defs/observedBackgroundClasses"
+        },
+        "componentCoverageSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "observedBackgroundClasses": {
+      "type": "array",
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "dark",
+          "light"
+        ]
+      }
+    },
+    "contrastMatte": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transform",
+        "canonicalAssOverlaySha256",
+        "contrastBackground",
+        "glyphFillMatte",
+        "inlineOverridePolicy"
+      ],
+      "properties": {
+        "transform": {
+          "$ref": "#/$defs/component"
+        },
+        "canonicalAssOverlaySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "contrastBackground": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy",
+            "assSha256"
+          ],
+          "properties": {
+            "strategy": {
+              "const": "background-only-ass-v1"
+            },
+            "assSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "glyphFillMatte": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "strategy",
+            "assSha256"
+          ],
+          "properties": {
+            "strategy": {
+              "const": "opaque-white-fill-ass-v1"
+            },
+            "assSha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        },
+        "inlineOverridePolicy": {
+          "const": "fail-closed"
         }
       }
     },
@@ -684,6 +860,9 @@
         },
         "selection": {
           "$ref": "#/$defs/selection"
+        },
+        "contrastMatte": {
+          "$ref": "#/$defs/contrastMatte"
         },
         "bindings": {
           "type": "array",

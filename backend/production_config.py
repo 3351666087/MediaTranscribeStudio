@@ -1,9 +1,9 @@
-"""Strict, local-only configuration for the production worker composition root.
+"""Strict configuration for the production worker composition root.
 
-The legacy project accepted many implicit defaults and network-capable model
-identifiers.  The production worker deliberately does the opposite: every
-runtime artifact is an explicit local path, unknown configuration keys fail,
-and diagnostics expose component state without echoing sensitive paths.
+The default profile remains offline and digest-pinned, while an explicit
+configurable profile may select a validated remote LLM transport. Every
+runtime artifact is still an explicit local path, unknown configuration keys
+fail, and diagnostics expose component state without echoing sensitive paths.
 """
 
 from __future__ import annotations
@@ -19,20 +19,29 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .errors import WorkerError
+from .local_llm import (
+    LLMProviderConfig,
+    LocalLLMConfig,
+    NETWORK_POLICY_LOOPBACK_ONLY,
+    NETWORK_POLICY_REMOTE_EXPLICIT,
+    provider_config_from_mapping,
+)
 
 PRODUCTION_CONFIG_SCHEMA_VERSION = "1.0.0"
 PRODUCTION_MODE = "offline-production"
+CONFIGURABLE_PRODUCTION_MODE = "configurable-production"
 _MAX_CONFIG_BYTES = 1024 * 1024
 _MAX_MODEL_MANIFEST_BYTES = 4 * 1024 * 1024
 _MODEL_MANIFEST_NAME = ".mts-model-manifest.json"
-_MODEL_MANIFEST_SCHEMA_VERSION = "1.0.0"
+_MODEL_MANIFEST_SCHEMA_VERSIONS = frozenset({"1.0.0", "1.1.0"})
 _URI_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:[.-][a-z0-9]+)*$")
 _RUNTIME_IMPORT_TIMEOUT_SECONDS = 120.0
 
 
@@ -136,6 +145,39 @@ def _choice(value: Any, *, field: str, choices: set[str]) -> str:
     return output
 
 
+def _optional_sha256_digest(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    text = _nonempty_text(value, field=field).casefold()
+    if text.startswith("sha256:"):
+        text = text.removeprefix("sha256:")
+    if _SHA256_PATTERN.fullmatch(text) is None:
+        raise ProductionConfigError(
+            f"{field} must be a 64-character SHA-256 digest"
+        )
+    return f"sha256:{text}"
+
+
+def _sha256_digest(value: Any, *, field: str) -> str:
+    digest = _optional_sha256_digest(value, field=field)
+    if digest is None:
+        raise ProductionConfigError(f"{field} must be explicitly configured")
+    return digest
+
+
+def _set_default_config_value(
+    target: dict[str, Any],
+    canonical_key: str,
+    value: Any,
+    *,
+    aliases: Sequence[str],
+) -> None:
+    """Fill one provider setting without overriding a user spelling."""
+
+    if not any(alias in target for alias in aliases):
+        target[canonical_key] = value
+
+
 def _reject_remote_or_unc(text: str, *, field: str) -> None:
     if _URI_PATTERN.match(text):
         raise ProductionConfigError(f"{field} must be a local filesystem path")
@@ -205,14 +247,48 @@ class ProductionPaths:
 
 
 @dataclass(frozen=True)
+class ProductionPromotionEvidence:
+    """Blind-review decision bound to one atomic deployment transition."""
+
+    decision_id: str
+    decision_artifact_sha256: str
+    decision_canonical_sha256: str
+    blind_review_artifact_sha256: str
+    comparison_artifact_sha256: str
+    previous_config_sha256: str
+    rollback_config_path: Path
+    rollback_config_sha256: str
+
+
+@dataclass(frozen=True)
+class ProductionModelDeployment:
+    """One replaceable model bound to a stable production deployment slot."""
+
+    path: Path
+    deployment_slot: str
+    registry_model_id: str
+    manifest_model_key: str
+    manifest_sha256: str | None
+    adapter_id: str
+    legacy_binding: bool = False
+    promotion_evidence: ProductionPromotionEvidence | None = None
+
+
+@dataclass(frozen=True)
 class ProductionModels:
     funasr_vad: Path
     qwen3_asr: Path
     qwen3_forced_aligner: Path | None
     cam_plus: Path
-    eres2net_v2: Path
+    secondary_speaker_verifier: ProductionModelDeployment
     pyannote: Path | None
     mossformer2_separation: Path | None = None
+
+    @property
+    def eres2net_v2(self) -> Path:
+        """Compatibility path for callers that predate deployment slots."""
+
+        return self.secondary_speaker_verifier.path
 
 
 @dataclass(frozen=True)
@@ -269,7 +345,15 @@ class ProductionSpeakerPolicy:
     overlap_recovery_max_interval_ms: int = 12_000
     overlap_recovery_asr_max_new_tokens: int = 96
     local_llm_mode: str = "suggestion-only"
-    local_llm_model: str = "qwen3.5:9b"
+    local_llm_model: str = "qwen3.5:27b-q4_K_M"
+    local_llm_model_digest: str | None = (
+        "sha256:7653528ba5cba4dd8e19da24aaddc7f4d0b5ecd93571c0825dfd4137958ec06e"
+    )
+    local_llm_timeout_seconds: float = 300.0
+    local_llm_context_tokens: int = 8192
+    local_llm_output_tokens: int = 1024
+    local_llm_batch_size: int = 8
+    local_llm_max_rounds: int = 4
 
 
 @dataclass(frozen=True)
@@ -295,6 +379,7 @@ class ProductionConfig:
     executables: ProductionExecutables
     runtime: ProductionRuntime
     speaker: ProductionSpeakerPolicy
+    llm: LLMProviderConfig
     pdf: ProductionPdfPolicy
     source_path: Path
 
@@ -347,6 +432,7 @@ class ProductionConfig:
                 "executables",
                 "runtime",
                 "speaker",
+                "llm",
                 "pdf",
             },
             required={
@@ -372,10 +458,10 @@ class ProductionConfig:
         mode = _choice(
             root["mode"],
             field="mode",
-            choices={PRODUCTION_MODE},
+            choices={PRODUCTION_MODE, CONFIGURABLE_PRODUCTION_MODE},
         )
         offline = _boolean(root["offline"], field="offline")
-        if not offline:
+        if mode == PRODUCTION_MODE and not offline:
             raise ProductionConfigError(
                 "production mode requires offline=true",
                 code="NETWORK_POLICY_INVALID",
@@ -438,6 +524,7 @@ class ProductionConfig:
                 "qwen3ForcedAligner",
                 "camPlus",
                 "eres2netV2",
+                "secondarySpeakerVerifier",
                 "pyannote",
                 "mossformer2Separation",
             },
@@ -445,9 +532,186 @@ class ProductionConfig:
                 "funasrVad",
                 "qwen3Asr",
                 "camPlus",
-                "eres2netV2",
             },
         )
+        legacy_secondary = "eres2netV2" in raw_models
+        explicit_secondary = "secondarySpeakerVerifier" in raw_models
+        if legacy_secondary == explicit_secondary:
+            raise ProductionConfigError(
+                "models must configure exactly one secondary speaker verifier",
+                details={
+                    "field": "models",
+                    "mutuallyExclusiveFields": [
+                        "eres2netV2",
+                        "secondarySpeakerVerifier",
+                    ],
+                },
+            )
+        if legacy_secondary:
+            secondary_speaker_verifier = ProductionModelDeployment(
+                path=_local_path(
+                    raw_models["eres2netV2"],
+                    field="models.eres2netV2",
+                    base_directory=base_directory,
+                ),
+                deployment_slot="secondary-speaker-verification",
+                registry_model_id="eres2netv2",
+                manifest_model_key="eres2netV2",
+                manifest_sha256=None,
+                adapter_id="modelscope-eres2netv2",
+                legacy_binding=True,
+            )
+        else:
+            raw_secondary = _object(
+                raw_models["secondarySpeakerVerifier"],
+                field="models.secondarySpeakerVerifier",
+                allowed={
+                    "path",
+                    "deploymentSlot",
+                    "registryModelId",
+                    "manifestModelKey",
+                    "manifestSha256",
+                    "adapterId",
+                    "promotionEvidence",
+                },
+                required={
+                    "path",
+                    "deploymentSlot",
+                    "registryModelId",
+                    "manifestModelKey",
+                    "manifestSha256",
+                    "adapterId",
+                },
+            )
+            deployment_slot = _choice(
+                raw_secondary["deploymentSlot"],
+                field=(
+                    "models.secondarySpeakerVerifier.deploymentSlot"
+                ),
+                choices={"secondary-speaker-verification"},
+            )
+            registry_model_id = _nonempty_text(
+                raw_secondary["registryModelId"],
+                field="models.secondarySpeakerVerifier.registryModelId",
+            )
+            if _MODEL_ID_PATTERN.fullmatch(registry_model_id) is None:
+                raise ProductionConfigError(
+                    "models.secondarySpeakerVerifier.registryModelId has an invalid identifier"
+                )
+            promotion_evidence = None
+            if "promotionEvidence" in raw_secondary:
+                raw_promotion = _object(
+                    raw_secondary["promotionEvidence"],
+                    field=(
+                        "models.secondarySpeakerVerifier.promotionEvidence"
+                    ),
+                    allowed={
+                        "decisionId",
+                        "decisionArtifactSha256",
+                        "decisionCanonicalSha256",
+                        "blindReviewArtifactSha256",
+                        "comparisonArtifactSha256",
+                        "previousConfigSha256",
+                        "rollbackConfigPath",
+                        "rollbackConfigSha256",
+                    },
+                    required={
+                        "decisionId",
+                        "decisionArtifactSha256",
+                        "decisionCanonicalSha256",
+                        "blindReviewArtifactSha256",
+                        "comparisonArtifactSha256",
+                        "previousConfigSha256",
+                        "rollbackConfigPath",
+                        "rollbackConfigSha256",
+                    },
+                )
+                promotion_evidence = ProductionPromotionEvidence(
+                    decision_id=_nonempty_text(
+                        raw_promotion["decisionId"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.decisionId"
+                        ),
+                    ),
+                    decision_artifact_sha256=_sha256_digest(
+                        raw_promotion["decisionArtifactSha256"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.decisionArtifactSha256"
+                        ),
+                    ),
+                    decision_canonical_sha256=_sha256_digest(
+                        raw_promotion["decisionCanonicalSha256"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.decisionCanonicalSha256"
+                        ),
+                    ),
+                    blind_review_artifact_sha256=_sha256_digest(
+                        raw_promotion["blindReviewArtifactSha256"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.blindReviewArtifactSha256"
+                        ),
+                    ),
+                    comparison_artifact_sha256=_sha256_digest(
+                        raw_promotion["comparisonArtifactSha256"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.comparisonArtifactSha256"
+                        ),
+                    ),
+                    previous_config_sha256=_sha256_digest(
+                        raw_promotion["previousConfigSha256"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.previousConfigSha256"
+                        ),
+                    ),
+                    rollback_config_path=_local_path(
+                        raw_promotion["rollbackConfigPath"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.rollbackConfigPath"
+                        ),
+                        base_directory=base_directory,
+                    ),
+                    rollback_config_sha256=_sha256_digest(
+                        raw_promotion["rollbackConfigSha256"],
+                        field=(
+                            "models.secondarySpeakerVerifier."
+                            "promotionEvidence.rollbackConfigSha256"
+                        ),
+                    ),
+                )
+            secondary_speaker_verifier = ProductionModelDeployment(
+                path=_local_path(
+                    raw_secondary["path"],
+                    field="models.secondarySpeakerVerifier.path",
+                    base_directory=base_directory,
+                ),
+                deployment_slot=deployment_slot,
+                registry_model_id=registry_model_id,
+                manifest_model_key=_nonempty_text(
+                    raw_secondary["manifestModelKey"],
+                    field=(
+                        "models.secondarySpeakerVerifier.manifestModelKey"
+                    ),
+                ),
+                manifest_sha256=_sha256_digest(
+                    raw_secondary["manifestSha256"],
+                    field=(
+                        "models.secondarySpeakerVerifier.manifestSha256"
+                    ),
+                ),
+                adapter_id=_choice(
+                    raw_secondary["adapterId"],
+                    field="models.secondarySpeakerVerifier.adapterId",
+                    choices={"modelscope-eres2netv2"},
+                ),
+                promotion_evidence=promotion_evidence,
+            )
         models = ProductionModels(
             funasr_vad=_local_path(
                 raw_models["funasrVad"],
@@ -469,11 +733,7 @@ class ProductionConfig:
                 field="models.camPlus",
                 base_directory=base_directory,
             ),
-            eres2net_v2=_local_path(
-                raw_models["eres2netV2"],
-                field="models.eres2netV2",
-                base_directory=base_directory,
-            ),
+            secondary_speaker_verifier=secondary_speaker_verifier,
             pyannote=_optional_local_path(
                 raw_models.get("pyannote"),
                 field="models.pyannote",
@@ -637,7 +897,14 @@ class ProductionConfig:
                 "overlapRecoveryAsrMaxNewTokens",
                 "localLlmMode",
                 "localLlmModel",
+                "localLlmModelDigest",
+                "localLlmTimeoutSeconds",
+                "localLlmContextTokens",
+                "localLlmOutputTokens",
+                "localLlmBatchSize",
+                "localLlmMaxRounds",
             },
+            required={"localLlmModel"},
         )
         raw_max_auto_speakers = raw_speaker.get("maxAutoSpeakers")
         max_auto_speakers = (
@@ -834,10 +1101,225 @@ class ProductionConfig:
                 choices={"suggestion-only"},
             ),
             local_llm_model=_nonempty_text(
-                raw_speaker.get("localLlmModel", "qwen3.5:9b"),
+                raw_speaker.get("localLlmModel", "qwen3.5:27b-q4_K_M"),
                 field="speaker.localLlmModel",
             ),
+            local_llm_model_digest=_optional_sha256_digest(
+                raw_speaker.get("localLlmModelDigest"),
+                field="speaker.localLlmModelDigest",
+            ),
+            local_llm_timeout_seconds=_number(
+                raw_speaker.get("localLlmTimeoutSeconds", 300.0),
+                field="speaker.localLlmTimeoutSeconds",
+                minimum=1.0,
+                maximum=3600.0,
+            ),
+            local_llm_context_tokens=_integer(
+                raw_speaker.get("localLlmContextTokens", 8192),
+                field="speaker.localLlmContextTokens",
+                minimum=1024,
+                maximum=262_144,
+            ),
+            local_llm_output_tokens=_integer(
+                raw_speaker.get("localLlmOutputTokens", 1024),
+                field="speaker.localLlmOutputTokens",
+                minimum=128,
+                maximum=262_144,
+            ),
+            local_llm_batch_size=_integer(
+                raw_speaker.get("localLlmBatchSize", 8),
+                field="speaker.localLlmBatchSize",
+                minimum=1,
+                maximum=32,
+            ),
+            local_llm_max_rounds=_integer(
+                raw_speaker.get("localLlmMaxRounds", 4),
+                field="speaker.localLlmMaxRounds",
+                minimum=1,
+                maximum=8,
+            ),
         )
+        if (
+            speaker.local_llm_output_tokens
+            > speaker.local_llm_context_tokens
+        ):
+            raise ProductionConfigError(
+                "speaker.localLlmOutputTokens must not exceed "
+                "localLlmContextTokens"
+            )
+
+        raw_llm = root.get("llm")
+        if raw_llm is not None and not isinstance(raw_llm, Mapping):
+            raise ProductionConfigError("llm must be an object")
+
+        # Keep the legacy no-``llm`` profile deterministic, while allowing an
+        # explicit provider profile to receive its own endpoint/auth/native
+        # protocol defaults.  Shared generation limits still default from the
+        # speaker policy so the two paths cannot silently disagree.
+        llm_values: dict[str, Any] = {
+            "provider": "ollama-loopback",
+            "model": speaker.local_llm_model,
+            "endpoint": "http://127.0.0.1:11434",
+            "networkPolicy": NETWORK_POLICY_LOOPBACK_ONLY,
+            "timeoutSeconds": speaker.local_llm_timeout_seconds,
+            "top_p": 0.1,
+            "contextTokens": speaker.local_llm_context_tokens,
+            "outputTokens": speaker.local_llm_output_tokens,
+            "apiKeyEnv": None,
+            "requireApiKey": False,
+            "offlineOnly": offline,
+            "allowModelOverride": False,
+        }
+        if speaker.local_llm_model_digest is not None:
+            llm_values["expectedDigest"] = speaker.local_llm_model_digest
+
+        try:
+            if raw_llm is None:
+                # This is intentionally transport-neutral.  Composition will
+                # turn it into the guarded Ollama provider without a network
+                # capable fallback.
+                llm = LLMProviderConfig.from_mapping(llm_values)
+            else:
+                explicit_llm = {str(key): item for key, item in raw_llm.items()}
+                raw_provider_name = str(
+                    explicit_llm.get(
+                        "provider",
+                        explicit_llm.get("providerId", "openai-compatible"),
+                    )
+                ).strip().casefold()
+                is_ollama = raw_provider_name in {
+                    "ollama",
+                    "ollama-local",
+                    "ollama-loopback",
+                }
+                # ``speaker.localLlmModel`` remains the canonical arbitration
+                # model.  A provider preset may supply a convenience model,
+                # but it must be explicitly selected in the speaker section.
+                _set_default_config_value(
+                    explicit_llm,
+                    "model",
+                    speaker.local_llm_model,
+                    aliases=("model",),
+                )
+                _set_default_config_value(
+                    explicit_llm,
+                    "timeoutSeconds",
+                    speaker.local_llm_timeout_seconds,
+                    aliases=("timeoutSeconds", "timeout_seconds"),
+                )
+                _set_default_config_value(
+                    explicit_llm,
+                    "contextTokens",
+                    speaker.local_llm_context_tokens,
+                    aliases=("contextTokens", "context_tokens"),
+                )
+                _set_default_config_value(
+                    explicit_llm,
+                    "outputTokens",
+                    speaker.local_llm_output_tokens,
+                    aliases=("outputTokens", "output_tokens"),
+                )
+                if speaker.local_llm_model_digest is not None:
+                    _set_default_config_value(
+                        explicit_llm,
+                        "expectedDigest",
+                        speaker.local_llm_model_digest,
+                        aliases=(
+                            "expectedDigest",
+                            "expectedModelDigest",
+                            "expected_model_digest",
+                        ),
+                    )
+                if is_ollama:
+                    # Ollama is always a local, offline-only transport even
+                    # when the surrounding configurable profile also permits
+                    # remote providers.
+                    explicit_llm["offlineOnly"] = True
+                else:
+                    _set_default_config_value(
+                        explicit_llm,
+                        "offlineOnly",
+                        offline,
+                        aliases=("offlineOnly", "offline_only"),
+                    )
+                parsed_llm = provider_config_from_mapping(explicit_llm)
+                if isinstance(parsed_llm, LLMProviderConfig):
+                    explicit_requires_key = any(
+                        key in explicit_llm
+                        for key in ("requireApiKey", "require_api_key")
+                    )
+                    if (
+                        not explicit_requires_key
+                        and parsed_llm.api_key_env
+                        and parsed_llm.network_policy
+                        == NETWORK_POLICY_REMOTE_EXPLICIT
+                    ):
+                        parsed_llm = replace(parsed_llm, require_api_key=True)
+                if isinstance(parsed_llm, LocalLLMConfig):
+                    # Production diagnostics and fingerprinting use the
+                    # transport-neutral shape.  Preserve the validated local
+                    # values while exposing the canonical provider id.
+                    llm = LLMProviderConfig(
+                        provider="ollama-loopback",
+                        model=parsed_llm.model,
+                        endpoint=parsed_llm.endpoint,
+                        network_policy=NETWORK_POLICY_LOOPBACK_ONLY,
+                        timeout_seconds=parsed_llm.timeout_seconds,
+                        temperature=parsed_llm.temperature,
+                        top_p=parsed_llm.top_p,
+                        context_tokens=parsed_llm.context_tokens,
+                        output_tokens=parsed_llm.output_tokens,
+                        api_key_env=None,
+                        require_api_key=False,
+                        offline_only=True,
+                        expected_model_digest=parsed_llm.expected_model_digest,
+                    )
+                else:
+                    llm = parsed_llm
+        except (TypeError, ValueError) as exc:
+            raise ProductionConfigError(
+                "llm provider configuration is invalid",
+                code="LLM_PROVIDER_CONFIG_INVALID",
+                details={"reason": str(exc)},
+            ) from exc
+        if (
+            llm.network_policy == NETWORK_POLICY_LOOPBACK_ONLY
+            and speaker.local_llm_model_digest is None
+        ):
+            raise ProductionConfigError(
+                "speaker.localLlmModelDigest is required for loopback LLM providers "
+                "(missing required fields)",
+                details={
+                    "field": "speaker.localLlmModelDigest",
+                    "missingFields": ["localLlmModelDigest"],
+                },
+            )
+        # A loopback model is an audited, digest-pinned artifact and must
+        # remain aligned with the legacy speaker setting.  Remote profiles are
+        # intentionally replaceable: the provider model is the source of
+        # truth, so a relay can expose a different deployment id without
+        # editing the offline speaker section first.
+        if (
+            llm.network_policy == NETWORK_POLICY_LOOPBACK_ONLY
+            and llm.model != speaker.local_llm_model
+        ):
+            raise ProductionConfigError(
+                "llm.model must match speaker.localLlmModel",
+                details={
+                    "llmModel": llm.model,
+                    "speakerLocalLlmModel": speaker.local_llm_model,
+                },
+            )
+        if llm.network_policy == NETWORK_POLICY_REMOTE_EXPLICIT and offline:
+            raise ProductionConfigError(
+                "remote-explicit llm providers require offline=false",
+                code="NETWORK_POLICY_INVALID",
+            )
+        if not offline and mode != CONFIGURABLE_PRODUCTION_MODE:
+            raise ProductionConfigError(
+                "online providers require mode=configurable-production",
+                code="NETWORK_POLICY_INVALID",
+            )
         if speaker.high_margin_threshold <= speaker.low_margin_threshold:
             raise ProductionConfigError(
                 "speaker.highMarginThreshold must exceed lowMarginThreshold"
@@ -962,6 +1444,7 @@ class ProductionConfig:
             executables=executables,
             runtime=runtime,
             speaker=speaker,
+            llm=llm,
             pdf=pdf,
             source_path=source,
         )
@@ -1038,6 +1521,7 @@ class ProductionConfig:
                 strict_startup_preflight=self.runtime.strict_startup_preflight,
             ),
             speaker=self.speaker,
+            llm=self.llm,
             pdf=self.pdf,
             source_path=self.source_path,
         )
@@ -1045,6 +1529,8 @@ class ProductionConfig:
     def fingerprint(self) -> str:
         """Return a non-reversible identifier for the effective configuration."""
 
+        secondary = self.models.secondary_speaker_verifier
+        promotion_evidence = secondary.promotion_evidence
         material = {
             "schemaVersion": self.schema_version,
             "mode": self.mode,
@@ -1089,6 +1575,65 @@ class ProductionConfig:
             "pyannotePrimaryDominanceThreshold": (
                 self.speaker.pyannote_primary_dominance_threshold
             ),
+            "localLlmModel": self.speaker.local_llm_model,
+            "localLlmModelDigest": self.speaker.local_llm_model_digest,
+            "localLlmTimeoutSeconds": (
+                self.speaker.local_llm_timeout_seconds
+            ),
+            "localLlmContextTokens": self.speaker.local_llm_context_tokens,
+            "localLlmOutputTokens": self.speaker.local_llm_output_tokens,
+            "localLlmBatchSize": self.speaker.local_llm_batch_size,
+            "localLlmMaxRounds": self.speaker.local_llm_max_rounds,
+            "llmProvider": {
+                "provider": self.llm.provider,
+                "model": self.llm.model,
+                "endpoint": self.llm.endpoint,
+                "networkPolicy": self.llm.network_policy,
+                "apiKeyEnvironmentVariable": self.llm.api_key_env,
+                "proxy": self.llm.proxy,
+                "contextTokens": self.llm.context_tokens,
+                "outputTokens": self.llm.output_tokens,
+                "expectedModelDigest": self.llm.expected_model_digest,
+                "allowModelOverride": self.llm.allow_model_override,
+            },
+            "secondarySpeakerVerifier": {
+                "deploymentSlot": secondary.deployment_slot,
+                "registryModelId": secondary.registry_model_id,
+                "manifestModelKey": secondary.manifest_model_key,
+                "manifestSha256": secondary.manifest_sha256,
+                "adapterId": secondary.adapter_id,
+                "legacyBinding": secondary.legacy_binding,
+                "promotionEvidence": (
+                    {
+                        "decisionId": promotion_evidence.decision_id,
+                        "decisionArtifactSha256": (
+                            promotion_evidence.decision_artifact_sha256
+                        ),
+                        "decisionCanonicalSha256": (
+                            promotion_evidence.decision_canonical_sha256
+                        ),
+                        "blindReviewArtifactSha256": (
+                            promotion_evidence.blind_review_artifact_sha256
+                        ),
+                        "comparisonArtifactSha256": (
+                            promotion_evidence.comparison_artifact_sha256
+                        ),
+                        "previousConfigSha256": (
+                            promotion_evidence.previous_config_sha256
+                        ),
+                        "rollbackConfigPathSha256": hashlib.sha256(
+                            str(
+                                promotion_evidence.rollback_config_path
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                        "rollbackConfigSha256": (
+                            promotion_evidence.rollback_config_sha256
+                        ),
+                    }
+                    if promotion_evidence is not None
+                    else None
+                ),
+            },
             "pdfTemplate": self.pdf.template_id,
             "pyannotePython": (
                 hashlib.sha256(
@@ -1142,6 +1687,8 @@ class PreflightCheck:
 class ProductionPreflightReport:
     config_fingerprint: str
     checks: tuple[PreflightCheck, ...]
+    mode: str = PRODUCTION_MODE
+    offline: bool = True
 
     @property
     def passed(self) -> bool:
@@ -1150,8 +1697,8 @@ class ProductionPreflightReport:
     def as_dict(self) -> dict[str, Any]:
         return {
             "schemaVersion": PRODUCTION_CONFIG_SCHEMA_VERSION,
-            "mode": PRODUCTION_MODE,
-            "offline": True,
+            "mode": self.mode,
+            "offline": self.offline,
             "status": "passed" if self.passed else "failed",
             "configFingerprint": self.config_fingerprint,
             "checks": [check.as_dict() for check in self.checks],
@@ -1172,6 +1719,7 @@ class ProductionPreflightReport:
 
 
 RuntimeProbe = Callable[[str], bool]
+PythonCudaProbe = Callable[[str], bool]
 
 
 def _resolve_executable(value: str) -> str | None:
@@ -1248,6 +1796,34 @@ def _probe_python_import(python_executable: str, module: str) -> bool:
     return completed.returncode == 0 and completed.stdout.strip() == b"ok"
 
 
+def _probe_python_cuda_available(python_executable: str) -> bool:
+    """Ask an isolated Python runtime whether its Torch CUDA backend works."""
+
+    resolved = _resolve_executable(python_executable)
+    if resolved is None:
+        return False
+    code = (
+        "import torch;"
+        "print('available' if torch.cuda.is_available() else 'unavailable')"
+    )
+    try:
+        completed = subprocess.run(
+            [resolved, "-I", "-c", code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=_RUNTIME_IMPORT_TIMEOUT_SECONDS,
+            env=offline_environment(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (
+        completed.returncode == 0
+        and completed.stdout.strip() == b"available"
+    )
+
+
 def _jar_has_required_engines(path: Path) -> bool:
     try:
         with zipfile.ZipFile(path) as archive:
@@ -1313,7 +1889,12 @@ def _sha256_file(path: Path, *, chunk_size: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def _model_manifest_valid(root: Path, *, expected_key: str) -> bool:
+def _model_manifest_valid(
+    root: Path,
+    *,
+    expected_key: str,
+    expected_sha256: str | None = None,
+) -> bool:
     """Verify a published model against its local, revision-bound manifest."""
 
     if not root.is_dir() or root.is_symlink():
@@ -1332,13 +1913,18 @@ def _model_manifest_valid(root: Path, *, expected_key: str) -> bool:
         raw = manifest_path.read_bytes()
         if len(raw) != manifest_stat.st_size:
             return False
+        if expected_sha256 is not None:
+            normalized_sha256 = expected_sha256.removeprefix("sha256:")
+            if hashlib.sha256(raw).hexdigest() != normalized_sha256:
+                return False
         document = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
     if not isinstance(document, Mapping):
         return False
+    schema_version = document.get("schemaVersion")
     if (
-        document.get("schemaVersion") != _MODEL_MANIFEST_SCHEMA_VERSION
+        schema_version not in _MODEL_MANIFEST_SCHEMA_VERSIONS
         or document.get("modelKey") != expected_key
         or document.get("provider") not in {"huggingface", "modelscope"}
         or not isinstance(document.get("repoId"), str)
@@ -1347,6 +1933,23 @@ def _model_manifest_valid(root: Path, *, expected_key: str) -> bool:
         or not document["revision"]
     ):
         return False
+    if schema_version == "1.1.0":
+        reshard = document.get("reshard")
+        if (
+            document.get("kind") != "derived-safetensors-reshard"
+            or not isinstance(reshard, Mapping)
+            or reshard.get("schemaVersion") != "1.0.0"
+            or reshard.get("tool") != "tools/reshard_safetensors.py"
+            or reshard.get("exactTensorBytesPreserved") is not True
+            or reshard.get("modelQualityChanged") is not False
+        ):
+            return False
+        source = reshard.get("source")
+        if not isinstance(source, Mapping):
+            return False
+        for field in ("modelKey", "provider", "repoId", "revision"):
+            if source.get(field) != document.get(field):
+                return False
     raw_total = document.get("totalBytes")
     raw_files = document.get("files")
     if (
@@ -1441,6 +2044,7 @@ def run_production_preflight(
     *,
     probe_runtime_imports: bool = True,
     runtime_probe: RuntimeProbe | None = None,
+    pyannote_cuda_probe: PythonCudaProbe | None = None,
     probe_executables: bool = True,
 ) -> ProductionPreflightReport:
     """Validate all required local components without loading model weights."""
@@ -1469,8 +2073,19 @@ def run_production_preflight(
         "network-policy",
         "policy",
         True,
-        config.offline and config.mode == PRODUCTION_MODE,
-        "OFFLINE_ENFORCED",
+        (
+            (config.offline and config.llm.network_policy == NETWORK_POLICY_LOOPBACK_ONLY)
+            or (
+                not config.offline
+                and config.mode == CONFIGURABLE_PRODUCTION_MODE
+                and config.llm.network_policy
+                in {
+                    NETWORK_POLICY_LOOPBACK_ONLY,
+                    NETWORK_POLICY_REMOTE_EXPLICIT,
+                }
+            )
+        ),
+        "OFFLINE_ENFORCED" if config.offline else "REMOTE_EXPLICIT_OPT_IN",
     )
     for index, root in enumerate(config.paths.allowed_input_roots):
         add(
@@ -1495,11 +2110,18 @@ def run_production_preflight(
         "LOCAL_CACHE_ROOT_WRITABLE",
     )
 
-    model_paths: list[tuple[str, str, Path, bool]] = [
-        ("funasr-vad-model", "funasrVad", config.models.funasr_vad, True),
-        ("qwen3-asr-model", "qwen3Asr", config.models.qwen3_asr, True),
-        ("cam-plus-model", "camPlus", config.models.cam_plus, True),
-        ("eres2net-v2-model", "eres2netV2", config.models.eres2net_v2, True),
+    secondary = config.models.secondary_speaker_verifier
+    model_paths: list[tuple[str, str, Path, bool, str | None]] = [
+        ("funasr-vad-model", "funasrVad", config.models.funasr_vad, True, None),
+        ("qwen3-asr-model", "qwen3Asr", config.models.qwen3_asr, True, None),
+        ("cam-plus-model", "camPlus", config.models.cam_plus, True, None),
+        (
+            "secondary-speaker-verifier-model",
+            secondary.manifest_model_key,
+            secondary.path,
+            True,
+            secondary.manifest_sha256,
+        ),
     ]
     if config.models.qwen3_forced_aligner is not None:
         model_paths.append(
@@ -1508,6 +2130,7 @@ def run_production_preflight(
                 "qwen3ForcedAligner",
                 config.models.qwen3_forced_aligner,
                 True,
+                None,
             )
         )
     if config.speaker.pyannote_mode != "disabled":
@@ -1518,6 +2141,7 @@ def run_production_preflight(
                 "pyannoteCommunity1",
                 config.models.pyannote,
                 True,
+                None,
             )
         )
     if config.speaker.overlap_recovery_mode == "guarded":
@@ -1528,9 +2152,10 @@ def run_production_preflight(
                 "mossformer2Separation",
                 config.models.mossformer2_separation,
                 True,
+                None,
             )
         )
-    for check_id, model_key, path, required in model_paths:
+    for check_id, model_key, path, required, manifest_sha256 in model_paths:
         add(
             check_id,
             "model",
@@ -1542,7 +2167,11 @@ def run_production_preflight(
             f"{check_id}-integrity",
             "model",
             required,
-            _model_manifest_valid(path, expected_key=model_key),
+            _model_manifest_valid(
+                path,
+                expected_key=model_key,
+                expected_sha256=manifest_sha256,
+            ),
             "LOCKED_MODEL_CONTENT_INTEGRITY",
         )
 
@@ -1645,9 +2274,32 @@ def run_production_preflight(
             passed,
             "ISOLATED_PYANNOTE_IMPORT_PROBE",
         )
+        pyannote_device = config.runtime.pyannote_device.casefold()
+        if pyannote_device == "cuda" or pyannote_device.startswith("cuda:"):
+            if not probe_runtime_imports:
+                cuda_available = True
+            elif pyannote_cuda_probe is not None:
+                cuda_available = pyannote_cuda_probe(
+                    config.executables.pyannote_python
+                )
+            elif runtime_probe is not _probe_runtime_import:
+                cuda_available = runtime_probe("torch.cuda.is_available")
+            else:
+                cuda_available = _probe_python_cuda_available(
+                    config.executables.pyannote_python
+                )
+            add(
+                "runtime-pyannote-cuda",
+                "runtime",
+                True,
+                cuda_available,
+                "ISOLATED_PYANNOTE_CUDA_REQUIRED",
+            )
     return ProductionPreflightReport(
         config_fingerprint=config.fingerprint(),
         checks=tuple(checks),
+        mode=config.mode,
+        offline=config.offline,
     )
 
 
@@ -1657,6 +2309,8 @@ def production_diagnostics(
 ) -> dict[str, Any]:
     """Return a path-free production topology and preflight summary."""
 
+    secondary = config.models.secondary_speaker_verifier
+    promotion_evidence = secondary.promotion_evidence
     stages: list[dict[str, Any]] = [
         {
             "stage": "boundary",
@@ -1675,9 +2329,29 @@ def production_diagnostics(
         },
         {
             "stage": "voiceprint-secondary",
-            "component": "ERes2NetV2",
+            "component": secondary.registry_model_id,
             "scope": "difficult-segments-only",
             "maximumFraction": config.speaker.max_secondary_fraction,
+            "deploymentSlot": secondary.deployment_slot,
+            "adapterId": secondary.adapter_id,
+            "manifestModelKey": secondary.manifest_model_key,
+            "manifestSha256": secondary.manifest_sha256,
+            "legacyIdentityBinding": secondary.legacy_binding,
+            "promotionDecisionId": (
+                promotion_evidence.decision_id
+                if promotion_evidence is not None
+                else None
+            ),
+            "promotionDecisionArtifactSha256": (
+                promotion_evidence.decision_artifact_sha256
+                if promotion_evidence is not None
+                else None
+            ),
+            "rollbackConfigSha256": (
+                promotion_evidence.rollback_config_sha256
+                if promotion_evidence is not None
+                else None
+            ),
         },
     ]
     if config.speaker.pyannote_mode != "disabled":
@@ -1706,8 +2380,8 @@ def production_diagnostics(
         )
     return {
         "schemaVersion": PRODUCTION_CONFIG_SCHEMA_VERSION,
-        "mode": PRODUCTION_MODE,
-        "offline": True,
+        "mode": config.mode,
+        "offline": config.offline,
         "status": "passed" if report.passed else "failed",
         "configFingerprint": config.fingerprint(),
         "speakerCardinality": {
@@ -1730,7 +2404,21 @@ def production_diagnostics(
         "localLlm": {
             "mode": config.speaker.local_llm_mode,
             "model": config.speaker.local_llm_model,
+            "modelDigest": config.speaker.local_llm_model_digest,
+            "timeoutSeconds": config.speaker.local_llm_timeout_seconds,
+            "contextTokens": config.speaker.local_llm_context_tokens,
+            "outputTokens": config.speaker.local_llm_output_tokens,
+            "batchSize": config.speaker.local_llm_batch_size,
+            "maximumCompositionRounds": (
+                config.speaker.local_llm_max_rounds
+            ),
             "autoApply": False,
+            "provider": config.llm.provider,
+            "endpoint": config.llm.endpoint,
+            "networkPolicy": config.llm.network_policy,
+            "apiKeyEnvironmentVariable": config.llm.api_key_env,
+            "proxyConfigured": config.llm.proxy is not None,
+            "allowModelOverride": config.llm.allow_model_override,
         },
         "runtime": {
             "modelResidency": config.runtime.model_residency,
@@ -1751,14 +2439,17 @@ def production_diagnostics(
 __all__ = [
     "PRODUCTION_CONFIG_SCHEMA_VERSION",
     "PRODUCTION_MODE",
+    "CONFIGURABLE_PRODUCTION_MODE",
     "PreflightCheck",
     "ProductionConfig",
     "ProductionConfigError",
     "ProductionExecutables",
+    "ProductionModelDeployment",
     "ProductionModels",
     "ProductionPaths",
     "ProductionPdfPolicy",
     "ProductionPreflightReport",
+    "ProductionPromotionEvidence",
     "ProductionRuntime",
     "ProductionSpeakerPolicy",
     "apply_offline_environment",

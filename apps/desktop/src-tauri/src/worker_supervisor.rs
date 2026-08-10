@@ -19,7 +19,9 @@ use tokio::{
 };
 
 const SCHEMA_VERSION: &str = "1.0.0";
+const RUNTIME_ROOT_ENV: &str = "MTS_RUNTIME_ROOT";
 const PYTHON_ENV: &str = "MTS_WORKER_PYTHON";
+const PYTHON_HINT_FILE: &str = "worker-python.path";
 const PRODUCTION_CONFIG_ENV: &str = "MTS_PRODUCTION_CONFIG";
 const REQUEST_TIMEOUT_ENV: &str = "MTS_WORKER_REQUEST_TIMEOUT_MS";
 const STARTUP_TIMEOUT_ENV: &str = "MTS_WORKER_STARTUP_TIMEOUT_MS";
@@ -130,6 +132,10 @@ impl Default for WorkerSupervisor {
 
 impl WorkerSupervisor {
     pub fn new() -> Self {
+        Self::new_with_resource_directory(None)
+    }
+
+    pub fn new_with_resource_directory(runtime_resource_directory: Option<PathBuf>) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             inner: Arc::new(Inner {
@@ -139,6 +145,7 @@ impl WorkerSupervisor {
                 next_request: AtomicU64::new(1),
                 shutting_down: AtomicBool::new(false),
                 event_tx,
+                runtime_resource_directory,
             }),
         }
     }
@@ -321,6 +328,7 @@ struct Inner {
     next_request: AtomicU64,
     shutting_down: AtomicBool,
     event_tx: broadcast::Sender<WorkerNotification>,
+    runtime_resource_directory: Option<PathBuf>,
 }
 
 impl Drop for Inner {
@@ -379,16 +387,10 @@ struct WorkerLaunchConfig {
 }
 
 impl WorkerLaunchConfig {
-    fn resolve() -> Result<Self, WorkerError> {
-        let repository_root = repository_root()?;
-        let python = resolve_worker_python()?;
-        let production_config = resolve_required_file(
-            env::var_os(PRODUCTION_CONFIG_ENV)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| repository_root.join("production.config.json")),
-            "production config",
-            PRODUCTION_CONFIG_ENV,
-        )?;
+    fn resolve(runtime_resource_directory: Option<&Path>) -> Result<Self, WorkerError> {
+        let repository_root = repository_root(runtime_resource_directory)?;
+        let production_config = resolve_production_config(&repository_root)?;
+        let python = resolve_worker_python(&repository_root, production_config.parent())?;
         Ok(Self {
             python,
             production_config,
@@ -399,7 +401,7 @@ impl WorkerLaunchConfig {
 
 impl Inner {
     async fn spawn_process(self: &Arc<Self>) -> Result<u64, WorkerError> {
-        let launch = WorkerLaunchConfig::resolve()?;
+        let launch = WorkerLaunchConfig::resolve(self.runtime_resource_directory.as_deref())?;
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
         let mut command = Command::new(&launch.python);
         command
@@ -415,6 +417,7 @@ impl Inner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        sanitize_python_environment(&mut command);
 
         let mut child = command.spawn().map_err(|error| {
             WorkerError::new(
@@ -961,6 +964,13 @@ impl Inner {
     }
 }
 
+fn sanitize_python_environment(command: &mut Command) {
+    // AppImage's AppRun wrapper points these variables at its own minimal
+    // filesystem. The worker may use an external Python, whose standard
+    // library must be resolved from that interpreter rather than the AppDir.
+    command.env_remove("PYTHONHOME").env_remove("PYTHONPATH");
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandEnvelope<'a> {
@@ -1362,9 +1372,8 @@ async fn wait_for_exit(
     .unwrap_or(false)
 }
 
-fn repository_root() -> Result<PathBuf, WorkerError> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest
+fn repository_root(runtime_resource_directory: Option<&Path>) -> Result<PathBuf, WorkerError> {
+    let development_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .and_then(Path::parent)
@@ -1374,20 +1383,224 @@ fn repository_root() -> Result<PathBuf, WorkerError> {
                 "Unable to resolve the repository root from CARGO_MANIFEST_DIR.",
             )
         })?;
-    fs::canonicalize(root).map_err(|error| {
+
+    if let Some(path) = env::var_os(RUNTIME_ROOT_ENV) {
+        return resolve_runtime_root_candidate(Path::new(&path), RUNTIME_ROOT_ENV);
+    }
+
+    let executable = env::current_exe().map_err(|error| {
+        WorkerError::new(
+            WorkerErrorKind::Configuration,
+            format!("Unable to resolve the installed application path: {error}"),
+        )
+    })?;
+    resolve_runtime_root_from(&executable, development_root, runtime_resource_directory)
+}
+
+fn resolve_runtime_root_from(
+    executable: &Path,
+    development_root: &Path,
+    runtime_resource_directory: Option<&Path>,
+) -> Result<PathBuf, WorkerError> {
+    if let Some(resource_directory) = runtime_resource_directory {
+        for candidate in [
+            resource_directory.to_path_buf(),
+            resource_directory.join("mts-runtime"),
+        ] {
+            if runtime_root_marker(&candidate).is_file() {
+                return resolve_runtime_root_candidate(&candidate, "Tauri resource directory");
+            }
+        }
+    }
+
+    let mut cursor = executable.parent().map(Path::to_path_buf);
+    for depth in 0..=3 {
+        let Some(parent) = cursor.take() else {
+            break;
+        };
+        let candidates = [
+            parent.clone(),
+            parent.join("resources"),
+            // Tauri uses the canonical macOS bundle directory name
+            // `Contents/Resources`; keep the case-sensitive path explicit so
+            // Linux-built fixtures and case-sensitive APFS behave like macOS.
+            parent.join("Resources"),
+            parent.join("payload"),
+            parent.join("app"),
+            parent.join("resources").join("mts-runtime"),
+            parent.join("Resources").join("mts-runtime"),
+        ];
+        for candidate in candidates {
+            if runtime_root_marker(&candidate).is_file() {
+                return resolve_runtime_root_candidate(
+                    &candidate,
+                    if depth == 0 {
+                        "installed executable"
+                    } else {
+                        "installed resources"
+                    },
+                );
+            }
+        }
+        cursor = parent.parent().map(Path::to_path_buf);
+    }
+    resolve_runtime_root_candidate(development_root, "CARGO_MANIFEST_DIR")
+}
+
+fn runtime_root_marker(root: &Path) -> PathBuf {
+    root.join("backend").join("worker.py")
+}
+
+fn resolve_runtime_root_candidate(candidate: &Path, source: &str) -> Result<PathBuf, WorkerError> {
+    let canonical = fs::canonicalize(candidate).map_err(|error| {
         WorkerError::new(
             WorkerErrorKind::Configuration,
             format!(
-                "Unable to canonicalize repository root {}: {error}",
-                root.display()
+                "Runtime root from {source} does not exist or cannot be resolved: {} ({error}).",
+                candidate.display()
             ),
         )
-    })
+    })?;
+    if !canonical.is_dir() || !runtime_root_marker(&canonical).is_file() {
+        return Err(WorkerError::new(
+            WorkerErrorKind::Configuration,
+            format!(
+                "Runtime root from {source} must contain backend/worker.py: {}. Set {RUNTIME_ROOT_ENV} to a complete release payload.",
+                canonical.display()
+            ),
+        ));
+    }
+    Ok(canonical)
 }
 
-fn resolve_worker_python() -> Result<PathBuf, WorkerError> {
+fn resolve_production_config(repository_root: &Path) -> Result<PathBuf, WorkerError> {
+    if let Some(path) = env::var_os(PRODUCTION_CONFIG_ENV) {
+        return resolve_required_file(
+            PathBuf::from(path),
+            "production config",
+            PRODUCTION_CONFIG_ENV,
+        );
+    }
+
+    let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    resolve_production_config_from(repository_root, local_app_data.as_deref())
+}
+
+fn resolve_production_config_from(
+    repository_root: &Path,
+    local_app_data: Option<&Path>,
+) -> Result<PathBuf, WorkerError> {
+    let mut candidates = vec![repository_root.join("production.config.json")];
+    if let Some(data_root) = env::var_os("MTS_DATA_ROOT").map(PathBuf::from) {
+        candidates.push(data_root.join("config").join("production.config.json"));
+    }
+    if let Some(local_app_data) = local_app_data {
+        candidates.push(
+            local_app_data
+                .join("MediaTranscribeStudio")
+                .join("config")
+                .join("production.config.json"),
+        );
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+            candidates.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("MediaTranscribeStudio")
+                    .join("config")
+                    .join("production.config.json"),
+            );
+        }
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        let xdg_data_home = env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"));
+        candidates.push(
+            xdg_data_home
+                .join("MediaTranscribeStudio")
+                .join("config")
+                .join("production.config.json"),
+        );
+    }
+    candidates.push(repository_root.join("production.config.example.json"));
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return resolve_required_file(candidate, "production config", PRODUCTION_CONFIG_ENV);
+        }
+    }
+    Err(WorkerError::new(
+        WorkerErrorKind::Configuration,
+        format!(
+            "No production configuration is available under {}, MTS_DATA_ROOT, LOCALAPPDATA, or the macOS Application Support directory. Run the runtime bootstrap or set {PRODUCTION_CONFIG_ENV}.",
+            repository_root.display()
+        ),
+    ))
+}
+
+fn resolve_worker_python(
+    repository_root: &Path,
+    config_directory: Option<&Path>,
+) -> Result<PathBuf, WorkerError> {
     if let Some(path) = env::var_os(PYTHON_ENV) {
         return resolve_required_file(PathBuf::from(path), "media-asr Python", PYTHON_ENV);
+    }
+
+    if let Some(config_directory) = config_directory {
+        let hint = config_directory.join(PYTHON_HINT_FILE);
+        if hint.is_file() {
+            let bytes = fs::read(&hint).map_err(|error| {
+                WorkerError::new(
+                    WorkerErrorKind::Configuration,
+                    format!(
+                        "Unable to read worker Python hint {}: {error}",
+                        hint.display()
+                    ),
+                )
+            })?;
+            if bytes.len() > 4096 {
+                return Err(WorkerError::new(
+                    WorkerErrorKind::Configuration,
+                    format!("Worker Python hint is too large: {}", hint.display()),
+                ));
+            }
+            let value = String::from_utf8(bytes).map_err(|error| {
+                WorkerError::new(
+                    WorkerErrorKind::Configuration,
+                    format!(
+                        "Worker Python hint is not UTF-8: {} ({error})",
+                        hint.display()
+                    ),
+                )
+            })?;
+            let nonempty_lines = value.lines().filter(|line| !line.trim().is_empty()).count();
+            if nonempty_lines != 1 {
+                return Err(WorkerError::new(
+                    WorkerErrorKind::Configuration,
+                    format!(
+                        "Worker Python hint must contain exactly one non-empty path: {}",
+                        hint.display()
+                    ),
+                ));
+            }
+            return resolve_required_file(
+                PathBuf::from(value.trim()),
+                "media-asr Python hint",
+                PYTHON_ENV,
+            );
+        }
+    }
+
+    for relative_path in python_relative_paths() {
+        let candidate = repository_root
+            .join("runtime")
+            .join("media-asr")
+            .join(relative_path);
+        if candidate.is_file() {
+            return resolve_required_file(candidate, "media-asr Python", PYTHON_ENV);
+        }
     }
 
     for root_env in ["CONDA_PREFIX", "VIRTUAL_ENV"] {
@@ -1432,7 +1645,7 @@ fn resolve_worker_python() -> Result<PathBuf, WorkerError> {
     Err(WorkerError::new(
         WorkerErrorKind::Configuration,
         format!(
-            "No usable media-asr Python was found. Activate a Conda or virtual environment with Python on PATH, or set {PYTHON_ENV} to the absolute Python executable path."
+            "No usable media-asr Python was found in the release runtime, the user config hint, an active Conda/virtual environment, or PATH. Run the runtime bootstrap or set {PYTHON_ENV} to the absolute Python executable path."
         ),
     ))
 }
@@ -1560,6 +1773,7 @@ fn stderr_snapshot(tail: &Arc<StdMutex<BoundedTail>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{duplex, AsyncWriteExt};
 
     struct MockHarness {
@@ -1639,6 +1853,199 @@ mod tests {
 
     fn job_start_payload(job_id: &str) -> Map<String, Value> {
         Map::from_iter([("jobId".to_owned(), Value::String(job_id.to_owned()))])
+    }
+
+    fn temporary_test_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "mts-worker-supervisor-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn write_runtime_marker(root: &Path) {
+        let marker = runtime_root_marker(root);
+        fs::create_dir_all(marker.parent().expect("backend parent")).expect("create backend");
+        fs::write(marker, b"# packaged worker\n").expect("write worker marker");
+    }
+
+    #[test]
+    fn installed_executable_runtime_root_wins_over_build_machine_path() {
+        let root = temporary_test_root("installed-root");
+        let installed = root.join("installed");
+        let development = root.join("development");
+        fs::create_dir_all(&installed).expect("create installed root");
+        write_runtime_marker(&installed);
+        let executable = installed.join("media-transcribe-studio.exe");
+        fs::write(&executable, b"fixture").expect("write executable");
+
+        let resolved = resolve_runtime_root_from(&executable, &development, None)
+            .expect("installed payload should resolve");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&installed).expect("canonical root")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn adjacent_resources_payload_is_used_when_executable_directory_is_thin() {
+        let root = temporary_test_root("resources-root");
+        let executable_root = root.join("release").join("app");
+        let resources_root = root.join("release").join("resources");
+        let development = root.join("development");
+        fs::create_dir_all(&executable_root).expect("create executable root");
+        write_runtime_marker(&resources_root);
+        let executable = executable_root.join("media-transcribe-studio");
+        fs::write(&executable, b"fixture").expect("write executable");
+
+        let resolved = resolve_runtime_root_from(&executable, &development, None)
+            .expect("adjacent resources payload should resolve");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&resources_root).expect("canonical resources root")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn macos_contents_resources_runtime_payload_is_discovered() {
+        let root = temporary_test_root("macos-resources-root");
+        let executable_root = root
+            .join("MediaTranscribe Studio.app")
+            .join("Contents")
+            .join("MacOS");
+        let resources_root = root
+            .join("MediaTranscribe Studio.app")
+            .join("Contents")
+            .join("Resources")
+            .join("mts-runtime");
+        let development = root.join("development");
+        fs::create_dir_all(&executable_root).expect("create app executable root");
+        write_runtime_marker(&resources_root);
+        let executable = executable_root.join("media-transcribe-studio");
+        fs::write(&executable, b"fixture").expect("write executable");
+
+        let resolved = resolve_runtime_root_from(&executable, &development, None)
+            .expect("Contents/Resources runtime payload should resolve");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&resources_root).expect("canonical macOS runtime root")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn tauri_linux_resource_directory_runtime_payload_is_discovered() {
+        let root = temporary_test_root("linux-tauri-resources-root");
+        let executable_root = root.join("AppDir").join("usr").join("bin");
+        let resource_directory = root
+            .join("AppDir")
+            .join("usr")
+            .join("lib")
+            .join("media-transcribe-studio");
+        let runtime_root = resource_directory.join("mts-runtime");
+        let development = root.join("development");
+        fs::create_dir_all(&executable_root).expect("create executable root");
+        write_runtime_marker(&runtime_root);
+        let executable = executable_root.join("media-transcribe-studio");
+        fs::write(&executable, b"fixture").expect("write executable");
+
+        let resolved =
+            resolve_runtime_root_from(&executable, &development, Some(&resource_directory))
+                .expect("Tauri Linux resource directory should resolve");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&runtime_root).expect("canonical Linux runtime root")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn production_config_prefers_operator_config_then_packaged_example() {
+        let root = temporary_test_root("config");
+        let local = root.join("local-app-data");
+        write_runtime_marker(&root);
+        let example = root.join("production.config.example.json");
+        fs::write(&example, b"{}\n").expect("write example");
+
+        let fallback = resolve_production_config_from(&root, Some(&local))
+            .expect("packaged example should resolve");
+        assert_eq!(
+            fallback,
+            fs::canonicalize(&example).expect("canonical example")
+        );
+
+        let operator = local
+            .join("MediaTranscribeStudio")
+            .join("config")
+            .join("production.config.json");
+        fs::create_dir_all(operator.parent().expect("operator config parent"))
+            .expect("create operator config directory");
+        fs::write(&operator, b"{}\n").expect("write operator config");
+        let selected = resolve_production_config_from(&root, Some(&local))
+            .expect("operator config should resolve");
+        assert_eq!(
+            selected,
+            fs::canonicalize(&operator).expect("canonical operator")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn worker_python_hint_survives_finder_style_environment() {
+        let root = temporary_test_root("python-hint");
+        let runtime = root.join("runtime-root");
+        let config = root.join("user-data").join("config");
+        let python = root.join("external-python").join("bin").join("python3");
+        write_runtime_marker(&runtime);
+        fs::create_dir_all(&config).expect("create config directory");
+        fs::create_dir_all(python.parent().expect("python parent"))
+            .expect("create python directory");
+        fs::write(&python, b"fixture python\n").expect("write python fixture");
+        fs::write(
+            config.join(PYTHON_HINT_FILE),
+            format!("{}\n", python.display()),
+        )
+        .expect("write Python hint");
+
+        let resolved = resolve_worker_python(&runtime, Some(&config))
+            .expect("user-owned Python hint should resolve");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&python).expect("canonical Python")
+        );
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn worker_command_clears_packager_python_environment() {
+        let mut command = Command::new("python3");
+        command
+            .env("PYTHONHOME", "/tmp/appdir/usr")
+            .env("PYTHONPATH", "/tmp/appdir/usr/share/pyshared")
+            .env("MTS_TEST_SENTINEL", "preserved");
+
+        sanitize_python_environment(&mut command);
+
+        let mut python_home_removed = false;
+        let mut python_path_removed = false;
+        let mut sentinel_preserved = false;
+        for (name, value) in command.as_std().get_envs() {
+            if name == std::ffi::OsStr::new("PYTHONHOME") {
+                python_home_removed = value.is_none();
+            } else if name == std::ffi::OsStr::new("PYTHONPATH") {
+                python_path_removed = value.is_none();
+            } else if name == std::ffi::OsStr::new("MTS_TEST_SENTINEL") {
+                sentinel_preserved = value == Some(std::ffi::OsStr::new("preserved"));
+            }
+        }
+        assert!(python_home_removed);
+        assert!(python_path_removed);
+        assert!(sentinel_preserved);
     }
 
     #[test]

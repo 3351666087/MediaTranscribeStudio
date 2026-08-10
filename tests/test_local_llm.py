@@ -25,8 +25,8 @@ class _FakeResponse:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, size: int = -1) -> bytes:
+        return self.body if size < 0 else self.body[:size]
 
     def geturl(self) -> str:
         return "http://127.0.0.1:11434/api/chat"
@@ -173,6 +173,181 @@ def test_context_preflight_accepts_exact_boundary_and_blocks_overflow_transport(
     assert opener.calls == 1
 
 
+def test_expected_model_digest_is_verified_once_before_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = "a" * 64
+
+    class Response:
+        def __init__(self, body: bytes, url: str) -> None:
+            self.body = body
+            self.url = url
+
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            return self.body if size < 0 else self.body[:size]
+
+        def geturl(self) -> str:
+            return self.url
+
+    class Opener:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        def open(self, request: object, *, timeout: float) -> Response:
+            del timeout
+            url = request.full_url
+            self.urls.append(url)
+            if url.endswith("/api/tags"):
+                body = json.dumps(
+                    {
+                        "models": [
+                            {
+                                "name": "frozen-model:9b",
+                                "digest": f"sha256:{digest}",
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+            else:
+                body = _envelope({"answer": "ok"}, done=True)
+            return Response(body, url)
+
+    opener = Opener()
+    monkeypatch.setattr(
+        "backend.local_llm.urllib.request.build_opener",
+        lambda *handlers: opener,
+    )
+    provider = OllamaLocalProvider(
+        LocalLLMConfig(
+            model="frozen-model:9b",
+            expected_model_digest=digest.upper(),
+        )
+    )
+
+    for _ in range(2):
+        assert provider.generate_json(
+            system_prompt="system",
+            user_prompt="user",
+            model="frozen-model:9b",
+        ) == {"answer": "ok"}
+
+    assert opener.urls == [
+        "http://127.0.0.1:11434/api/tags",
+        "http://127.0.0.1:11434/api/chat",
+        "http://127.0.0.1:11434/api/chat",
+    ]
+
+
+def test_expected_model_digest_mismatch_fails_before_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, opener = _provider_with_body(
+        monkeypatch,
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "name": "frozen-model:9b",
+                        "digest": "b" * 64,
+                    }
+                ]
+            }
+        ).encode("utf-8"),
+        config=LocalLLMConfig(
+            model="frozen-model:9b",
+            expected_model_digest="a" * 64,
+        ),
+    )
+
+    with pytest.raises(LocalLLMError, match="digest does not match") as captured:
+        provider.generate_json(
+            system_prompt="system",
+            user_prompt="user",
+            model="frozen-model:9b",
+        )
+
+    assert opener.calls == 1
+    assert captured.value.diagnostics["failureStage"] == "model-digest"
+    assert captured.value.diagnostics["actualDigest"] == "sha256:" + "b" * 64
+
+
+def test_stage_reload_reverifies_model_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_digest = "a" * 64
+
+    class DigestChangingOpener:
+        def __init__(self) -> None:
+            self.inventory_calls = 0
+            self.urls: list[str] = []
+
+        def open(self, request: object, *, timeout: float) -> _FakeResponse:
+            del timeout
+            url = request.full_url
+            self.urls.append(url)
+            if url.endswith("/api/tags"):
+                self.inventory_calls += 1
+                digest = (
+                    expected_digest
+                    if self.inventory_calls == 1
+                    else "b" * 64
+                )
+                body = json.dumps(
+                    {
+                        "models": [
+                            {
+                                "name": "frozen-model:9b",
+                                "digest": digest,
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+            elif url.endswith("/api/generate"):
+                body = b'{"done":true,"done_reason":"unload"}'
+            else:
+                body = _envelope({"answer": "ok"}, done=True)
+            return _FakeResponse(body)
+
+    opener = DigestChangingOpener()
+    monkeypatch.setattr(
+        "backend.local_llm.urllib.request.build_opener",
+        lambda *handlers: opener,
+    )
+    provider = OllamaLocalProvider(
+        LocalLLMConfig(
+            model="frozen-model:9b",
+            expected_model_digest=expected_digest,
+            release_on_close=True,
+        )
+    )
+
+    assert provider.generate_json(
+        system_prompt="system",
+        user_prompt="user",
+        model="frozen-model:9b",
+    ) == {"answer": "ok"}
+    provider.release_resources()
+
+    with pytest.raises(LocalLLMError, match="digest does not match"):
+        provider.generate_json(
+            system_prompt="system",
+            user_prompt="user",
+            model="frozen-model:9b",
+        )
+    assert opener.urls == [
+        "http://127.0.0.1:11434/api/tags",
+        "http://127.0.0.1:11434/api/chat",
+        "http://127.0.0.1:11434/api/generate",
+        "http://127.0.0.1:11434/api/tags",
+    ]
+
+
 def test_stage_scoped_provider_keeps_model_warm_then_unloads_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -206,6 +381,25 @@ def test_stage_scoped_provider_keeps_model_warm_then_unloads_once(
         "stream": False,
     }
     assert opener.timeouts == [120, 30.0]
+
+
+def test_stage_release_requires_strict_unload_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, opener = _provider_with_body(
+        monkeypatch,
+        b'{"done":false,"error":"model stayed loaded"}',
+        config=LocalLLMConfig(
+            model="stage-model",
+            release_on_close=True,
+        ),
+    )
+
+    with pytest.raises(LocalLLMError, match="was not acknowledged"):
+        provider.release_resources()
+    with pytest.raises(LocalLLMError, match="was not acknowledged"):
+        provider.release_resources()
+    assert opener.calls == 2
 
 
 def test_worker_scoped_provider_release_does_not_unload(

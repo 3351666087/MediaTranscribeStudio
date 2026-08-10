@@ -633,6 +633,14 @@ def audit_cues(
                 )
             )
         for line in lines:
+            if not line or line != line.strip():
+                issues.append(
+                    SubtitleQAIssue(
+                        "line-whitespace",
+                        "cue lines must be non-empty and have no edge whitespace",
+                        cue.number,
+                    )
+                )
             if len(line) > policy.max_characters_per_line:
                 issues.append(
                     SubtitleQAIssue(
@@ -705,9 +713,11 @@ def arrange_cues_within_source_duration(
     """Arrange cues without allowing presentation timing to outlive the source.
 
     When already-monotonic source segments overflow only because presentation
-    timing is stricter than their persisted timeline, a zero-gap preview is
-    attempted. The original policy is still audited and returned as evidence;
-    this fallback does not grant readability or release approval.
+    timing is stricter than their persisted timeline, a source-fit preview is
+    attempted. It removes inter-cue gaps and lowers the effective minimum cue
+    duration only as far as the shortest source segment can contain. The
+    original policy is still audited and returned as evidence; this fallback
+    does not grant readability or release approval.
     """
 
     if (
@@ -730,20 +740,32 @@ def arrange_cues_within_source_duration(
         source_segments_are_monotonic
         and configured_arrangement.cues[-1].end_ms > source_duration_ms
     )
-    effective_policy = (
-        replace(
+    effective_policy = resolved_policy
+    arrangement = configured_arrangement
+    if fallback_applied:
+        # Keep each cue anchored to its source segment. A fixed domain minimum
+        # can still push short, contiguous ASR turns past the real media end.
+        source_fit_min_cue_ms = min(
+            resolved_policy.min_cue_ms,
+            *(
+                (segment.end_ms - segment.start_ms)
+                // len(
+                    _compose_segment_chunks(
+                        segment.text,
+                        label=_speaker_label(segment.speaker, resolved_policy),
+                        policy=resolved_policy,
+                    )
+                )
+                for segment in normalized
+            ),
+        )
+        effective_policy = replace(
             resolved_policy,
             gap_ms=0,
             max_reading_speed=100.0,
+            min_cue_ms=max(100, source_fit_min_cue_ms),
         )
-        if fallback_applied
-        else resolved_policy
-    )
-    arrangement = (
-        arrange_cues(normalized, policy=effective_policy)
-        if fallback_applied
-        else configured_arrangement
-    )
+        arrangement = arrange_cues(normalized, policy=effective_policy)
     if arrangement.cues[-1].end_ms > source_duration_ms:
         raise SubtitleQAError(
             "generated subtitle cues exceed the persisted source duration"
@@ -1107,6 +1129,12 @@ def _reading_units(text: str) -> int:
     return max(1, sum(not character.isspace() for character in text))
 
 
+def _visible_whitespace(text: str) -> str:
+    """Keep source character positions while making layout whitespace safe."""
+
+    return "".join(" " if character.isspace() else character for character in text)
+
+
 def _compose_segment_chunks(
     text: str,
     *,
@@ -1136,6 +1164,7 @@ def _compose_segment_chunks(
         raise SubtitleError("cue policy cannot fit subtitle text")
 
     chunks: list[tuple[str, str]] = []
+    pending_source_whitespace = ""
     remaining = text
     while remaining:
         split_at = _preferred_break(
@@ -1143,8 +1172,13 @@ def _compose_segment_chunks(
             chunk_limit,
             policy.punctuation_priority,
         )
-        source_text = remaining[:split_at]
-        display_source = label + source_text
+        source_candidate = remaining[:split_at]
+        if not source_candidate.strip():
+            pending_source_whitespace += source_candidate
+            remaining = remaining[split_at:]
+            continue
+        source_text = pending_source_whitespace + source_candidate
+        display_source = label + source_text.strip()
         lines = _wrap_exact(
             display_source,
             policy.max_characters_per_line,
@@ -1159,15 +1193,25 @@ def _compose_segment_chunks(
                 raise SubtitleQAError(
                     "speaker label prevents text from fitting within max_lines"
                 )
-            source_text = remaining[:split_at]
-            display_source = label + source_text
+            source_candidate = remaining[:split_at]
+            source_text = pending_source_whitespace + source_candidate
+            display_source = label + source_text.strip()
             lines = _wrap_exact(
                 display_source,
                 policy.max_characters_per_line,
                 policy.punctuation_priority,
             )
         remaining = remaining[split_at:]
+        pending_source_whitespace = ""
         chunks.append((source_text, "\n".join(lines)))
+    if pending_source_whitespace:
+        if not chunks:
+            raise SubtitleError("subtitle text must contain visible characters")
+        source_text, display_text = chunks[-1]
+        chunks[-1] = (
+            source_text + pending_source_whitespace,
+            display_text,
+        )
     return tuple(chunks)
 
 
@@ -1204,11 +1248,19 @@ def _wrap_exact(
     punctuation: Sequence[str],
 ) -> tuple[str, ...]:
     lines: list[str] = []
-    remaining = text
+    # Preserve one character per source code point so chunk boundaries remain
+    # index-compatible, while preventing embedded tabs/newlines from leaking
+    # into the rendered-line evidence contract.
+    remaining = _visible_whitespace(text)
     while remaining:
         split_at = _preferred_break(remaining, width, punctuation)
-        lines.append(remaining[:split_at])
+        rendered_line = remaining[:split_at].strip()
         remaining = remaining[split_at:]
+        remaining = remaining.lstrip()
+        if rendered_line:
+            lines.append(rendered_line)
+    if not lines:
+        raise SubtitleError("subtitle text must contain visible characters")
     return tuple(lines)
 
 

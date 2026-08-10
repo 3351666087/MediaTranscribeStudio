@@ -337,6 +337,8 @@ class Revision:
     reason_code: str
     confidence: float
     evidence_refs: tuple[str, ...]
+    actor: str | None = None
+    occurred_at: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Any, field_name: str) -> "Revision":
@@ -389,10 +391,24 @@ class Revision:
                 value.get("confidence"), f"{field_name}.confidence"
             ),
             evidence_refs=tuple(item.strip() for item in refs),
+            actor=(
+                value.get("actor").strip()
+                if isinstance(value.get("actor"), str)
+                and value.get("actor").strip()
+                else None
+            ),
+            occurred_at=(
+                value.get("occurredAt", value.get("occurred_at")).strip()
+                if isinstance(
+                    value.get("occurredAt", value.get("occurred_at")), str
+                )
+                and value.get("occurredAt", value.get("occurred_at")).strip()
+                else None
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.revision_id,
             "type": self.revision_type,
             "source": self.source,
@@ -402,6 +418,11 @@ class Revision:
             "confidence": self.confidence,
             "evidenceRefs": list(self.evidence_refs),
         }
+        if self.actor is not None:
+            result["actor"] = self.actor
+        if self.occurred_at is not None:
+            result["occurredAt"] = self.occurred_at
+        return result
 
 
 @dataclass(frozen=True)
@@ -787,8 +808,18 @@ class StartJobRequest:
     title: str | None = None
     language: str = "auto"
     local_llm_mode: str = "disabled"
-    local_llm_model: str = "qwen3.5:9b"
+    local_llm_model: str = "qwen3.5:27b-q4_K_M"
     local_llm_endpoint: str = "http://127.0.0.1:11434"
+    # Provider transport fields are optional for legacy callers.  The service
+    # normalizes them into an ``LLMProviderConfig`` before a worker stage runs.
+    llm_provider: str = "ollama-loopback"
+    llm_network_policy: str = "loopback-only"
+    llm_api_key_env: str | None = None
+    llm_header_env: Mapping[str, str] = field(default_factory=dict)
+    llm_proxy: str | None = None
+    llm_require_api_key: bool = False
+    llm_allow_model_override: bool = False
+    llm_provider_config: Any | None = field(default=None, repr=False, compare=False)
     business_config: BusinessProcessingConfig = field(
         default_factory=BusinessProcessingConfig
     )

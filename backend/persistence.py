@@ -505,7 +505,9 @@ def atomic_write_json_transaction(
             target = entry["targetPath"]
             if entry["journal"]["hadOriginal"]:
                 shutil.copyfile(target, entry["backupPath"])
-                with entry["backupPath"].open("rb") as handle:
+                # Windows' CRT rejects fsync() on a read-only descriptor even
+                # though the backup itself was created successfully.
+                with entry["backupPath"].open("r+b") as handle:
                     os.fsync(handle.fileno())
             _replace_and_sync(entry["stagedPath"], target)
         for entry in entries:

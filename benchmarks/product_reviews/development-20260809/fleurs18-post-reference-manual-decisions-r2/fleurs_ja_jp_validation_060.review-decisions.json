@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ja_jp_validation_060-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ja-jp-060-postref-text-0001",
+      "reason": "Post-reference Codex adjudication corrects the semantic predicate to the exact official FLEURS rawTranscript.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ja_jp_validation_060", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "報告書の冒頭は、公開討論と中東政策について米国内のコンセンサス形成を嘆願する一節で始まっています。",
+      "displayText": "報告書の冒頭は、公開討論と中東政策について米国内のコンセンサス形成を嘆願する一節で始まっています。",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ja-jp-060-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:a28b2d1f2bb40ef2e885bff97753ab703f8d0509286b82a4ee80723de9b7a8fb"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

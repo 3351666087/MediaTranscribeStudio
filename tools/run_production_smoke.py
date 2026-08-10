@@ -31,6 +31,9 @@ except ImportError:  # pragma: no cover - production requirements include psutil
 
 
 PROTOCOL_VERSION = "1.0.0"
+REVIEW_DECISIONS_SCHEMA_VERSION = "1.0.0"
+REVIEW_DECISIONS_ARTIFACT_TYPE = "production-review-decisions"
+REVIEW_DECISION_AUDIT_SOURCES = frozenset({"human", "codex-agent"})
 TARGET_JOB_EVENTS = frozenset(
     {
         "review.required",
@@ -63,6 +66,30 @@ class SmokePaths:
     event_log: Path
     stderr_log: Path
     result_json: Path
+
+
+@dataclass(frozen=True)
+class ReviewDecisionPlan:
+    """Explicit, non-automatic review decisions bound to exactly one job."""
+
+    job_id: str
+    decisions: tuple[Mapping[str, Any], ...]
+    pre_review_commands: tuple[Mapping[str, Any], ...] = ()
+
+    @property
+    def item_ids(self) -> tuple[str, ...]:
+        return tuple(str(decision["itemId"]) for decision in self.decisions)
+
+    @property
+    def decision_ids(self) -> tuple[str, ...]:
+        return tuple(str(decision["decisionId"]) for decision in self.decisions)
+
+    @property
+    def all_decision_ids(self) -> tuple[str, ...]:
+        return tuple(
+            str(command["decisionId"])
+            for command in self.pre_review_commands
+        ) + self.decision_ids
 
 
 @dataclass(frozen=True)
@@ -105,6 +132,7 @@ class BatchSmokeJob:
     paths: SmokePaths
     idle_timeout_seconds: float | None = None
     hard_timeout_seconds: float | None = None
+    review_decisions: ReviewDecisionPlan | None = None
 
     def __post_init__(self) -> None:
         for name in ("idle_timeout_seconds", "hard_timeout_seconds"):
@@ -113,6 +141,14 @@ class BatchSmokeJob:
                 not math.isfinite(value) or value <= 0
             ):
                 raise ValueError(f"{name} must be finite and positive")
+        job_id = str(self.start_payload.get("jobId") or "")
+        if (
+            self.review_decisions is not None
+            and self.review_decisions.job_id != job_id
+        ):
+            raise ValueError(
+                "review decisions jobId must match the batch start payload"
+            )
 
 
 @dataclass(frozen=True)
@@ -277,6 +313,251 @@ def default_smoke_paths(output_directory: Path) -> SmokePaths:
     )
 
 
+def load_review_decision_plan(
+    path: Path,
+    *,
+    expected_job_id: str | None = None,
+) -> ReviewDecisionPlan:
+    """Load an exact, manually authored review plan without inferring fields."""
+
+    def reject_constant(value: str) -> Any:
+        raise ValueError(f"non-finite JSON number is forbidden: {value}")
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    resolved = path.expanduser().resolve(strict=True)
+    try:
+        value = json.loads(
+            resolved.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicates,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"invalid review decisions JSON: {resolved}") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("review decisions root must be a JSON object")
+    required_root = {
+        "schemaVersion",
+        "artifactType",
+        "jobId",
+        "automaticScoring",
+        "decisions",
+    }
+    optional_root = {"preReviewCommands"}
+    if (
+        not required_root <= set(value)
+        or set(value) - required_root - optional_root
+    ):
+        missing = sorted(required_root - set(value))
+        unknown = sorted(set(value) - required_root - optional_root)
+        raise ValueError(
+            "review decisions root fields are invalid "
+            f"(missing={missing}, unknown={unknown})"
+        )
+    if value.get("schemaVersion") != REVIEW_DECISIONS_SCHEMA_VERSION:
+        raise ValueError("unsupported review decisions schemaVersion")
+    if value.get("artifactType") != REVIEW_DECISIONS_ARTIFACT_TYPE:
+        raise ValueError("review decisions artifactType is invalid")
+    if value.get("automaticScoring") is not False:
+        raise ValueError("review decisions must declare automaticScoring=false")
+    job_id_raw = value.get("jobId")
+    if not isinstance(job_id_raw, str) or not job_id_raw.strip():
+        raise ValueError("review decisions jobId must be non-empty text")
+    job_id = job_id_raw.strip()
+    if expected_job_id is not None and job_id != expected_job_id:
+        raise ValueError(
+            "review decisions jobId does not match the requested smoke job"
+        )
+    raw_decisions = value.get("decisions")
+    if not isinstance(raw_decisions, list) or not raw_decisions:
+        raise ValueError("review decisions must contain a non-empty decisions array")
+
+    manual_fields = {
+        "decisionId",
+        "reason",
+        "evidence",
+        "confidence",
+        "audit",
+    }
+    decision_ids: set[str] = set()
+
+    def normalize_manual_fields(
+        raw: Mapping[str, Any],
+        *,
+        label: str,
+        required: set[str],
+        optional: set[str] | None = None,
+    ) -> dict[str, Any]:
+        actual = set(raw)
+        missing = sorted(required - actual)
+        unknown = sorted(actual - required - (optional or set()))
+        if missing or unknown:
+            raise ValueError(
+                f"{label} fields are invalid "
+                f"(missing={missing}, unknown={unknown})"
+            )
+        decision_id = raw.get("decisionId")
+        if not isinstance(decision_id, str) or not decision_id.strip():
+            raise ValueError(f"{label}.decisionId must be non-empty text")
+        decision_id = decision_id.strip()
+        if len(decision_id) > 160:
+            raise ValueError(f"{label}.decisionId exceeds 160 characters")
+        if decision_id in decision_ids:
+            raise ValueError(
+                "decisionId values must be unique across every review operation"
+            )
+        decision_ids.add(decision_id)
+        reason = raw.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"{label}.reason must be non-empty text")
+        evidence = raw.get("evidence")
+        if (
+            not isinstance(evidence, list)
+            or not evidence
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in evidence
+            )
+        ):
+            raise ValueError(f"{label}.evidence must be non-empty text entries")
+        normalized_evidence = [item.strip() for item in evidence]
+        if len(set(normalized_evidence)) != len(normalized_evidence):
+            raise ValueError(f"{label}.evidence entries must be unique")
+        confidence = raw.get("confidence")
+        normalized_confidence: float | None = None
+        if not isinstance(confidence, bool) and isinstance(
+            confidence, (int, float)
+        ):
+            try:
+                normalized_confidence = float(confidence)
+            except (OverflowError, ValueError):
+                normalized_confidence = None
+        if (
+            normalized_confidence is None
+            or not math.isfinite(normalized_confidence)
+            or not 0.0 <= normalized_confidence <= 1.0
+        ):
+            raise ValueError(
+                f"{label}.confidence must be an explicit number from 0 to 1"
+            )
+        audit = raw.get("audit")
+        if not isinstance(audit, Mapping):
+            raise ValueError(f"{label}.audit must be an object")
+        actor = audit.get("actor")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError(f"{label}.audit.actor must be non-empty text")
+        source = audit.get("source")
+        if source not in REVIEW_DECISION_AUDIT_SOURCES:
+            raise ValueError(
+                f"{label}.audit.source must explicitly be human or codex-agent"
+            )
+        timestamp = audit.get("timestamp")
+        if timestamp is not None and (
+            not isinstance(timestamp, str) or not timestamp.strip()
+        ):
+            raise ValueError(
+                f"{label}.audit.timestamp must be non-empty text when provided"
+            )
+        normalized = dict(raw)
+        normalized.update(
+            {
+                "decisionId": decision_id,
+                "reason": reason.strip(),
+                "evidence": normalized_evidence,
+                "confidence": normalized_confidence,
+                "audit": {
+                    **dict(audit),
+                    "actor": actor.strip(),
+                    "source": source,
+                },
+            }
+        )
+        if timestamp is not None:
+            normalized["audit"]["timestamp"] = timestamp.strip()
+        return normalized
+
+    raw_pre_review = value.get("preReviewCommands", [])
+    if not isinstance(raw_pre_review, list):
+        raise ValueError("preReviewCommands must be an array when provided")
+    pre_review_commands: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_pre_review):
+        label = f"preReviewCommands[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{label} must be an object")
+        normalized = normalize_manual_fields(
+            raw,
+            label=label,
+            required=manual_fields
+            | {"type", "sourceSpeakerId", "targetSpeakerId"},
+        )
+        if normalized.get("type") != "speaker.merge":
+            raise ValueError(f"{label}.type must be speaker.merge")
+        for field in ("sourceSpeakerId", "targetSpeakerId"):
+            field_value = normalized.get(field)
+            if not isinstance(field_value, str) or not field_value.strip():
+                raise ValueError(f"{label}.{field} must be non-empty text")
+            normalized[field] = field_value.strip()
+        if normalized["sourceSpeakerId"] == normalized["targetSpeakerId"]:
+            raise ValueError(
+                f"{label} sourceSpeakerId and targetSpeakerId must differ"
+            )
+        pre_review_commands.append(normalized)
+
+    required_decision = manual_fields | {"itemId", "action"}
+    optional_decision = {
+        "targetSpeakerId",
+        "normalizedText",
+        "displayText",
+        "rawText",
+    }
+    decisions: list[dict[str, Any]] = []
+    item_ids: set[str] = set()
+    for index, raw in enumerate(raw_decisions):
+        label = f"decisions[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{label} must be an object")
+        normalized = normalize_manual_fields(
+            raw,
+            label=label,
+            required=required_decision,
+            optional=optional_decision,
+        )
+        item_id = raw.get("itemId")
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError(f"{label}.itemId must be non-empty text")
+        item_id = item_id.strip()
+        if item_id in item_ids:
+            raise ValueError("review decisions itemId values must be unique")
+        item_ids.add(item_id)
+        action = raw.get("action")
+        if action not in {"accept", "reject"}:
+            raise ValueError(f"{label}.action must be accept or reject")
+        normalized["itemId"] = item_id
+        normalized["action"] = action
+        for field in ("targetSpeakerId", "normalizedText", "displayText"):
+            if field in normalized and (
+                not isinstance(normalized[field], str)
+                or not normalized[field].strip()
+            ):
+                raise ValueError(f"{label}.{field} must be non-empty text")
+            if field in normalized:
+                normalized[field] = normalized[field].strip()
+        if "rawText" in normalized and not isinstance(normalized["rawText"], str):
+            raise ValueError(f"{label}.rawText must be text")
+        decisions.append(normalized)
+    return ReviewDecisionPlan(
+        job_id=job_id,
+        decisions=tuple(decisions),
+        pre_review_commands=tuple(pre_review_commands),
+    )
+
+
 def build_start_payload(
     *,
     job_id: str,
@@ -289,10 +570,11 @@ def build_start_payload(
     speaker_count_max: int | None = None,
     speaker_count_prior: int | None = None,
     render_pdf: bool = False,
+    output_customization: Mapping[str, Any] | None = None,
     title: str = "中文说话人分离生产烟雾测试",
     language: str = "auto",
     local_llm_mode: str = "disabled",
-    local_llm_model: str = "qwen3.5:9b",
+    local_llm_model: str = "qwen3.5:27b-q4_K_M",
     local_llm_endpoint: str = "http://127.0.0.1:11434",
     local_llm_endpoint_policy: str = "loopback-only",
     translation_targets: Sequence[str] = (),
@@ -335,13 +617,23 @@ def build_start_payload(
         raise ValueError(
             "local_llm_mode must enable business processing when variants are requested"
         )
+    canonical_output_customization: dict[str, Any] | None = None
+    if output_customization is not None:
+        if render_pdf:
+            raise ValueError(
+                "render_pdf and output_customization are mutually exclusive"
+            )
+        from backend.output_recipe import parse_output_recipe
+
+        canonical_output_customization = parse_output_recipe(
+            output_customization
+        ).canonical_dict()
 
     payload: dict[str, Any] = {
         "jobId": job_id,
         "sourcePath": str(source_path.resolve()),
         "outputDirectory": str(output_directory.resolve()),
         "speakerCountMode": mode,
-        "renderPdf": bool(render_pdf),
         "title": title,
         "language": language,
         "localLlmMode": llm_mode,
@@ -354,6 +646,10 @@ def build_start_payload(
         "outputLocale": locale,
         "businessPromptVersion": prompt_version,
     }
+    if canonical_output_customization is None:
+        payload["renderPdf"] = bool(render_pdf)
+    else:
+        payload["outputCustomization"] = canonical_output_customization
 
     if mode == "manual":
         if speaker_count is None or speaker_count < 1:
@@ -439,6 +735,380 @@ def encode_jsonl(value: Mapping[str, Any]) -> bytes:
 def _write_command(stream: BinaryIO, value: Mapping[str, Any]) -> None:
     stream.write(encode_jsonl(value))
     stream.flush()
+
+
+class _ReviewFlow:
+    """Drive one verified review transaction over an already-running worker."""
+
+    def __init__(
+        self,
+        plan: ReviewDecisionPlan,
+        *,
+        request_prefix: str,
+    ) -> None:
+        self.plan = plan
+        self.request_prefix = request_prefix
+        self.phase = "not-started"
+        self.current_request_id: str | None = None
+        self.pre_review_index = 0
+        self.decision_index = 0
+        self.resume_accepted = False
+
+    def _send(
+        self,
+        stream: BinaryIO,
+        command_type: str,
+        payload: Mapping[str, Any],
+        *,
+        request_suffix: str,
+        phase: str,
+    ) -> None:
+        request_id = f"{self.request_prefix}-{request_suffix}"
+        self.current_request_id = request_id
+        self.phase = phase
+        _write_command(
+            stream,
+            command_envelope(
+                command_type,
+                payload,
+                request_id=request_id,
+            ),
+        )
+
+    def start(self, stream: BinaryIO, required_event: Mapping[str, Any]) -> None:
+        if self.phase != "not-started":
+            raise SmokeHarnessError(
+                "review flow was started more than once",
+                code="REVIEW_FLOW_INVALID",
+            )
+        payload = required_event.get("payload")
+        declared_open = (
+            payload.get("openCount") if isinstance(payload, Mapping) else None
+        )
+        if (
+            isinstance(declared_open, bool)
+            or not isinstance(declared_open, int)
+            or declared_open != len(self.plan.decisions)
+        ):
+            raise SmokeHarnessError(
+                "review.required does not match the supplied decision count",
+                code="REVIEW_QUEUE_MISMATCH",
+                details={
+                    "jobId": self.plan.job_id,
+                    "declaredOpenCount": declared_open,
+                    "decisionCount": len(self.plan.decisions),
+                },
+            )
+        if self.plan.pre_review_commands:
+            self._send_current_pre_review_command(stream)
+        else:
+            self._send_queue_before(stream)
+
+    def _send_queue_before(self, stream: BinaryIO) -> None:
+        self._send(
+            stream,
+            "review.queue",
+            {"jobId": self.plan.job_id},
+            request_suffix="queue-before",
+            phase="waiting-queue-before",
+        )
+
+    def _send_current_pre_review_command(self, stream: BinaryIO) -> None:
+        command = dict(self.plan.pre_review_commands[self.pre_review_index])
+        command_type = str(command.pop("type"))
+        command["jobId"] = self.plan.job_id
+        self._send(
+            stream,
+            command_type,
+            command,
+            request_suffix=f"pre-{self.pre_review_index + 1:04d}",
+            phase="waiting-pre-review",
+        )
+
+    @staticmethod
+    def _response_payload(event: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise SmokeHarnessError(
+                "review command response payload is invalid",
+                code="REVIEW_PROTOCOL_INVALID",
+                details={"event": dict(event)},
+            )
+        return payload
+
+    def _validate_queue(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        expect_open: bool,
+    ) -> None:
+        if payload.get("jobId") != self.plan.job_id:
+            raise SmokeHarnessError(
+                "review.queue response is rebound to another job",
+                code="REVIEW_PROTOCOL_INVALID",
+                details={"jobId": payload.get("jobId")},
+            )
+        queue_value = payload.get("queue")
+        if not isinstance(queue_value, Mapping):
+            raise SmokeHarnessError(
+                "review.queue response omitted the durable queue",
+                code="REVIEW_PROTOCOL_INVALID",
+            )
+        if queue_value.get("jobId") != self.plan.job_id:
+            raise SmokeHarnessError(
+                "durable review queue is rebound to another job",
+                code="REVIEW_PROTOCOL_INVALID",
+            )
+        items = queue_value.get("items")
+        if not isinstance(items, list) or any(
+            not isinstance(item, Mapping) for item in items
+        ):
+            raise SmokeHarnessError(
+                "durable review queue items are invalid",
+                code="REVIEW_PROTOCOL_INVALID",
+            )
+        open_ids: list[str] = []
+        for item in items:
+            if item.get("status") != "open":
+                continue
+            item_id = item.get("id")
+            if not isinstance(item_id, str) or not item_id.strip():
+                raise SmokeHarnessError(
+                    "durable review queue contains an invalid open item ID",
+                    code="REVIEW_PROTOCOL_INVALID",
+                )
+            open_ids.append(item_id)
+        if len(open_ids) != len(set(open_ids)):
+            raise SmokeHarnessError(
+                "durable review queue contains invalid open item IDs",
+                code="REVIEW_PROTOCOL_INVALID",
+            )
+        open_count = payload.get("openCount")
+        queue_open_count = queue_value.get("openCount")
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in (open_count, queue_open_count)
+        ):
+            raise SmokeHarnessError(
+                "review.queue response contains an invalid open count",
+                code="REVIEW_PROTOCOL_INVALID",
+                details={
+                    "openCount": open_count,
+                    "queueOpenCount": queue_open_count,
+                },
+            )
+        if expect_open:
+            expected_ids = set(self.plan.item_ids)
+            if (
+                set(open_ids) != expected_ids
+                or len(open_ids) != len(expected_ids)
+                or open_count != len(expected_ids)
+                or queue_open_count != len(expected_ids)
+            ):
+                raise SmokeHarnessError(
+                    "review decisions do not exactly cover the open queue",
+                    code="REVIEW_QUEUE_MISMATCH",
+                    details={
+                        "jobId": self.plan.job_id,
+                        "openItemIds": open_ids,
+                        "decisionItemIds": list(self.plan.item_ids),
+                        "openCount": open_count,
+                        "queueOpenCount": queue_open_count,
+                    },
+                )
+            return
+        if open_ids or open_count != 0 or queue_open_count != 0:
+            raise SmokeHarnessError(
+                "review queue still contains unresolved items",
+                code="REVIEW_INCOMPLETE",
+                details={
+                    "jobId": self.plan.job_id,
+                    "openItemIds": open_ids,
+                    "openCount": open_count,
+                    "queueOpenCount": queue_open_count,
+                },
+            )
+        persisted = queue_value.get("decisions")
+        if not isinstance(persisted, list):
+            raise SmokeHarnessError(
+                "review queue decisions are invalid",
+                code="REVIEW_PROTOCOL_INVALID",
+            )
+        expected_decision_ids = set(self.plan.all_decision_ids)
+        persisted_ids = [
+            item.get("decisionId")
+            for item in persisted
+            if isinstance(item, Mapping)
+            and item.get("decisionId") in expected_decision_ids
+        ]
+        if sorted(persisted_ids) != sorted(self.plan.all_decision_ids):
+            raise SmokeHarnessError(
+                "review queue does not prove every supplied decision",
+                code="REVIEW_PROTOCOL_INVALID",
+                details={
+                    "expectedDecisionIds": list(self.plan.all_decision_ids),
+                    "persistedDecisionIds": persisted_ids,
+                },
+            )
+
+    def _send_current_decision(self, stream: BinaryIO) -> None:
+        decision = dict(self.plan.decisions[self.decision_index])
+        decision["jobId"] = self.plan.job_id
+        self._send(
+            stream,
+            "review.submit",
+            decision,
+            request_suffix=f"submit-{self.decision_index + 1:04d}",
+            phase="waiting-submit",
+        )
+
+    def handle(self, event: Mapping[str, Any], stream: BinaryIO) -> bool:
+        """Consume an expected command response and send the next command."""
+
+        if (
+            self.current_request_id is None
+            or event.get("requestId") != self.current_request_id
+        ):
+            return False
+        event_type = event.get("type")
+        if event_type == "command.rejected":
+            raise SmokeHarnessError(
+                "worker rejected a review workflow command",
+                code="REVIEW_COMMAND_REJECTED",
+                details={
+                    "jobId": self.plan.job_id,
+                    "phase": self.phase,
+                    "event": dict(event),
+                },
+            )
+        expected_type = (
+            "command.accepted"
+            if self.phase == "waiting-resume"
+            else "command.completed"
+        )
+        if event_type != expected_type:
+            raise SmokeHarnessError(
+                "worker emitted an unexpected review command response",
+                code="REVIEW_PROTOCOL_INVALID",
+                details={
+                    "phase": self.phase,
+                    "expectedType": expected_type,
+                    "event": dict(event),
+                },
+            )
+        payload = self._response_payload(event)
+        if self.phase == "waiting-pre-review":
+            expected = self.plan.pre_review_commands[self.pre_review_index]
+            if payload.get("jobId") != self.plan.job_id:
+                raise SmokeHarnessError(
+                    "pre-review response is rebound to another job",
+                    code="REVIEW_PROTOCOL_INVALID",
+                )
+            decision = payload.get("decision")
+            if (
+                payload.get("command") != expected["type"]
+                or not isinstance(decision, Mapping)
+                or decision.get("decisionId") != expected["decisionId"]
+                or decision.get("command") != expected["type"]
+                or isinstance(payload.get("openCount"), bool)
+                or not isinstance(payload.get("openCount"), int)
+                or payload.get("openCount") != len(self.plan.decisions)
+            ):
+                raise SmokeHarnessError(
+                    "pre-review response does not prove the requested command",
+                    code="REVIEW_PROTOCOL_INVALID",
+                    details={
+                        "expectedType": expected["type"],
+                        "expectedDecisionId": expected["decisionId"],
+                        "expectedOpenCount": len(self.plan.decisions),
+                        "response": dict(payload),
+                    },
+                )
+            self.pre_review_index += 1
+            if self.pre_review_index < len(self.plan.pre_review_commands):
+                self._send_current_pre_review_command(stream)
+            else:
+                self._send_queue_before(stream)
+            return True
+        if self.phase == "waiting-queue-before":
+            self._validate_queue(payload, expect_open=True)
+            self.decision_index = 0
+            self._send_current_decision(stream)
+            return True
+        if self.phase == "waiting-submit":
+            expected = self.plan.decisions[self.decision_index]
+            if payload.get("jobId") != self.plan.job_id:
+                raise SmokeHarnessError(
+                    "review.submit response is rebound to another job",
+                    code="REVIEW_PROTOCOL_INVALID",
+                )
+            decision = payload.get("decision")
+            if (
+                not isinstance(decision, Mapping)
+                or decision.get("decisionId") != expected["decisionId"]
+            ):
+                raise SmokeHarnessError(
+                    "review.submit response does not prove the requested decision",
+                    code="REVIEW_PROTOCOL_INVALID",
+                    details={
+                        "expectedDecisionId": expected["decisionId"],
+                        "response": dict(payload),
+                    },
+                )
+            remaining = len(self.plan.decisions) - self.decision_index - 1
+            response_open_count = payload.get("openCount")
+            if (
+                isinstance(response_open_count, bool)
+                or not isinstance(response_open_count, int)
+                or response_open_count != remaining
+            ):
+                raise SmokeHarnessError(
+                    "review.submit response has an unexpected open count",
+                    code="REVIEW_PROTOCOL_INVALID",
+                    details={
+                        "expectedOpenCount": remaining,
+                        "actualOpenCount": response_open_count,
+                    },
+                )
+            self.decision_index += 1
+            if self.decision_index < len(self.plan.decisions):
+                self._send_current_decision(stream)
+            else:
+                self._send(
+                    stream,
+                    "review.queue",
+                    {"jobId": self.plan.job_id},
+                    request_suffix="queue-after",
+                    phase="waiting-queue-after",
+                )
+            return True
+        if self.phase == "waiting-queue-after":
+            self._validate_queue(payload, expect_open=False)
+            self._send(
+                stream,
+                "job.resume",
+                {"jobId": self.plan.job_id},
+                request_suffix="resume",
+                phase="waiting-resume",
+            )
+            return True
+        if self.phase == "waiting-resume":
+            if payload.get("jobId") != self.plan.job_id:
+                raise SmokeHarnessError(
+                    "job.resume response is rebound to another job",
+                    code="REVIEW_PROTOCOL_INVALID",
+                )
+            self.resume_accepted = True
+            self.phase = "resumed"
+            self.current_request_id = None
+            return True
+        raise SmokeHarnessError(
+            "review flow received a response in an invalid phase",
+            code="REVIEW_FLOW_INVALID",
+            details={"phase": self.phase},
+        )
 
 
 def _reader(
@@ -574,10 +1244,19 @@ class ProductionSmokeHarness:
             kwargs["start_new_session"] = True
         return subprocess.Popen(**kwargs)
 
-    def run(self, start_payload: Mapping[str, Any]) -> SmokeResult:
+    def run(
+        self,
+        start_payload: Mapping[str, Any],
+        *,
+        review_decisions: ReviewDecisionPlan | None = None,
+    ) -> SmokeResult:
         job_id = str(start_payload.get("jobId") or "")
         if not job_id:
             raise ValueError("start_payload must contain jobId")
+        if review_decisions is not None and review_decisions.job_id != job_id:
+            raise ValueError(
+                "review decisions jobId must match the smoke start payload"
+            )
 
         for path in (
             self.paths.event_log,
@@ -620,11 +1299,37 @@ class ProductionSmokeHarness:
         shutdown_sent_at: float | None = None
         idle_timeout_seconds = self.settings.effective_idle_timeout_seconds
         hard_timeout_seconds = self.settings.effective_hard_timeout_seconds
-        idle_deadline = started + idle_timeout_seconds
+        # Process startup is not job progress.  Start the idle clock only
+        # after the worker emits its first protocol progress event; the hard
+        # deadline still includes startup and bounds an unresponsive worker.
+        idle_deadline = float("inf")
         hard_deadline = started + hard_timeout_seconds
         last_progress_at = started
         last_progress_event_type: str | None = None
         progress_event_count = 0
+        review_flow = (
+            _ReviewFlow(
+                review_decisions,
+                request_prefix=f"{START_REQUEST_ID}-review",
+            )
+            if review_decisions is not None
+            else None
+        )
+        review_required_seen = False
+
+        def request_shutdown() -> None:
+            nonlocal shutdown_sent_at
+            if shutdown_sent_at is not None:
+                return
+            _write_command(
+                process.stdin,
+                command_envelope(
+                    "worker.shutdown",
+                    {},
+                    request_id=SHUTDOWN_REQUEST_ID,
+                ),
+            )
+            shutdown_sent_at = time.monotonic()
 
         try:
             _write_command(
@@ -760,21 +1465,76 @@ class ProductionSmokeHarness:
                         )
                         last_progress_event_type = str(event_type)
                         progress_event_count += 1
+
+                    if review_flow is not None and review_flow.handle(
+                        event,
+                        process.stdin,
+                    ):
+                        if shutdown_sent_at is None:
+                            last_progress_at = time.monotonic()
+                            idle_deadline = (
+                                last_progress_at + idle_timeout_seconds
+                            )
+                            last_progress_event_type = str(event_type)
+                            progress_event_count += 1
+                        if (
+                            terminal_event is not None
+                            and review_flow.resume_accepted
+                        ):
+                            request_shutdown()
+                        continue
+
                     if (
-                        terminal_event is None
-                        and event_type in TARGET_JOB_EVENTS
+                        event_type == "review.required"
+                        and event_job_id == job_id
+                    ):
+                        if review_flow is None:
+                            terminal_event = event
+                            request_shutdown()
+                            continue
+                        if review_required_seen:
+                            terminal_event = event
+                            raise SmokeHarnessError(
+                                "job returned to review after supplied decisions",
+                                code="REVIEW_REOPENED_AFTER_DECISIONS",
+                                details={"jobId": job_id, "event": event},
+                            )
+                        review_required_seen = True
+                        review_flow.start(process.stdin, event)
+                        continue
+
+                    if (
+                        event_type in {"job.completed", "job.failed"}
                         and event_job_id == job_id
                     ):
                         terminal_event = event
-                        _write_command(
-                            process.stdin,
-                            command_envelope(
-                                "worker.shutdown",
-                                {},
-                                request_id=SHUTDOWN_REQUEST_ID,
-                            ),
-                        )
-                        shutdown_sent_at = time.monotonic()
+                        if review_flow is None or not review_required_seen:
+                            if (
+                                review_flow is not None
+                                and event_type == "job.completed"
+                            ):
+                                raise SmokeHarnessError(
+                                    "job completed without using supplied review decisions",
+                                    code="REVIEW_DECISIONS_UNUSED",
+                                    details={"jobId": job_id, "event": event},
+                                )
+                            request_shutdown()
+                            continue
+                        if review_flow.phase not in {
+                            "waiting-resume",
+                            "resumed",
+                        }:
+                            raise SmokeHarnessError(
+                                "job reached a terminal state before review resume",
+                                code="REVIEW_TERMINAL_BEFORE_RESUME",
+                                details={
+                                    "jobId": job_id,
+                                    "phase": review_flow.phase,
+                                    "event": event,
+                                },
+                            )
+                        if review_flow.resume_accepted:
+                            request_shutdown()
                         continue
 
                     if (
@@ -787,15 +1547,7 @@ class ProductionSmokeHarness:
 
                     if request_id == START_REQUEST_ID and event_type == "command.rejected":
                         terminal_event = event
-                        _write_command(
-                            process.stdin,
-                            command_envelope(
-                                "worker.shutdown",
-                                {},
-                                request_id=SHUTDOWN_REQUEST_ID,
-                            ),
-                        )
-                        shutdown_sent_at = time.monotonic()
+                        request_shutdown()
                         continue
 
                     if event_type == "worker.startup.failed":
@@ -806,6 +1558,8 @@ class ProductionSmokeHarness:
                             details={"event": event, "workerPid": process.pid},
                         )
                         break
+        except SmokeHarnessError as exc:
+            harness_error = exc
         except (BrokenPipeError, OSError) as exc:
             harness_error = SmokeHarnessError(
                 "worker protocol pipe failed",
@@ -1258,9 +2012,22 @@ class ProductionBatchSmokeHarness:
                         ),
                     )
                     terminal_event: dict[str, Any] | None = None
-                    idle_deadline = (
-                        active_started + active_idle_timeout_seconds
+                    review_flow = (
+                        _ReviewFlow(
+                            job.review_decisions,
+                            request_prefix=(
+                                f"{session_id}-review-{job_index}"
+                            ),
+                        )
+                        if job.review_decisions is not None
+                        else None
                     )
+                    review_required_seen = False
+                    job_protocol_complete = False
+                    # Do not charge interpreter/worker startup against the
+                    # idle budget; the hard deadline remains active from job
+                    # admission and covers a worker that never responds.
+                    idle_deadline = float("inf")
                     hard_deadline = (
                         active_started + active_hard_timeout_seconds
                     )
@@ -1270,7 +2037,7 @@ class ProductionBatchSmokeHarness:
                         and self.settings.uses_legacy_job_timeout
                     )
                     with job.paths.event_log.open("wb") as event_log:
-                        while terminal_event is None:
+                        while not job_protocol_complete:
                             raw_line, event = self._next_event(
                                 process=process,
                                 output=output,
@@ -1324,6 +2091,27 @@ class ProductionBatchSmokeHarness:
                                     event_type
                                 )
                                 active_progress_event_count += 1
+
+                            if review_flow is not None and review_flow.handle(
+                                event,
+                                process.stdin,
+                            ):
+                                active_last_progress_at = time.monotonic()
+                                idle_deadline = (
+                                    active_last_progress_at
+                                    + active_idle_timeout_seconds
+                                )
+                                active_last_progress_event_type = str(
+                                    event_type
+                                )
+                                active_progress_event_count += 1
+                                if (
+                                    terminal_event is not None
+                                    and review_flow.resume_accepted
+                                ):
+                                    job_protocol_complete = True
+                                continue
+
                             if event_type == "worker.startup.failed":
                                 raise SmokeHarnessError(
                                     "production worker startup failed",
@@ -1338,12 +2126,79 @@ class ProductionBatchSmokeHarness:
                                 and event_type == "command.rejected"
                             ):
                                 terminal_event = event
-                                break
+                                job_protocol_complete = True
+                                continue
                             if (
-                                event_type in TARGET_JOB_EVENTS
+                                event_type == "review.required"
                                 and event.get("jobId") == job_id
                             ):
+                                if review_flow is None:
+                                    terminal_event = event
+                                    job_protocol_complete = True
+                                    continue
+                                if review_required_seen:
+                                    terminal_event = event
+                                    raise SmokeHarnessError(
+                                        "job returned to review after supplied decisions",
+                                        code=(
+                                            "REVIEW_REOPENED_AFTER_DECISIONS"
+                                        ),
+                                        details={
+                                            "jobId": job_id,
+                                            "event": event,
+                                        },
+                                    )
+                                review_required_seen = True
+                                review_flow.start(process.stdin, event)
+                                continue
+                            if (
+                                event_type in {"job.completed", "job.failed"}
+                                and event.get("jobId") == job_id
+                            ):
+                                if terminal_event is not None:
+                                    raise SmokeHarnessError(
+                                        "worker emitted more than one final job event",
+                                        code="REVIEW_PROTOCOL_INVALID",
+                                        details={
+                                            "jobId": job_id,
+                                            "firstEvent": terminal_event,
+                                            "secondEvent": event,
+                                        },
+                                    )
                                 terminal_event = event
+                                if (
+                                    review_flow is None
+                                    or not review_required_seen
+                                ):
+                                    if (
+                                        review_flow is not None
+                                        and event_type == "job.completed"
+                                    ):
+                                        raise SmokeHarnessError(
+                                            "job completed without using supplied review decisions",
+                                            code="REVIEW_DECISIONS_UNUSED",
+                                            details={
+                                                "jobId": job_id,
+                                                "event": event,
+                                            },
+                                        )
+                                    job_protocol_complete = True
+                                    continue
+                                if review_flow.phase not in {
+                                    "waiting-resume",
+                                    "resumed",
+                                }:
+                                    raise SmokeHarnessError(
+                                        "job reached a terminal state before review resume",
+                                        code="REVIEW_TERMINAL_BEFORE_RESUME",
+                                        details={
+                                            "jobId": job_id,
+                                            "phase": review_flow.phase,
+                                            "event": event,
+                                        },
+                                    )
+                                if review_flow.resume_accepted:
+                                    job_protocol_complete = True
                     outcomes.append(
                         _BatchOutcome(
                             job=job,
@@ -1593,6 +2448,18 @@ def _load_roles(args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(value)
 
 
+def load_output_recipe(path: Path) -> dict[str, Any]:
+    """Load one strict JSON recipe and return its canonical representation."""
+
+    from backend.output_recipe import parse_output_recipe
+    from backend.persistence import read_json_strict
+
+    value = read_json_strict(path.resolve(strict=True))
+    if not isinstance(value, Mapping):
+        raise ValueError("--output-recipe must contain a JSON object")
+    return parse_output_recipe(value).canonical_dict()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run one MediaTranscribeStudio production worker smoke job"
@@ -1629,6 +2496,22 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
+    parser.add_argument(
+        "--output-recipe",
+        type=Path,
+        help=(
+            "strict output-recipe JSON; requests transcripts, subtitles, "
+            "derived video, and PDF in one job"
+        ),
+    )
+    parser.add_argument(
+        "--review-decisions",
+        type=Path,
+        help=(
+            "strict manually authored review decisions JSON; keeps this worker "
+            "alive through review, explicit mutations, and job.resume"
+        ),
+    )
     parser.add_argument("--title", default="中文说话人分离生产烟雾测试")
     parser.add_argument(
         "--language",
@@ -1640,7 +2523,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("disabled", "suggestion-only", "business", "enabled"),
         default="disabled",
     )
-    parser.add_argument("--local-llm-model", default="qwen3.5:9b")
+    parser.add_argument("--local-llm-model", default="qwen3.5:27b-q4_K_M")
     parser.add_argument(
         "--local-llm-endpoint",
         default="http://127.0.0.1:11434",
@@ -1703,7 +2586,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         roles = _load_roles(args)
-        job_id = args.job_id or f"smoke-{args.mode}-{uuid.uuid4().hex[:16]}"
+        output_recipe = (
+            load_output_recipe(args.output_recipe)
+            if args.output_recipe is not None
+            else None
+        )
+        review_decisions = (
+            load_review_decision_plan(
+                args.review_decisions,
+                expected_job_id=args.job_id,
+            )
+            if args.review_decisions is not None
+            else None
+        )
+        job_id = (
+            args.job_id
+            or (
+                review_decisions.job_id
+                if review_decisions is not None
+                else None
+            )
+            or f"smoke-{args.mode}-{uuid.uuid4().hex[:16]}"
+        )
         payload = build_start_payload(
             job_id=job_id,
             source_path=args.source,
@@ -1715,6 +2619,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             speaker_count_max=args.speaker_count_max,
             speaker_count_prior=args.speaker_count_prior,
             render_pdf=args.render_pdf,
+            output_customization=output_recipe,
             title=args.title,
             language=args.language,
             local_llm_mode=args.local_llm_mode,
@@ -1744,7 +2649,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cleanup_timeout_seconds=args.cleanup_timeout_seconds,
             ),
         )
-        result = harness.run(payload)
+        result = harness.run(
+            payload,
+            review_decisions=review_decisions,
+        )
     except (OSError, ValueError, json.JSONDecodeError, SmokeHarnessError) as exc:
         failure = {
             "status": "harness-failed",

@@ -243,7 +243,7 @@ class JavaPdfRendererAdapter:
             ).strip()
             if asr_model_revision:
                 report_evidence["asr"]["modelRevision"] = asr_model_revision
-            for key in ("overlap", "pyannoteCanonicalMapping"):
+            for key in ("audioReview", "overlap", "pyannoteCanonicalMapping"):
                 value = raw_evidence.get(key)
                 if isinstance(value, Mapping):
                     report_evidence[key] = dict(value)

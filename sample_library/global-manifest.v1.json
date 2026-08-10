@@ -222,7 +222,7 @@
     {
       "id": "fleurs_ar_eg_test_000",
       "sourceId": "fleurs",
-      "acquisition": {"kind": "hf-streaming-row", "config": "ar_eg", "split": "test", "rowIndex": 0},
+      "acquisition": {"kind": "hf-viewer-row", "config": "ar_eg", "split": "test", "rowIndex": 0, "rowIdField": "id", "rowId": "1993"},
       "language": "ar-EG",
       "region": "Middle East and North Africa",
       "evaluationSplit": "held-out",
@@ -242,7 +242,7 @@
     {
       "id": "fleurs_hi_in_test_002",
       "sourceId": "fleurs",
-      "acquisition": {"kind": "hf-streaming-row", "config": "hi_in", "split": "test", "rowIndex": 2},
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "hi_in", "split": "test", "rowIndex": 2, "rowIdField": "id", "rowId": "1718", "searchQuery": "Hindi"},
       "language": "hi-IN",
       "region": "South Asia",
       "evaluationSplit": "held-out",
@@ -562,7 +562,7 @@
     {
       "id": "fleurs_ja_jp_test_010",
       "sourceId": "fleurs",
-      "acquisition": {"kind": "hf-streaming-row", "config": "ja_jp", "split": "test", "rowIndex": 10},
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "ja_jp", "split": "test", "rowIndex": 10, "rowIdField": "id", "rowId": "1980", "searchQuery": "Japanese"},
       "language": "ja-JP",
       "region": "East Asia",
       "evaluationSplit": "held-out",
@@ -678,6 +678,336 @@
       "evaluationSplit": "regression",
       "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
       "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ar_eg_validation_030",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ar_eg", "split": "validation", "rowIndex": 30, "rowIdField": "id", "rowId": "1538"},
+      "language": "ar-EG",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ar_eg_validation_060",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ar_eg", "split": "validation", "rowIndex": 60, "rowIdField": "id", "rowId": "1581"},
+      "language": "ar-EG",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ar_eg_validation_090",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ar_eg", "split": "validation", "rowIndex": 90, "rowIdField": "id", "rowId": "1653"},
+      "language": "ar-EG",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ar_eg_test_023",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ar_eg", "split": "test", "rowIndex": 23, "rowIdField": "id", "rowId": "1825"},
+      "language": "ar-EG",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ar_eg_test_002",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ar_eg", "split": "test", "rowIndex": 2, "rowIdField": "id", "rowId": "1995"},
+      "language": "ar-EG",
+      "region": "Middle East and North Africa",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_validation_080",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "es_419", "split": "validation", "rowIndex": 80, "rowIdField": "id", "rowId": "1554", "searchQuery": "Spanish"},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_validation_232",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "es_419", "split": "validation", "rowIndex": 232, "rowIdField": "id", "rowId": "1577", "searchQuery": "Spanish"},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_validation_009",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "es_419", "split": "validation", "rowIndex": 9, "rowIdField": "id", "rowId": "1515", "searchQuery": "Spanish"},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_test_063",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "es_419", "split": "test", "rowIndex": 63, "rowIdField": "id", "rowId": "1957", "searchQuery": "Spanish"},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_test_057",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "es_419", "split": "test", "rowIndex": 57, "rowIdField": "id", "rowId": "1910", "searchQuery": "Spanish"},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_es_419_test_074",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "es_419", "split": "test", "rowIndex": 74, "rowIdField": "id", "rowId": "1953", "searchQuery": "Spanish"},
+      "language": "es-419",
+      "region": "Latin America",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_hi_in_validation_030",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "hi_in", "split": "validation", "rowIndex": 30, "rowIdField": "id", "rowId": "1529"},
+      "language": "hi-IN",
+      "region": "South Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_hi_in_validation_060",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "hi_in", "split": "validation", "rowIndex": 60, "rowIdField": "id", "rowId": "1629"},
+      "language": "hi-IN",
+      "region": "South Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_hi_in_validation_090",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "hi_in", "split": "validation", "rowIndex": 90, "rowIdField": "id", "rowId": "1560"},
+      "language": "hi-IN",
+      "region": "South Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_hi_in_test_000",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "hi_in", "split": "test", "rowIndex": 0, "rowIdField": "id", "rowId": "1766", "searchQuery": "Hindi"},
+      "language": "hi-IN",
+      "region": "South Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_hi_in_test_001",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "hi_in", "split": "test", "rowIndex": 1, "rowIdField": "id", "rowId": "1784", "searchQuery": "Hindi"},
+      "language": "hi-IN",
+      "region": "South Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ja_jp_validation_030",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ja_jp", "split": "validation", "rowIndex": 30, "rowIdField": "id", "rowId": "1523"},
+      "language": "ja-JP",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ja_jp_validation_060",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ja_jp", "split": "validation", "rowIndex": 60, "rowIdField": "id", "rowId": "1569"},
+      "language": "ja-JP",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ja_jp_validation_090",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ja_jp", "split": "validation", "rowIndex": 90, "rowIdField": "id", "rowId": "1588"},
+      "language": "ja-JP",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ja_jp_test_000",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "ja_jp", "split": "test", "rowIndex": 0, "rowIdField": "id", "rowId": "1828", "searchQuery": "Japanese"},
+      "language": "ja-JP",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ja_jp_test_001",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "ja_jp", "split": "test", "rowIndex": 1, "rowIdField": "id", "rowId": "1834", "searchQuery": "Japanese"},
+      "language": "ja-JP",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ko_kr_validation_030",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko_kr", "split": "validation", "rowIndex": 30, "rowIdField": "id", "rowId": "1538"},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ko_kr_validation_060",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko_kr", "split": "validation", "rowIndex": 60, "rowIdField": "id", "rowId": "1633"},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ko_kr_validation_090",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko_kr", "split": "validation", "rowIndex": 90, "rowIdField": "id", "rowId": "1521"},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ko_kr_test_000",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko_kr", "split": "test", "rowIndex": 0, "rowIdField": "id", "rowId": "1883"},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ko_kr_test_002",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko_kr", "split": "test", "rowIndex": 2, "rowIdField": "id", "rowId": "1701"},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_ko_kr_test_010",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "ko_kr", "split": "test", "rowIndex": 10, "rowIdField": "id", "rowId": "1850"},
+      "language": "ko-KR",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_validation_030",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "yue_hant_hk", "split": "validation", "rowIndex": 30, "rowIdField": "id", "rowId": "1577"},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_validation_060",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "yue_hant_hk", "split": "validation", "rowIndex": 60, "rowIdField": "id", "rowId": "1523"},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_validation_090",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-row", "config": "yue_hant_hk", "split": "validation", "rowIndex": 90, "rowIdField": "id", "rowId": "1614"},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "development",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_test_000",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "yue_hant_hk", "split": "test", "rowIndex": 0, "rowIdField": "id", "rowId": "1702", "searchQuery": "Cantonese Chinese"},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_test_001",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "yue_hant_hk", "split": "test", "rowIndex": 1, "rowIdField": "id", "rowId": "1678", "searchQuery": "Cantonese Chinese"},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
+    },
+    {
+      "id": "fleurs_yue_hant_hk_test_002",
+      "sourceId": "fleurs",
+      "acquisition": {"kind": "hf-viewer-search-row", "config": "yue_hant_hk", "split": "test", "rowIndex": 2, "rowIdField": "id", "rowId": "1761", "searchQuery": "Cantonese Chinese"},
+      "language": "yue-Hant-HK",
+      "region": "East Asia",
+      "evaluationSplit": "held-out",
+      "scenario": ["real-recording", "single-speaker", "clean-read-speech"],
+      "expectedSpeakerCount": 1
     }
   ],
   "derivedMatrices": [
@@ -725,6 +1055,7 @@
       "config": "ihm",
       "split": "test",
       "rowIndex": 0,
+      "evaluationSplit": "development",
       "targetSpeakerCounts": [2, 3, 4],
       "windowSelection": "deterministic-max-speaker-and-overlap-coverage"
     },
@@ -732,15 +1063,60 @@
       "sourceId": "voxconverse",
       "config": "default",
       "split": "dev",
-      "targetSpeakerCounts": [1, 2, 3, 5, 8],
+      "targetSpeakerCounts": [1, 2, 3, 5, 8, 13],
       "parquetPath": "data/dev-00000-of-00005.parquet",
       "parquetBytes": 485283393,
+      "parquetSha256": "f36c54412f0ac9cfe7ec2682e27f70f3e3df63d8e2b8f288d4f62341a595917d",
       "rowTargets": [
-        {"rowIndex": 35, "targetSpeakerCount": 1},
-        {"rowIndex": 35, "targetSpeakerCount": 2},
-        {"rowIndex": 22, "targetSpeakerCount": 3},
-        {"rowIndex": 20, "targetSpeakerCount": 5},
-        {"rowIndex": 25, "targetSpeakerCount": 8}
+        {"rowIndex": 35, "targetSpeakerCount": 1, "evaluationSplit": "regression"},
+        {"rowIndex": 35, "targetSpeakerCount": 2, "evaluationSplit": "regression"},
+        {"rowIndex": 22, "targetSpeakerCount": 3, "evaluationSplit": "regression"},
+        {"rowIndex": 20, "targetSpeakerCount": 5, "evaluationSplit": "regression"},
+        {"rowIndex": 25, "targetSpeakerCount": 8, "evaluationSplit": "regression"},
+        {"rowIndex": 13, "targetSpeakerCount": 5, "evaluationSplit": "development"},
+        {"rowIndex": 15, "targetSpeakerCount": 5, "evaluationSplit": "held-out"},
+        {"rowIndex": 23, "targetSpeakerCount": 8, "evaluationSplit": "development"},
+        {"rowIndex": 2, "targetSpeakerCount": 8, "evaluationSplit": "held-out"}
+      ],
+      "parquetShards": [
+        {
+          "config": "default",
+          "split": "dev",
+          "parquetPath": "data/dev-00000-of-00005.parquet",
+          "parquetBytes": 485283393,
+          "parquetSha256": "f36c54412f0ac9cfe7ec2682e27f70f3e3df63d8e2b8f288d4f62341a595917d",
+          "rowTargets": [
+            {"rowIndex": 35, "targetSpeakerCount": 1, "evaluationSplit": "regression"},
+            {"rowIndex": 35, "targetSpeakerCount": 2, "evaluationSplit": "regression"},
+            {"rowIndex": 22, "targetSpeakerCount": 3, "evaluationSplit": "regression"},
+            {"rowIndex": 20, "targetSpeakerCount": 5, "evaluationSplit": "regression"},
+            {"rowIndex": 25, "targetSpeakerCount": 8, "evaluationSplit": "regression"},
+            {"rowIndex": 13, "targetSpeakerCount": 5, "evaluationSplit": "development"},
+            {"rowIndex": 15, "targetSpeakerCount": 5, "evaluationSplit": "held-out"},
+            {"rowIndex": 23, "targetSpeakerCount": 8, "evaluationSplit": "development"},
+            {"rowIndex": 2, "targetSpeakerCount": 8, "evaluationSplit": "held-out"}
+          ]
+        },
+        {
+          "config": "default",
+          "split": "dev",
+          "parquetPath": "data/dev-00002-of-00005.parquet",
+          "parquetBytes": 491609514,
+          "parquetSha256": "77800f7d5fa37116e7f7d7c6b482f9a9ea654827b7af0e4d61c43facc5a7125e",
+          "rowTargets": [
+            {"rowIndex": 38, "targetSpeakerCount": 13, "evaluationSplit": "development", "maximumDurationSeconds": 300}
+          ]
+        },
+        {
+          "config": "default",
+          "split": "test",
+          "parquetPath": "data/test-00000-of-00011.parquet",
+          "parquetBytes": 527309558,
+          "parquetSha256": "487d66b75a2edc808407a6aa3b344bdd492b326f6a5b78b580d250e203f0860f",
+          "rowTargets": [
+            {"rowIndex": 8, "targetSpeakerCount": 13, "evaluationSplit": "held-out", "maximumDurationSeconds": 120}
+          ]
+        }
       ],
       "windowSelection": "deterministic-max-speaker-and-overlap-coverage"
     },
@@ -748,11 +1124,50 @@
       "sourceId": "aishell4",
       "split": "test",
       "sessionId": "L_R003S01C02",
+      "evaluationSplit": "regression",
       "targetSpeakerCounts": [5],
       "audioLayout": "first-textgrid-tier-contiguous-8-channel-shards",
       "officialEvaluationRepository": "https://github.com/felixfuyihui/AISHELL-4",
       "officialEvaluationRevision": "bad82b77c3753df1b232c5c6491cd3e2f2e32d24",
       "windowSelection": "event-boundary-shortest-coverage-v2"
+    },
+    {
+      "sourceId": "alimeeting",
+      "provider": "openslr",
+      "dataset": "SLR119/AliMeeting",
+      "revision": "sha256:dc47343b2474b5ebcf458927e878155f6ddeb59c85e685b3645c32a1f9578d92",
+      "split": "Eval",
+      "evaluationSplit": "held-out",
+      "targetSpeakerCounts": [2, 3, 4],
+      "unsupportedTargetSpeakerCounts": [5],
+      "modalities": ["far-field-array", "synchronized-near-field-mixture"],
+      "sessionTargets": [
+        {"sessionId": "R8001_M8004", "speakerCount": 4},
+        {"sessionId": "R8003_M8001", "speakerCount": 4},
+        {"sessionId": "R8007_M8010", "speakerCount": 4},
+        {"sessionId": "R8007_M8011", "speakerCount": 4},
+        {"sessionId": "R8008_M8013", "speakerCount": 3},
+        {"sessionId": "R8009_M8018", "speakerCount": 2},
+        {"sessionId": "R8009_M8019", "speakerCount": 2},
+        {"sessionId": "R8009_M8020", "speakerCount": 2}
+      ],
+      "archiveUrl": "https://speech-lab-share-data.oss-cn-shanghai.aliyuncs.com/AliMeeting/openlr/Eval_Ali.tar.gz",
+      "archiveBytes": 3673718355,
+      "archiveSha256": "dc47343b2474b5ebcf458927e878155f6ddeb59c85e685b3645c32a1f9578d92",
+      "archiveCrc64": "4EFA761200D2FCC0",
+      "extractedRootName": "Eval_Ali",
+      "extractedFileCount": 66,
+      "extractedBytes": 5385868607,
+      "extractedTreeSha256": "3e39ace217a8a7c98707d9742e55332cbdb9349ea47ef18e05f4d60e9a12b629",
+      "officialHomepage": "https://www.openslr.org/119/",
+      "license": "cc-by-sa-4.0",
+      "licenseDecision": "CC BY-SA 4.0 is applied from the official OpenSLR 119 data page; this is stricter than the conflicting Apache-2.0 metadata on the ModelScope mirror.",
+      "attribution": "AliMeeting Mandarin multi-channel meeting corpus, Alibaba Group and AISHELL Foundation; OpenSLR SLR119; CC BY-SA 4.0.",
+      "officialBaselineRepository": "https://github.com/yufan-aslp/AliMeeting",
+      "officialBaselineRevision": "692a034fd510f1720f547c2c91e0fbadc9c24bf2",
+      "windowSelection": "textgrid-component-shortest-coverage-v1",
+      "minimumAnnotatedOverlapSeconds": 0.5,
+      "selectionUsesModelScores": false
     }
   ]
 }

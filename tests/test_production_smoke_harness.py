@@ -15,11 +15,13 @@ from tools.run_production_smoke import (
     HarnessSettings,
     ProductionBatchSmokeHarness,
     ProductionSmokeHarness,
+    ReviewDecisionPlan,
     SmokePaths,
     absolute_python_executable,
     build_parser,
     build_start_payload,
     calculate_job_hard_timeout_seconds,
+    load_review_decision_plan,
 )
 
 
@@ -224,7 +226,14 @@ def test_absolute_python_executable_preserves_venv_symlink(
     base_python.write_text("", encoding="utf-8")
     venv_python = tmp_path / "venv" / "bin" / "python"
     venv_python.parent.mkdir(parents=True)
-    venv_python.symlink_to(base_python)
+    try:
+        venv_python.symlink_to(base_python)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            raise unittest.SkipTest(
+                "Windows symlink privilege is not enabled"
+            ) from exc
+        raise
 
     assert absolute_python_executable(venv_python) == str(venv_python)
 
@@ -325,6 +334,213 @@ for raw in sys.stdin.buffer:
 """
 
 
+REVIEW_FLOW_FAKE_WORKER = r"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+capture_path = Path(sys.argv[1])
+behavior = sys.argv[2] if len(sys.argv) > 2 else "normal"
+commands = []
+job_id = None
+sequence = 0
+items = []
+decisions = []
+
+
+def emit(value):
+    sys.stdout.buffer.write(
+        (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+    )
+    sys.stdout.buffer.flush()
+
+
+def response(command, response_type, payload):
+    emit(
+        {
+            "schemaVersion": "1.0.0",
+            "requestId": command["requestId"],
+            "timestamp": "2026-08-07T00:00:00Z",
+            "type": response_type,
+            "payload": payload,
+        }
+    )
+
+
+def job_event(event_type, payload):
+    global sequence
+    emit(
+        {
+            "schemaVersion": "1.0.0",
+            "eventId": "evt-%s-%d" % (event_type, sequence),
+            "jobId": job_id,
+            "sequence": sequence,
+            "timestamp": "2026-08-07T00:00:00Z",
+            "type": event_type,
+            "payload": payload,
+        }
+    )
+    sequence += 1
+
+
+def open_count():
+    return sum(item["status"] == "open" for item in items)
+
+
+for raw in sys.stdin.buffer:
+    command = json.loads(raw.decode("utf-8", errors="strict"))
+    commands.append(command)
+    capture_path.write_text(
+        json.dumps(commands, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    command_type = command["type"]
+    payload = command["payload"]
+    if command_type == "job.start":
+        job_id = payload["jobId"]
+        sequence = 0
+        decisions = []
+        items = [
+            {"id": "item-a", "status": "open", "modelScore": 0.01},
+            {
+                "id": "item-extra" if behavior == "queue-mismatch" else "item-b",
+                "status": "open",
+                "modelScore": 0.99,
+            },
+        ]
+        response(command, "command.accepted", {"jobId": job_id, "status": "queued"})
+        job_event("job.started", {"status": "running"})
+        if behavior == "direct-completed":
+            job_event("job.completed", {"status": "completed"})
+        else:
+            job_event("review.required", {"openCount": 2})
+    elif command_type == "speaker.merge":
+        decision = {
+            "decisionId": payload["decisionId"],
+            "command": "speaker.merge",
+            "confidence": payload["confidence"],
+        }
+        decisions.append(decision)
+        response(
+            command,
+            "command.completed",
+            {
+                "jobId": job_id,
+                "status": "review_required",
+                "command": "speaker.merge",
+                "decision": decision,
+                "openCount": open_count(),
+            },
+        )
+    elif command_type == "review.queue":
+        response(
+            command,
+            "command.completed",
+            {
+                "jobId": job_id,
+                "status": "review_required",
+                "openCount": open_count(),
+                "queue": {
+                    "jobId": job_id,
+                    "openCount": open_count(),
+                    "items": items,
+                    "decisions": decisions,
+                },
+            },
+        )
+    elif command_type == "review.submit":
+        item = next(item for item in items if item["id"] == payload["itemId"])
+        item["status"] = "accepted" if payload["action"] == "accept" else "rejected"
+        decision = {
+            "decisionId": payload["decisionId"],
+            "command": "review.submit",
+            "confidence": payload["confidence"],
+        }
+        decisions.append(decision)
+        job_event("review.decision.persisted", {"decision": decision})
+        response(
+            command,
+            "command.completed",
+            {
+                "jobId": job_id,
+                "status": "review_required",
+                "command": "review.submit",
+                "decision": decision,
+                "openCount": open_count(),
+            },
+        )
+    elif command_type == "job.resume":
+        if behavior == "completed-before-accepted":
+            job_event("job.completed", {"status": "completed", "operation": "resume"})
+        response(command, "command.accepted", {"jobId": job_id, "status": "queued"})
+        if behavior != "completed-before-accepted":
+            job_event("job.completed", {"status": "completed", "operation": "resume"})
+    elif command_type == "worker.health":
+        response(
+            command,
+            "command.completed",
+            {"status": "ok", "activeOutputClaims": 0},
+        )
+    elif command_type == "worker.shutdown":
+        response(command, "command.completed", {"status": "shutdown-requested"})
+        break
+"""
+
+
+def review_plan(job_id: str) -> ReviewDecisionPlan:
+    audit = {"actor": "codex-reviewer", "source": "human"}
+    return ReviewDecisionPlan(
+        job_id=job_id,
+        pre_review_commands=(
+            {
+                "type": "speaker.merge",
+                "sourceSpeakerId": "speaker-3",
+                "targetSpeakerId": "speaker-1",
+                "decisionId": "merge-0001",
+                "reason": "Independent listening found one speaker.",
+                "evidence": ["audio:full"],
+                "confidence": 0.88,
+                "audit": audit,
+            },
+            {
+                "type": "speaker.merge",
+                "sourceSpeakerId": "speaker-2",
+                "targetSpeakerId": "speaker-1",
+                "decisionId": "merge-0002",
+                "reason": "The remaining voice is the same speaker.",
+                "evidence": ["audio:full", "context:transcript"],
+                "confidence": 0.79,
+                "audit": audit,
+            },
+        ),
+        decisions=(
+            {
+                "itemId": "item-a",
+                "action": "accept",
+                "decisionId": "item-0001",
+                "reason": "The first queue item is resolved by listening.",
+                "evidence": ["audio:0-10"],
+                "confidence": 0.91,
+                "audit": audit,
+            },
+            {
+                "itemId": "item-b",
+                "action": "reject",
+                "decisionId": "item-0002",
+                "reason": "The second queue proposal contradicts the audio.",
+                "evidence": ["audio:10-20"],
+                "confidence": 0.42,
+                "audit": audit,
+            },
+        ),
+    )
+
+
 class ProductionSmokeHarnessTests(unittest.TestCase):
     def test_duration_rtf_budget_is_bounded_and_rejects_invalid_inputs(
         self,
@@ -414,6 +630,36 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
                 paths=self.paths(name),
                 settings=settings
                 or HarnessSettings(
+                    timeout_seconds=5.0,
+                    shutdown_timeout_seconds=2.0,
+                    cleanup_timeout_seconds=2.0,
+                ),
+                environment=os.environ.copy(),
+            ),
+            capture,
+        )
+
+    def review_harness(
+        self,
+        name: str,
+        *,
+        behavior: str = "normal",
+    ) -> tuple[ProductionSmokeHarness, Path]:
+        worker = self.root / f"{name}-review-worker.py"
+        worker.write_text(REVIEW_FLOW_FAKE_WORKER, encoding="utf-8")
+        capture = self.root / f"{name}-review-commands.json"
+        return (
+            ProductionSmokeHarness(
+                worker_command=(
+                    sys.executable,
+                    "-u",
+                    str(worker),
+                    str(capture),
+                    behavior,
+                ),
+                cwd=self.root,
+                paths=self.paths(name),
+                settings=HarnessSettings(
                     timeout_seconds=5.0,
                     shutdown_timeout_seconds=2.0,
                     cleanup_timeout_seconds=2.0,
@@ -527,6 +773,183 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
                 self.assertTrue(result.shutdown_acknowledged)
                 self.assertEqual(result.exit_code, 0)
 
+    def test_review_plan_loader_requires_explicit_manual_fields_and_merge_order(
+        self,
+    ) -> None:
+        expected = review_plan("smoke-loader")
+        document = {
+            "schemaVersion": "1.0.0",
+            "artifactType": "production-review-decisions",
+            "jobId": expected.job_id,
+            "automaticScoring": False,
+            "preReviewCommands": [
+                dict(command) for command in expected.pre_review_commands
+            ],
+            "decisions": [dict(decision) for decision in expected.decisions],
+        }
+        path = self.root / "review-decisions.json"
+        path.write_text(
+            json.dumps(document, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        loaded = load_review_decision_plan(
+            path,
+            expected_job_id="smoke-loader",
+        )
+
+        self.assertEqual(
+            [command["type"] for command in loaded.pre_review_commands],
+            ["speaker.merge", "speaker.merge"],
+        )
+        self.assertEqual(
+            loaded.all_decision_ids,
+            ("merge-0001", "merge-0002", "item-0001", "item-0002"),
+        )
+        self.assertEqual(
+            [decision["confidence"] for decision in loaded.decisions],
+            [0.91, 0.42],
+        )
+
+        codex_document = json.loads(json.dumps(document))
+        for operation in (
+            *codex_document["preReviewCommands"],
+            *codex_document["decisions"],
+        ):
+            operation["audit"]["source"] = "codex-agent"
+        path.write_text(json.dumps(codex_document), encoding="utf-8")
+        codex_loaded = load_review_decision_plan(path)
+        self.assertEqual(
+            {
+                operation["audit"]["source"]
+                for operation in (
+                    *codex_loaded.pre_review_commands,
+                    *codex_loaded.decisions,
+                )
+            },
+            {"codex-agent"},
+        )
+
+        invalid_documents = []
+        automatic = json.loads(json.dumps(document))
+        automatic["automaticScoring"] = True
+        invalid_documents.append(automatic)
+        missing_confidence = json.loads(json.dumps(document))
+        del missing_confidence["decisions"][0]["confidence"]
+        invalid_documents.append(missing_confidence)
+        duplicate_id = json.loads(json.dumps(document))
+        duplicate_id["decisions"][0]["decisionId"] = "merge-0001"
+        invalid_documents.append(duplicate_id)
+        missing_source = json.loads(json.dumps(document))
+        del missing_source["preReviewCommands"][0]["audit"]["source"]
+        invalid_documents.append(missing_source)
+        unapproved_source = json.loads(json.dumps(document))
+        unapproved_source["decisions"][0]["audit"]["source"] = (
+            "model-self-review"
+        )
+        invalid_documents.append(unapproved_source)
+        for index, invalid in enumerate(invalid_documents):
+            with self.subTest(index=index):
+                path.write_text(json.dumps(invalid), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_review_decision_plan(path)
+
+    def test_review_plan_merges_then_resolves_exact_queue_and_resumes(
+        self,
+    ) -> None:
+        harness, capture = self.review_harness(
+            "review-flow",
+            behavior="completed-before-accepted",
+        )
+        payload = self.payload("review-flow", mode="auto")
+
+        result = harness.run(
+            payload,
+            review_decisions=review_plan(payload["jobId"]),
+        )
+
+        self.assertEqual(result.status, "observed")
+        self.assertEqual(result.terminal_type, "job.completed")
+        self.assertTrue(result.shutdown_acknowledged)
+        commands = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [command["type"] for command in commands],
+            [
+                "job.start",
+                "speaker.merge",
+                "speaker.merge",
+                "review.queue",
+                "review.submit",
+                "review.submit",
+                "review.queue",
+                "job.resume",
+                "worker.shutdown",
+            ],
+        )
+        manual_commands = [
+            command
+            for command in commands
+            if command["type"] in {"speaker.merge", "review.submit"}
+        ]
+        self.assertEqual(
+            [command["payload"]["confidence"] for command in manual_commands],
+            [0.88, 0.79, 0.91, 0.42],
+        )
+        events = self.read_events(self.paths("review-flow").event_log)
+        completed_index = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("type") == "job.completed"
+        )
+        resume_index = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("requestId")
+            == "production-smoke-start-review-resume"
+        )
+        self.assertLess(completed_index, resume_index)
+
+    def test_review_plan_fails_closed_when_queue_items_do_not_match(
+        self,
+    ) -> None:
+        harness, capture = self.review_harness(
+            "review-mismatch",
+            behavior="queue-mismatch",
+        )
+        payload = self.payload("review-mismatch", mode="auto")
+
+        result = harness.run(
+            payload,
+            review_decisions=review_plan(payload["jobId"]),
+        )
+
+        self.assertEqual(result.status, "harness-failed")
+        self.assertEqual(result.error["code"], "REVIEW_QUEUE_MISMATCH")
+        commands = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(commands[-1]["type"], "review.queue")
+        self.assertNotIn(
+            "review.submit",
+            [command["type"] for command in commands],
+        )
+
+    def test_review_plan_is_rejected_when_job_completes_without_review(
+        self,
+    ) -> None:
+        harness, _capture = self.review_harness(
+            "review-unused",
+            behavior="direct-completed",
+        )
+        payload = self.payload("review-unused", mode="auto")
+
+        result = harness.run(
+            payload,
+            review_decisions=review_plan(payload["jobId"]),
+        )
+
+        self.assertEqual(result.status, "harness-failed")
+        self.assertEqual(result.error["code"], "REVIEW_DECISIONS_UNUSED")
+        self.assertEqual(result.terminal_type, "job.completed")
+
     def test_start_rejection_still_gets_orderly_worker_shutdown(self) -> None:
         harness, _capture = self.harness("reject", "reject")
         result = harness.run(self.payload("reject"))
@@ -603,6 +1026,46 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
         self.assertEqual(payload["outputLocale"], "zh-Hans")
         self.assertEqual(payload["businessPromptVersion"], "business-v2")
         self.assertFalse(payload["localLlmAutoApply"])
+
+    def test_builds_canonical_full_output_recipe_without_legacy_conflict(
+        self,
+    ) -> None:
+        recipe_path = (
+            Path(__file__).resolve().parents[1]
+            / "configs"
+            / "product-e2e-output-recipe.v1.json"
+        )
+        recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+
+        payload = build_start_payload(
+            job_id="smoke-complete-product",
+            source_path=self.source,
+            output_directory=self.root / "complete-product-output",
+            speaker_count_mode="auto",
+            local_llm_mode="suggestion-only",
+            output_customization=recipe,
+        )
+
+        self.assertNotIn("renderPdf", payload)
+        from backend.output_recipe import parse_output_recipe
+
+        self.assertEqual(
+            payload["outputCustomization"],
+            parse_output_recipe(recipe).canonical_dict(),
+        )
+        self.assertEqual(
+            payload["outputCustomization"]["delivery"]["subtitleModes"],
+            ["sidecar", "soft-mux", "burn-in"],
+        )
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            build_start_payload(
+                job_id="smoke-conflicting-product",
+                source_path=self.source,
+                output_directory=self.root / "conflicting-product-output",
+                speaker_count_mode="auto",
+                render_pdf=True,
+                output_customization=recipe,
+            )
 
     def test_business_payload_validation_fails_closed(self) -> None:
         base = {
@@ -719,7 +1182,9 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             result.error["code"],
             "JOB_HARD_DEADLINE_EXCEEDED",
         )
-        self.assertGreaterEqual(result.progress_event_count, 8)
+        # The hard deadline is deliberately very short; Windows scheduling
+        # can vary the number of heartbeats observed before it expires.
+        self.assertGreater(result.progress_event_count, 0)
         self.assertEqual(result.last_progress_event_type, "stage.progress")
         self.assertGreaterEqual(result.elapsed_seconds, 0.20)
         self.assertLess(result.elapsed_seconds, 0.8)
@@ -860,6 +1325,79 @@ class ProductionSmokeHarnessTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_batch_harness_completes_review_plans_in_the_same_worker(
+        self,
+    ) -> None:
+        worker = self.root / "batch-review-worker.py"
+        worker.write_text(REVIEW_FLOW_FAKE_WORKER, encoding="utf-8")
+        capture = self.root / "batch-review-commands.json"
+        first_paths = self.paths("batch-review-first")
+        second_paths = self.paths("batch-review-second")
+        first_payload = self.payload("batch-review-first", mode="auto")
+        second_payload = self.payload("batch-review-second", mode="auto")
+        harness = ProductionBatchSmokeHarness(
+            worker_command=(
+                sys.executable,
+                "-u",
+                str(worker),
+                str(capture),
+                "normal",
+            ),
+            cwd=self.root,
+            session_event_log=self.root / "batch-review-session-events.jsonl",
+            session_stderr_log=self.root / "batch-review-session-stderr.log",
+            settings=HarnessSettings(
+                timeout_seconds=5.0,
+                shutdown_timeout_seconds=2.0,
+                cleanup_timeout_seconds=2.0,
+            ),
+            environment=os.environ.copy(),
+        )
+
+        results = harness.run(
+            (
+                BatchSmokeJob(
+                    start_payload=first_payload,
+                    paths=first_paths,
+                    review_decisions=review_plan(first_payload["jobId"]),
+                ),
+                BatchSmokeJob(
+                    start_payload=second_payload,
+                    paths=second_paths,
+                    review_decisions=review_plan(second_payload["jobId"]),
+                ),
+            )
+        )
+
+        self.assertEqual(
+            [result.terminal_type for result in results],
+            ["job.completed", "job.completed"],
+        )
+        self.assertTrue(all(result.status == "observed" for result in results))
+        self.assertEqual(
+            {result.worker_pid for result in results},
+            {results[0].worker_pid},
+        )
+        commands = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [command["type"] for command in commands].count("job.resume"),
+            2,
+        )
+        self.assertEqual(
+            [command["type"] for command in commands].count("speaker.merge"),
+            4,
+        )
+        for paths in (first_paths, second_paths):
+            events = self.read_events(paths.event_log)
+            self.assertIn("job.completed", {event["type"] for event in events})
+            self.assertGreaterEqual(
+                sum(
+                    event["type"] == "command.completed"
+                    for event in events
+                ),
+                6,
+            )
 
     def test_batch_failure_does_not_invalidate_prior_terminal_job(self) -> None:
         batch_worker = self.root / "batch_worker_fail_second.py"

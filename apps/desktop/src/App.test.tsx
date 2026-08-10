@@ -149,14 +149,14 @@ describe("MediaTranscribe Studio desktop scaffold", () => {
       .closest("section");
     expect(strategyPanel).not.toBeNull();
     expect(
-      within(strategyPanel as HTMLElement).getByText("qwen3.5:9b"),
+      within(strategyPanel as HTMLElement).getByText("qwen3.5:27b-q4_K_M"),
     ).toBeInTheDocument();
     expect(
       within(strategyPanel as HTMLElement).getByText("suggestion_only"),
     ).toBeInTheDocument();
     expect(
       within(strategyPanel as HTMLElement).getByText(
-        /qwen3\.5:9b is required for fail-closed semantic arbitration/i,
+        /qwen3\.5:27b-q4_K_M won the current multilingual semantic challenge/i,
       ),
     ).toBeInTheDocument();
 

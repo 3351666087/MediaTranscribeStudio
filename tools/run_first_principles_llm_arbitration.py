@@ -732,7 +732,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--vad", type=Path, required=True)
     parser.add_argument("--diarization", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--model", default="qwen3.5:9b")
+    parser.add_argument("--model", default="qwen3.5:27b-q4_K_M")
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--maximum", type=int)
     return parser

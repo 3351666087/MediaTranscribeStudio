@@ -17,6 +17,10 @@
   ],
   "ollamaModels": [
     {
+      "name": "qwen3.5:27b-q4_K_M",
+      "status": "active"
+    },
+    {
       "name": "qwen3.5:9b",
       "status": "active"
     },

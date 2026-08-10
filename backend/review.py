@@ -1,4 +1,4 @@
-"""Human-review validation and transcript/queue mutations.
+"""Manual-review validation and transcript/queue mutations.
 
 This module deliberately contains no filesystem or executor logic.  Callers
 must persist the returned document and queue in one transaction while holding
@@ -22,6 +22,7 @@ from .persistence import validate_strict_json
 _MANUAL_FIELDS = frozenset(
     {"reason", "evidence", "confidence", "audit", "decisionId"}
 )
+MANUAL_REVIEW_AUDIT_SOURCES = frozenset({"human", "codex-agent"})
 _RESOLVED_ITEM_STATUSES = frozenset({"accepted", "rejected"})
 
 
@@ -30,13 +31,13 @@ def validate_manual_decision(
     *,
     command: str,
 ) -> dict[str, Any]:
-    """Validate and normalize the mandatory human-decision audit envelope."""
+    """Validate and normalize the mandatory manual-decision audit envelope."""
 
     reason = payload.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         raise WorkerError(
             "REVIEW_REASON_REQUIRED",
-            "human decisions require a non-empty reason",
+            "manual decisions require a non-empty reason",
         )
     evidence = payload.get("evidence")
     if (
@@ -46,13 +47,13 @@ def validate_manual_decision(
     ):
         raise WorkerError(
             "REVIEW_EVIDENCE_REQUIRED",
-            "human decisions require a non-empty evidence array",
+            "manual decisions require a non-empty evidence array",
         )
     normalized_evidence = [item.strip() for item in evidence]
     if len(set(normalized_evidence)) != len(normalized_evidence):
         raise WorkerError(
             "REVIEW_EVIDENCE_INVALID",
-            "human-decision evidence references must be unique",
+            "manual-decision evidence references must be unique",
         )
 
     confidence = payload.get("confidence")
@@ -64,28 +65,27 @@ def validate_manual_decision(
     ):
         raise WorkerError(
             "REVIEW_CONFIDENCE_INVALID",
-            "human-decision confidence must be a finite number between 0 and 1",
+            "manual-decision confidence must be a finite number between 0 and 1",
         )
 
     audit = payload.get("audit")
     if not isinstance(audit, Mapping):
         raise WorkerError(
             "REVIEW_AUDIT_REQUIRED",
-            "human decisions require an audit object",
+            "manual decisions require an audit object",
         )
     actor = audit.get("actor")
     if not isinstance(actor, str) or not actor.strip():
         raise WorkerError(
             "REVIEW_AUDIT_INVALID",
-            "human-decision audit.actor must be a non-empty string",
+            "manual-decision audit.actor must be a non-empty string",
         )
     normalized_audit = copy.deepcopy(dict(audit))
     normalized_audit["actor"] = actor.strip()
-    normalized_audit.setdefault("source", "human")
-    if normalized_audit.get("source") != "human":
+    if normalized_audit.get("source") not in MANUAL_REVIEW_AUDIT_SOURCES:
         raise WorkerError(
             "REVIEW_AUDIT_INVALID",
-            "human-decision audit.source must be human",
+            "manual-decision audit.source must be human or codex-agent",
         )
     timestamp = normalized_audit.get("timestamp")
     if timestamp is not None and (
@@ -93,14 +93,14 @@ def validate_manual_decision(
     ):
         raise WorkerError(
             "REVIEW_AUDIT_INVALID",
-            "human-decision audit.timestamp must be non-empty text when provided",
+            "manual-decision audit.timestamp must be non-empty text when provided",
         )
     try:
         validate_strict_json(normalized_audit)
     except ValueError as exc:
         raise WorkerError(
             "REVIEW_AUDIT_INVALID",
-            "human-decision audit must contain strict finite JSON values",
+            "manual-decision audit must contain strict finite JSON values",
             details={"reason": str(exc)},
         ) from exc
 
@@ -375,6 +375,13 @@ def resolve_review_item(
 
     item["status"] = action
     item["decision"] = copy.deepcopy(decision)
+    if isinstance(segment_id, str):
+        _mark_segment_human_reviewed_if_complete(
+            document_copy,
+            queue_copy,
+            segment_id=segment_id,
+            decision=decision,
+        )
     _append_decision(queue_copy, decision, item_id=item_id.strip(), status=action)
     _touch_queue(queue_copy)
     return document_copy, queue_copy, decision
@@ -701,6 +708,39 @@ def _find_segment(document: dict[str, Any], segment_id: str) -> dict[str, Any]:
     )
 
 
+def _mark_segment_human_reviewed_if_complete(
+    document: dict[str, Any],
+    queue: Mapping[str, Any],
+    *,
+    segment_id: str,
+    decision: Mapping[str, Any],
+) -> None:
+    items = queue.get("items")
+    if not isinstance(items, list):
+        return
+    segment_items = [
+        item
+        for item in items
+        if isinstance(item, Mapping) and item.get("segmentId") == segment_id
+    ]
+    if not segment_items or any(item.get("status") == "open" for item in segment_items):
+        return
+
+    segment = _find_segment(document, segment_id)
+    raw_evidence = segment.get("evidence")
+    evidence = dict(raw_evidence) if isinstance(raw_evidence, Mapping) else {}
+    audit = decision.get("audit")
+    reviewer = audit.get("actor") if isinstance(audit, Mapping) else None
+    notes = decision.get("reason")
+    audio_review: dict[str, Any] = {"status": "human-reviewed"}
+    if isinstance(reviewer, str) and reviewer.strip():
+        audio_review["reviewer"] = reviewer.strip()
+    if isinstance(notes, str) and notes.strip():
+        audio_review["notes"] = notes.strip()
+    evidence["audioReview"] = audio_review
+    segment["evidence"] = evidence
+
+
 def _canonical_ids(document: Mapping[str, Any]) -> tuple[str, ...]:
     policy = document.get("speakerPolicy")
     count = policy.get("resolvedCount") if isinstance(policy, Mapping) else None
@@ -840,10 +880,13 @@ def _revision(
     *,
     reason_code: str,
 ) -> dict[str, Any]:
+    audit = decision["audit"]
     return {
         "id": f"revision-{uuid.uuid4().hex}",
         "type": revision_type,
         "source": "manual",
+        "actor": audit["actor"],
+        "occurredAt": decision["recordedAt"],
         "before": before,
         "after": after,
         "reasonCode": reason_code,

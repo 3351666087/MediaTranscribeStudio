@@ -1,0 +1,141 @@
+{
+  "schemaVersion": "1.0.0",
+  "catalogId": "mediatranscribestudio.llm-providers",
+  "defaults": {
+    "semantic": {
+      "provider": "ollama-loopback",
+      "model": "qwen3.5:27b-q4_K_M",
+      "endpoint": "http://127.0.0.1:11434",
+      "networkPolicy": "loopback-only",
+      "modelDigest": "sha256:7653528ba5cba4dd8e19da24aaddc7f4d0b5ecd93571c0825dfd4137958ec06e"
+    },
+    "speakerVerifier": {
+      "modelId": "eres2netv2-w24s4ep4",
+      "displayName": "ERes2NetV2 Wide (W24S4EP4)",
+      "sourceProvider": "modelscope",
+      "sourceRepository": "iic/speech_eres2netv2_w24s4ep4",
+      "deploymentPath": "models/modelscope/eres2netv2w24s4ep4"
+    }
+  },
+  "providers": [
+    {
+      "id": "ollama-loopback",
+      "displayName": "Ollama (local)",
+      "protocol": "ollama",
+      "endpoint": "http://127.0.0.1:11434",
+      "networkPolicy": "loopback-only",
+      "apiKeyEnvironmentVariable": null,
+      "downloadCommand": "ollama pull <model>",
+      "documentation": "https://ollama.com/library"
+    },
+    {
+      "id": "huggingface-router",
+      "displayName": "Hugging Face Inference Providers",
+      "protocol": "openai-compatible",
+      "endpoint": "https://router.huggingface.co/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "HF_TOKEN",
+      "downloadCommand": "hf download <repo> --revision <commit> --local-dir <destination>",
+      "documentation": "https://huggingface.co/inference-api"
+    },
+    {
+      "id": "openai",
+      "displayName": "OpenAI",
+      "protocol": "openai-compatible",
+      "endpoint": "https://api.openai.com/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "OPENAI_API_KEY",
+      "documentation": "https://platform.openai.com/docs/api-reference"
+    },
+    {
+      "id": "azure-openai",
+      "displayName": "Azure OpenAI",
+      "protocol": "openai-compatible",
+      "endpoint": "https://<resource>.openai.azure.com/openai/deployments/<deployment>",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "AZURE_OPENAI_API_KEY",
+      "documentation": "https://learn.microsoft.com/azure/ai-services/openai/"
+    },
+    {
+      "id": "anthropic",
+      "displayName": "Anthropic Claude",
+      "protocol": "anthropic",
+      "endpoint": "https://api.anthropic.com",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "ANTHROPIC_API_KEY",
+      "documentation": "https://docs.anthropic.com/en/api"
+    },
+    {
+      "id": "google-gemini",
+      "displayName": "Google Gemini",
+      "protocol": "google-gemini",
+      "endpoint": "https://generativelanguage.googleapis.com",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "GEMINI_API_KEY",
+      "documentation": "https://ai.google.dev/gemini-api/docs"
+    },
+    {
+      "id": "qwen-dashscope",
+      "displayName": "Alibaba Qwen (DashScope)",
+      "protocol": "openai-compatible",
+      "endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "DASHSCOPE_API_KEY",
+      "documentation": "https://help.aliyun.com/zh/model-studio/"
+    },
+    {
+      "id": "deepseek",
+      "displayName": "DeepSeek",
+      "protocol": "openai-compatible",
+      "endpoint": "https://api.deepseek.com/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "DEEPSEEK_API_KEY",
+      "documentation": "https://api-docs.deepseek.com/"
+    },
+    {
+      "id": "moonshot",
+      "displayName": "Moonshot / Kimi",
+      "protocol": "openai-compatible",
+      "endpoint": "https://api.moonshot.cn/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "MOONSHOT_API_KEY",
+      "documentation": "https://platform.moonshot.cn/docs"
+    },
+    {
+      "id": "zhipu",
+      "displayName": "Zhipu GLM",
+      "protocol": "openai-compatible",
+      "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "ZHIPUAI_API_KEY",
+      "documentation": "https://open.bigmodel.cn/dev/api"
+    },
+    {
+      "id": "minimax",
+      "displayName": "MiniMax",
+      "protocol": "openai-compatible",
+      "endpoint": "https://api.minimax.io/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "MINIMAX_API_KEY",
+      "documentation": "https://platform.minimaxi.com/document"
+    },
+    {
+      "id": "siliconflow",
+      "displayName": "SiliconFlow",
+      "protocol": "openai-compatible",
+      "endpoint": "https://api.siliconflow.cn/v1",
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": "SILICONFLOW_API_KEY",
+      "documentation": "https://docs.siliconflow.cn/"
+    },
+    {
+      "id": "custom-openai-compatible",
+      "displayName": "Custom OpenAI-compatible / relay",
+      "protocol": "openai-compatible",
+      "endpoint": null,
+      "networkPolicy": "remote-explicit",
+      "apiKeyEnvironmentVariable": null,
+      "documentation": "https://github.com/3351666087/MediaTranscribeStudio"
+    }
+  ]
+}

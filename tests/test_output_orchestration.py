@@ -359,6 +359,58 @@ def test_subtitle_generation_records_source_bound_timing_fallback(
     assert evidence["withinSourceDuration"] is True
 
 
+def test_subtitle_generation_relaxes_minimum_for_short_source_segments(
+    tmp_path: Path,
+) -> None:
+    source, output, probe, artifact = _artifact(tmp_path)
+    plan = compile_output_execution_plan(
+        default_output_customization(),
+        source_path=source,
+        output_directory=output,
+        media_probe=probe,
+        media_probe_artifact=artifact,
+        language="zh-CN",
+        speaker_count=1,
+        generated_date="2026-08-09",
+    )
+    document = _transcript()
+    document["source"]["durationMs"] = 2901
+    document["segments"] = [
+        {
+            "startMs": 620,
+            "endMs": 1360,
+            "speakerId": "speaker-1",
+            "rawText": "你好",
+        },
+        {
+            "startMs": 1360,
+            "endMs": 2126,
+            "speakerId": "speaker-1",
+            "rawText": "请冻结我的",
+        },
+        {
+            "startMs": 2126,
+            "endMs": 2880,
+            "speakerId": "speaker-1",
+            "rawText": "卡",
+        },
+    ]
+
+    prepared = prepare_subtitle_outputs(plan, document)
+
+    assert prepared.arrangement.cues[-1].end_ms == 2880
+    assert "".join(cue.source_text for cue in prepared.arrangement.cues) == (
+        "你好请冻结我的卡"
+    )
+    evidence = prepared.timing_policy_evidence
+    assert evidence["sourceBoundFallbackApplied"] is True
+    assert evidence["configuredMinCueMs"] == plan.cue_policy.min_cue_ms == 800
+    assert evidence["effectiveMinCueMs"] == 740
+    assert evidence["effectiveGapMs"] == 0
+    assert evidence["configuredPolicyQaPassed"] is False
+    assert evidence["withinSourceDuration"] is True
+
+
 def test_speaker_color_override_wins_for_stable_id_not_display_name(
     tmp_path: Path,
 ) -> None:
@@ -521,6 +573,11 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
                         "confidence": 0.0,
                         "confidenceAvailable": False,
                     },
+                    "audioReview": {
+                        "status": "human-reviewed",
+                        "reviewer": "operator",
+                        "notes": "listened to the complete segment",
+                    },
                     "overlap": {
                         "canonicalSpeakerTurns": [
                             {
@@ -585,6 +642,11 @@ def test_java_pdf_adapter_receives_exact_planned_report_configuration(
         "modelRevision": "1.2.0",
         "confidence": 0.0,
         "confidenceAvailable": False,
+    }
+    assert captured_segments[0]["evidence"]["audioReview"] == {
+        "status": "human-reviewed",
+        "reviewer": "operator",
+        "notes": "listened to the complete segment",
     }
     assert captured_segments[0]["revisions"][0]["confidence"] == 0.8
     assert captured_segments[0]["revisions"][0]["evidenceRefs"] == [

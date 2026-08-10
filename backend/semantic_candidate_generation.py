@@ -11,6 +11,7 @@ from .persistence import canonical_json_sha256, validate_strict_json
 from .asr_evidence import validate_asr_candidate_set
 from .semantic_candidate_lattice import (
     extend_semantic_candidate_lattice,
+    semantic_candidate_payload_sha256,
     validate_semantic_candidate_lattice,
 )
 from .semantic_composition import (
@@ -550,6 +551,15 @@ class SemanticCandidateGenerationRegistry:
         supplements: list[dict[str, Any]] = []
         handled_requests: list[dict[str, Any]] = []
         unfulfilled_requests: list[dict[str, Any]] = []
+        matched_handler_count = 0
+        existing_payloads = {
+            str(group["groupId"]): {
+                str(candidate["payloadSha256"])
+                for candidate in group["candidates"]
+            }
+            for domain in validated_lattice["domains"]
+            for group in domain["groups"]
+        }
         for index, request in enumerate(requests):
             group_id = request["groupId"]
             request_kind = str(request["requestKind"])
@@ -557,6 +567,7 @@ class SemanticCandidateGenerationRegistry:
             if handler is None:
                 unfulfilled_requests.append(dict(request))
                 continue
+            matched_handler_count += 1
             if group_id is None:
                 raise _fail(
                     "domain-level candidate generation requires a domain "
@@ -581,16 +592,47 @@ class SemanticCandidateGenerationRegistry:
                 request=request,
                 field=f"generatorResults[{index}]",
             )
-            supplements.extend(generated)
-            handled_requests.append(dict(request))
-        if not supplements:
+            novel_supplements: list[dict[str, Any]] = []
+            known_payloads = set(existing_payloads[str(group_id)])
+            for supplement in generated:
+                novel_candidates: list[dict[str, Any]] = []
+                for candidate in supplement["candidates"]:
+                    payload_sha256 = semantic_candidate_payload_sha256(
+                        validated_lattice,
+                        domain=str(supplement["domain"]),
+                        group_id=str(supplement["groupId"]),
+                        scope_id=str(supplement["scopeId"]),
+                        payload=candidate["payload"],
+                    )
+                    if payload_sha256 in known_payloads:
+                        continue
+                    known_payloads.add(payload_sha256)
+                    novel_candidates.append(candidate)
+                if novel_candidates:
+                    novel_supplements.append(
+                        {
+                            **supplement,
+                            "candidates": novel_candidates,
+                        }
+                    )
+            if novel_supplements:
+                existing_payloads[str(group_id)] = known_payloads
+                supplements.extend(novel_supplements)
+                handled_requests.append(dict(request))
+            else:
+                unfulfilled_requests.append(dict(request))
+        if not supplements and matched_handler_count == 0:
             raise _fail(
                 "no registered candidate generator matches the arbitration requests"
             )
 
-        extended = extend_semantic_candidate_lattice(
-            validated_lattice,
-            supplemental_groups=supplements,
+        extended = (
+            extend_semantic_candidate_lattice(
+                validated_lattice,
+                supplemental_groups=supplements,
+            )
+            if supplements
+            else validated_lattice
         )
         fulfilled = _fulfilled_trace(
             handled_requests,
@@ -726,9 +768,13 @@ def validate_semantic_candidate_generation(
     supplements = value.get("supplementalGroups")
     if not isinstance(supplements, list):
         raise _fail("semantic candidate generation supplements are invalid")
-    extended = extend_semantic_candidate_lattice(
-        lattice,
-        supplemental_groups=supplements,
+    extended = (
+        extend_semantic_candidate_lattice(
+            lattice,
+            supplemental_groups=supplements,
+        )
+        if supplements
+        else lattice
     )
     validated_output = validate_semantic_candidate_lattice(
         value.get("outputLattice"),

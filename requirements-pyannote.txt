@@ -1,7 +1,11 @@
 # Isolated Pyannote 4 runtime. Keep this environment separate from
 # ClearVoice/Asteroid because their NumPy and torchmetrics bounds conflict.
+--extra-index-url https://download.pytorch.org/whl/cu128
+
 numpy==2.4.6
 pyannote-audio==4.0.4
 soundfile==0.12.1
-torch==2.10.0
-torchaudio==2.10.0
+torch==2.10.0+cu128 ; sys_platform == "win32"
+torchaudio==2.10.0+cu128 ; sys_platform == "win32"
+torch==2.10.0 ; sys_platform != "win32"
+torchaudio==2.10.0 ; sys_platform != "win32"

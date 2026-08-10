@@ -134,7 +134,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     with redirect_stdout(sys.stderr):
         try:
             config = _load_effective_config(args)
-            apply_offline_environment()
+            # The offline profile must hard-disable implicit model/network
+            # downloads.  A configurable-production profile may explicitly
+            # use an HTTPS provider, so applying the offline environment here
+            # would incorrectly make every remote request fail before it
+            # reaches the provider boundary.
+            if getattr(config, "offline", True):
+                apply_offline_environment()
             preflight = run_production_preflight(
                 config,
                 probe_runtime_imports=config.runtime.strict_startup_preflight,

@@ -623,7 +623,7 @@ describe("schema and visual contract", () => {
   it("parses the native recipe schema with exact fail-closed invariants", () => {
     const schemaPath = resolve(
       process.cwd(),
-      "../../contracts/output-customization.schema.json",
+      "../../contracts/output-recipe.schema.json",
     );
     const schemaText = readFileSync(schemaPath, "utf8");
     const schema = JSON.parse(schemaText) as {

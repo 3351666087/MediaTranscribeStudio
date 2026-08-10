@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-minds_en_us_034",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "speaker-count-confidence",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0001",
+      "reason": "The complete recording contains one speaker asking a continuous account question.",
+      "evidence": ["audio:full", "review-queue-sha256:2c8dde081f1e422a1e661056bf2887e562b602f424e2be7615de36bdc98c1c4b"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "speaker-count-range",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0002",
+      "reason": "Full-recording review rules out the wide automatic range and confirms one speaker.",
+      "evidence": ["audio:full"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.speaker-run-01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0003",
+      "reason": "The opening request is intelligible and assigned to the sole speaker.",
+      "evidence": ["audio:540-3020ms", "context:full-utterance"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.speaker-run-01:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0004",
+      "reason": "Manual review confirms the sole-speaker assignment for the opening request.",
+      "evidence": ["audio:540-3020ms", "speaker:single-continuous-voice"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000002.speaker-run-01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0005",
+      "reason": "The middle clause is intelligible and continues the same question from the same voice.",
+      "evidence": ["audio:3330-6820ms", "context:full-utterance"],
+      "confidence": 0.97,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000002.speaker-run-01:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0006",
+      "reason": "Manual review confirms the sole-speaker assignment for the middle clause.",
+      "evidence": ["audio:3330-6820ms", "speaker:single-continuous-voice"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000003.speaker-run-01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0007",
+      "reason": "The closing app question is intelligible and completes the same speaker's request.",
+      "evidence": ["audio:9230-13800ms", "context:full-utterance"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000003.speaker-run-01:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "minds-en-us-034-review-0008",
+      "reason": "Manual review confirms the sole-speaker assignment for the closing question.",
+      "evidence": ["audio:9230-13800ms", "speaker:single-continuous-voice"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    }
+  ]
+}

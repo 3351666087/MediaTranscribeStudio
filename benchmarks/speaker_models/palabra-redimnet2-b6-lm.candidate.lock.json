@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1.0.0",
+  "candidateKey": "palabra-redimnet2-b6-vox2-lm-v1.0.0",
+  "role": "research-challenger",
+  "model": {
+    "repository": "PalabraAI/redimnet2",
+    "tag": "v1.0.0",
+    "tagObject": "b318ea063fcfe63df7d8d4531c831d9116852808",
+    "commit": "5294667e806ac3b0f27abc301a114ef132b64b42",
+    "releaseId": 293004372,
+    "releasedAt": "2026-03-04T14:25:10Z",
+    "asset": "b6-vox2-lm.pt",
+    "assetUrl": "https://github.com/PalabraAI/redimnet2/releases/download/v1.0.0/b6-vox2-lm.pt",
+    "assetBytes": 50881144,
+    "assetSha256": "bc45f032099f3c9f0fb6ad756bca23daeeba456d00c515056e388824ef36f41b",
+    "modelConfigCanonicalSha256": "5167e54c405775ac15246f744c86e017cbbc84a187f536e10416919a069c49cb",
+    "stateDictTensorCount": 807,
+    "stateDictParameterCount": 12656496,
+    "embeddingDimensions": 192
+  },
+  "license": {
+    "declaredSpdx": "MIT",
+    "readmeDeclaresLicense": true,
+    "githubApiDetectsLicense": true,
+    "licenseTextFilePresentAtPinnedTag": false,
+    "productionPromotionAllowed": false,
+    "blocker": "The pinned tag declares MIT only in README.md and does not contain a standalone license text."
+  },
+  "evaluation": {
+    "sameFrozenTrialsRequired": true,
+    "developmentThresholdMustPrecedeHeldOut": true,
+    "heldOutThresholdFittingAllowed": false,
+    "publishedVoxCelebScoresAreDiscoveryOnly": true
+  }
+}

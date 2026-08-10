@@ -2092,6 +2092,11 @@ class ProductionRunnerTests(unittest.TestCase):
             model_path=self.eres_model,
             device="cpu",
             decision_margin=0.05,
+            deployment_slot="secondary-speaker-verification",
+            registry_model_id="eres2netv2-w24s4ep4",
+            manifest_model_key="eres2netV2LargeCandidate",
+            manifest_sha256="a" * 64,
+            adapter_id="modelscope-eres2netv2",
             pipeline_factory=factory,
         )
         candidate = ReviewCandidate(
@@ -2112,6 +2117,20 @@ class ProductionRunnerTests(unittest.TestCase):
         )
         cache_material = verifier.cache_material(candidate, segments)
         self.assertEqual(len(cache_material["references"]), 2)
+        self.assertEqual(
+            cache_material["deploymentSlot"],
+            "secondary-speaker-verification",
+        )
+        self.assertEqual(
+            cache_material["registryModelId"],
+            "eres2netv2-w24s4ep4",
+        )
+        self.assertEqual(
+            cache_material["manifestModelKey"],
+            "eres2netV2LargeCandidate",
+        )
+        self.assertEqual(cache_material["manifestSha256"], "sha256:" + "a" * 64)
+        self.assertEqual(cache_material["adapterId"], "modelscope-eres2netv2")
 
     def test_eres2netv2_mps_loads_through_cpu_then_moves_embedding_model(
         self,

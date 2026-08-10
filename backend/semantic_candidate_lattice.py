@@ -1528,6 +1528,42 @@ def validate_semantic_candidate_lattice(
     return rebuilt
 
 
+def semantic_candidate_payload_sha256(
+    lattice: Mapping[str, Any],
+    *,
+    domain: str,
+    group_id: str,
+    scope_id: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Normalize one bound payload and return its producer-independent identity."""
+
+    validated = validate_semantic_candidate_lattice(lattice)
+    if domain not in SEMANTIC_CANDIDATE_DOMAINS:
+        raise _fail("semantic candidate payload domain is unsupported")
+    group = next(
+        (
+            item
+            for lattice_domain in validated["domains"]
+            if lattice_domain["domain"] == domain
+            for item in lattice_domain["groups"]
+            if item["groupId"] == group_id
+        ),
+        None,
+    )
+    if group is None:
+        raise _fail("semantic candidate payload group is unknown")
+    if group["scopeId"] != scope_id:
+        raise _fail("semantic candidate payload is rebound to another scope")
+    normalized = _payload(
+        domain,
+        payload,
+        duration_ms=validated["binding"]["sourceDurationMs"],
+        field="semanticCandidatePayload",
+    )
+    return canonical_json_sha256(normalized)
+
+
 def extend_semantic_candidate_lattice(
     lattice: Mapping[str, Any],
     *,
@@ -1764,5 +1800,6 @@ __all__ = [
     "build_semantic_candidate_lattice_from_document",
     "compact_candidate_lattice_context",
     "extend_semantic_candidate_lattice",
+    "semantic_candidate_payload_sha256",
     "validate_semantic_candidate_lattice",
 ]

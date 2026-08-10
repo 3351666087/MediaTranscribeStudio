@@ -329,6 +329,8 @@ def test_local_llm_config_rejects_unbounded_or_invalid_generation_options() -> N
         LocalLLMConfig(context_tokens=1024, output_tokens=2048)
     with pytest.raises(ValueError, match="keep_alive"):
         LocalLLMConfig(keep_alive="forever")
+    with pytest.raises(ValueError, match="expected_model_digest"):
+        LocalLLMConfig(expected_model_digest="moving-tag")
 
 
 def test_ollama_provider_rejects_empty_message_content(

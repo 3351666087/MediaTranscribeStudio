@@ -254,6 +254,36 @@ class ReportDocumentAssemblerTests(unittest.TestCase):
         with self.assertRaisesRegex(ReportAssemblyError, "forbidden"):
             self.assemble(segments)
 
+    def test_human_audio_review_overrides_unavailable_low_asr_confidence(self) -> None:
+        segments = synthetic_segments()
+        segments[0]["confidence"] = 0.0
+        segments[0]["evidence"] = {
+            "asr": {
+                "confidence": 0.0,
+                "confidenceAvailable": False,
+            },
+            "audioReview": {
+                "status": "human-reviewed",
+                "reviewer": "operator",
+                "notes": "listened to the complete segment",
+            },
+        }
+
+        document = self.assemble(segments)
+        reviewed = document["segments"][0]
+
+        self.assertEqual(reviewed["reviewStatus"], "manually-reviewed")
+        self.assertEqual(reviewed["evidence"]["asr"]["confidence"], 0.0)
+        self.assertFalse(reviewed["evidence"]["asr"]["confidenceAvailable"])
+        self.assertEqual(
+            reviewed["evidence"]["audioReview"],
+            {
+                "status": "human-reviewed",
+                "reviewer": "operator",
+                "notes": "listened to the complete segment",
+            },
+        )
+
     def test_verified_pyannote_mapping_is_preserved_in_report_audit(self) -> None:
         segments = synthetic_segments(2)
         segments[0]["speaker"] = "legacy-2"

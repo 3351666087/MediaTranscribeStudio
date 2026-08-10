@@ -1,0 +1,181 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "semantic-major-regression-fixture",
+  "fixtureId": "minds-fr-fr-089-visible-speaker-continuity-v1",
+  "visibilityPolicy": {
+    "caseIdIsAuditOnly": true,
+    "referenceTranscriptVisibleToArbitrator": false,
+    "expectedDecisionVisibleToArbitrator": false,
+    "modelIdentityVisibleToArbitrator": false
+  },
+  "auditBinding": {
+    "caseId": "minds_fr_fr_089",
+    "caseAlias": "case-008",
+    "caseSha256": "da4acf6eccfb5f37b097e3e0d84e6ddd1596e1d09fb73aee6256c38d105a773f",
+    "blindReviewId": "multilingual22-four-model-codex-blind-review-v13-r2",
+    "blindReviewCanonicalSha256": "101de196eaa977a884322b3d909de356bbd69363fdd0e60946845e8a896b635a",
+    "defectAuditCanonicalSha256": "4b5424dacb01257a2eb14b97631c88534a6f298374da9b4fb24ef1347a4b5dd3",
+    "winnerFindingId": "42d9d9824187b7fb78c15d692d7b9e4748c84d803b855b65c3b41d214bd0705d",
+    "crossCandidateFindingId": "16d8ae772fb7780b15b4914911a88804b54577722df31a1c34c57eef0ef119c4"
+  },
+  "inputBinding": {
+    "sourceMediaSha256": "6d92987c097f80db78e249a78afd166f32160a4f0d0339d67beeb03c1f1b97cc",
+    "transcriptDocumentSha256": "14ed0d74c2411f6df78452d0928d82459585b070812692a7e8f4e66cc5e7abed",
+    "candidateLatticeSha256": "f12025533c7ad24d1a704cdfdd466929e9ccd8585ca84576d8221e65ceecd79c",
+    "sourceDurationMs": 13746
+  },
+  "visibleInput": {
+    "language": "fr-FR",
+    "speakerCount": 7,
+    "speakerIds": [
+      "speaker-1",
+      "speaker-2",
+      "speaker-3",
+      "speaker-4",
+      "speaker-5",
+      "speaker-6",
+      "speaker-7"
+    ],
+    "timelineSelectableCandidateCount": 3,
+    "speakerAssignmentSelectableCandidateCountPerSegment": 7,
+    "joinedText": "Bonjour je vous contactais pour savoir si la carte que j'ai dans votre banque pourrait marcher à l'étranger notamment si je pars en vacances ou si je pars faire des études",
+    "segments": [
+      {
+        "segmentId": "window-000001.cardinality-01",
+        "startMs": 2460,
+        "endMs": 3520,
+        "speakerId": "speaker-1",
+        "language": "fr-FR",
+        "text": "Bonjour je vous"
+      },
+      {
+        "segmentId": "window-000001.cardinality-02",
+        "startMs": 3520,
+        "endMs": 4640,
+        "speakerId": "speaker-2",
+        "language": "fr-FR",
+        "text": "contactais pour savoir"
+      },
+      {
+        "segmentId": "window-000001.cardinality-03",
+        "startMs": 4640,
+        "endMs": 5380,
+        "speakerId": "speaker-3",
+        "language": "fr-FR",
+        "text": "si la"
+      },
+      {
+        "segmentId": "window-000001.cardinality-04",
+        "startMs": 5380,
+        "endMs": 6460,
+        "speakerId": "speaker-2",
+        "language": "fr-FR",
+        "text": "carte que"
+      },
+      {
+        "segmentId": "window-000001.cardinality-05",
+        "startMs": 6460,
+        "endMs": 7400,
+        "speakerId": "speaker-3",
+        "language": "fr-FR",
+        "text": "j'ai"
+      },
+      {
+        "segmentId": "window-000001.cardinality-07",
+        "startMs": 8100,
+        "endMs": 9034,
+        "speakerId": "speaker-4",
+        "language": "fr-FR",
+        "text": "dans votre banque"
+      },
+      {
+        "segmentId": "window-000001.speaker-run-07",
+        "startMs": 9034,
+        "endMs": 10912,
+        "speakerId": "speaker-5",
+        "language": "fr-FR",
+        "text": "pourrait marcher à l'étranger notamment"
+      },
+      {
+        "segmentId": "window-000001.cardinality-10",
+        "startMs": 10912,
+        "endMs": 12220,
+        "speakerId": "speaker-6",
+        "language": "fr-FR",
+        "text": "si je pars en vacances ou si"
+      },
+      {
+        "segmentId": "window-000001.speaker-run-09",
+        "startMs": 12220,
+        "endMs": 13730,
+        "speakerId": "speaker-7",
+        "language": "fr-FR",
+        "text": "je pars faire des études"
+      }
+    ]
+  },
+  "blindReviewFinding": {
+    "severity": "major",
+    "category": "speaker-continuity",
+    "observation": "Language is stable and the visible syntax crosses every speaker boundary as one continuous statement.",
+    "reason": "Language-only work leaves the repeated speaker split untouched.",
+    "expectedRequests": [
+      {
+        "domain": "speaker-cardinality-timeline",
+        "scopeId": "media",
+        "requestKind": "timeline-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-01",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-02",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-03",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-04",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-05",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-07",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.speaker-run-07",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-10",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.speaker-run-09",
+        "requestKind": "speaker-assignment-challenger"
+      }
+    ],
+    "forbiddenSubstituteDomains": [
+      "language-span",
+      "asr-text",
+      "speech-disposition"
+    ]
+  },
+  "canonicalSha256": "76e4805dba8738663d6ca8464aba4b4ace86105fbd9e02d6ee361b0a4be7e055"
+}

@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -79,6 +79,144 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sha1(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _required_text(value: Mapping[str, Any], key: str, *, label: str) -> str:
+    raw = value.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        raise LongMediaSampleError(f"{label} requires {key}")
+    return raw.strip()
+
+
+def _source_reference_metadata(
+    reference_path: Path,
+    *,
+    source: Path,
+    source_sha256: str,
+    duration_seconds: float,
+) -> dict[str, Any]:
+    reference = _materialized_file(reference_path, label="source reference")
+    try:
+        value = json.loads(reference.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise LongMediaSampleError("source reference is not valid JSON") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("schemaVersion") != SCHEMA_VERSION
+        or value.get("artifactType") != "long-media-source-reference"
+    ):
+        raise LongMediaSampleError("source reference schema is invalid")
+    raw_source = value.get("source")
+    if not isinstance(raw_source, dict):
+        raise LongMediaSampleError("source reference has no source object")
+    if raw_source.get("sha256") != source_sha256:
+        raise LongMediaSampleError("source reference SHA-256 does not match media")
+    if raw_source.get("bytes") != source.stat().st_size:
+        raise LongMediaSampleError("source reference byte count does not match media")
+    declared_duration = raw_source.get("durationSeconds")
+    if (
+        not isinstance(declared_duration, (int, float))
+        or isinstance(declared_duration, bool)
+        or abs(float(declared_duration) - duration_seconds) > 0.25
+    ):
+        raise LongMediaSampleError("source reference duration does not match media")
+    declared_sha1 = raw_source.get("sha1")
+    if isinstance(declared_sha1, str) and declared_sha1 != _sha1(source):
+        raise LongMediaSampleError("source reference SHA-1 does not match media")
+
+    dataset = _required_text(raw_source, "dataset", label="source reference")
+    revision = _required_text(raw_source, "revision", label="source reference")
+    provider = _required_text(raw_source, "provider", label="source reference")
+    source_url = _required_text(raw_source, "sourceUrl", label="source reference")
+    description_url = _required_text(
+        raw_source,
+        "descriptionUrl",
+        label="source reference",
+    )
+    if not source_url.startswith("https://") or not description_url.startswith(
+        "https://"
+    ):
+        raise LongMediaSampleError("source reference URLs must use HTTPS")
+    if raw_source.get("recordingType") != "real-recording":
+        raise LongMediaSampleError("source reference must describe a real recording")
+    speech_nature = _required_text(
+        raw_source,
+        "speechNature",
+        label="source reference",
+    )
+    language_tags = raw_source.get("languageTags")
+    if not isinstance(language_tags, list) or not language_tags or any(
+        not isinstance(item, str) or not item for item in language_tags
+    ):
+        raise LongMediaSampleError("source reference languageTags are invalid")
+    region = _required_text(raw_source, "region", label="source reference")
+
+    immutable = raw_source.get("immutableEvidence")
+    if not isinstance(immutable, dict):
+        raise LongMediaSampleError("source reference immutable evidence is missing")
+    page_revision = immutable.get("pageRevisionId")
+    etag = immutable.get("etag")
+    if not (
+        (isinstance(page_revision, int) and not isinstance(page_revision, bool))
+        or (isinstance(etag, str) and bool(etag.strip()))
+    ):
+        raise LongMediaSampleError(
+            "source reference requires an immutable revision or ETag"
+        )
+
+    license_value = raw_source.get("license")
+    if not isinstance(license_value, dict):
+        raise LongMediaSampleError("source reference license evidence is missing")
+    license_id = _required_text(license_value, "id", label="source license")
+    license_url = _required_text(license_value, "url", label="source license")
+    if not license_url.startswith("https://"):
+        raise LongMediaSampleError("source license URL must use HTTPS")
+    short_name = _required_text(license_value, "shortName", label="source license")
+    attribution_required = license_value.get("attributionRequired")
+    if not isinstance(attribution_required, bool):
+        raise LongMediaSampleError(
+            "source license attributionRequired must be boolean"
+        )
+
+    license_evidence: dict[str, Any] = {
+        "provider": provider,
+        "sourceUrl": source_url,
+        "descriptionUrl": description_url,
+        "licenseUrl": license_url,
+        "licenseShortName": short_name,
+        "attributionRequired": attribution_required,
+        "sourceReference": str(reference),
+        "sourceReferenceSha256": _sha256(reference),
+        **immutable,
+    }
+    for key in (
+        "pageId",
+        "fileRevisionTimestamp",
+        "httpLastModified",
+        "artist",
+        "description",
+        "sha1",
+    ):
+        if key in raw_source:
+            license_evidence[key] = raw_source[key]
+    return {
+        "dataset": dataset,
+        "revision": revision,
+        "license": license_id,
+        "languageTags": list(dict.fromkeys(language_tags)),
+        "region": region,
+        "recordingType": "real-recording",
+        "speechNature": speech_nature,
+        "licenseEvidence": license_evidence,
+    }
 
 
 def _percentile(values: Sequence[float], fraction: float) -> float:
@@ -705,7 +843,11 @@ def build_long_media_matrix(
     reference_rttm: Path | None = None,
     reference_recording_id: str | None = None,
     target_speaker_count: int | None = None,
+    evaluation_split: str = "development",
+    source_reference_paths: Sequence[Path] = (),
 ) -> dict[str, Any]:
+    sources = tuple(sources)
+    source_reference_paths = tuple(source_reference_paths)
     if not sources:
         raise LongMediaSampleError("at least one source is required")
     if not 10.0 <= window_seconds <= 90.0:
@@ -716,18 +858,42 @@ def build_long_media_matrix(
         raise LongMediaSampleError(
             "reference_rttm and target_speaker_count must be used together"
         )
+    if evaluation_split not in {"development", "held-out"}:
+        raise LongMediaSampleError("evaluation_split must be development or held-out")
+    if source_reference_paths and len(source_reference_paths) != len(sources):
+        raise LongMediaSampleError(
+            "source reference count must match the source count"
+        )
+    if evaluation_split == "held-out" and len(source_reference_paths) != len(sources):
+        raise LongMediaSampleError(
+            "each held-out source requires a source reference"
+        )
 
     output_root = output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     window_ms = round(window_seconds * 1000)
     source_rows: list[dict[str, Any]] = []
     case_rows: list[dict[str, Any]] = []
-    for raw_source in sources:
+    for source_index, raw_source in enumerate(sources):
         source = _materialized_file(raw_source, label="source")
         source_hash = _sha256(source)
         source_id = _safe_source_id(source, source_hash)
         probe = probe_media(source, ffprobe=ffprobe)
         duration_ms = int(probe.pop("durationMs"))
+        if duration_ms < 300_000:
+            raise LongMediaSampleError(
+                "long-media source must be at least 300 seconds"
+            )
+        source_metadata = (
+            _source_reference_metadata(
+                source_reference_paths[source_index],
+                source=source,
+                source_sha256=source_hash,
+                duration_seconds=duration_ms / 1000,
+            )
+            if source_reference_paths
+            else {}
+        )
         frames, threshold = analyze_audio(source, ffmpeg=ffmpeg)
         windows = select_stratified_windows(
             frames,
@@ -796,6 +962,7 @@ def build_long_media_matrix(
             },
             "windowCoverageRatio": _coverage_ratio(windows, duration_ms),
             "windowCount": len(windows),
+            **source_metadata,
         }
         source_rows.append(source_row)
         for index, window in enumerate(windows, start=1):
@@ -838,8 +1005,11 @@ def build_long_media_matrix(
                     "id": case_id,
                     "sourceId": source_id,
                     "language": "auto",
-                    "region": "user-provided-unknown",
-                    "evaluationSplit": "development",
+                    "region": source_metadata.get(
+                        "region",
+                        "user-provided-unknown",
+                    ),
+                    "evaluationSplit": evaluation_split,
                     "scenario": [
                         "real-recording",
                         "long-media-stratified",
@@ -892,6 +1062,7 @@ def build_long_media_matrix(
         "schemaVersion": SCHEMA_VERSION,
         "libraryId": "mts-long-media-stratified-v1",
         "generatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "evaluationSplit": evaluation_split,
         "windowDurationSeconds": window_seconds,
         "selectionPolicy": {
             "algorithm": ANALYSIS_VERSION,
@@ -906,6 +1077,7 @@ def build_long_media_matrix(
             "randomWindowCount": random_window_count,
             "changeWindowCount": change_window_count,
             "modelScoresUsed": False,
+            "minimumSourceDurationSeconds": 300,
             "referenceTargetSelection": (
                 "exact-speaker-count-from-rttm-before-model-evaluation"
             ),

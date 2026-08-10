@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "1.0.0",
+  "mode": "configurable-production",
+  "offline": false,
+  "paths": {
+    "allowedInputRoots": [
+      "D:/Downloads"
+    ],
+    "allowedOutputRoot": "D:/MediaTranscribeStudio/outputs",
+    "cacheRoot": "D:/MediaTranscribeStudio/cache"
+  },
+  "models": {
+    "funasrVad": "D:/models/funasr/fsmn-vad",
+    "qwen3Asr": "D:/models/qwen/Qwen3-ASR-1.7B",
+    "qwen3ForcedAligner": "D:/models/qwen/Qwen3-ForcedAligner-0.6B",
+    "camPlus": "D:/models/funasr/campplus",
+    "secondarySpeakerVerifier": {
+      "path": "D:/models/modelscope/eres2netv2w24s4ep4",
+      "deploymentSlot": "secondary-speaker-verification",
+      "registryModelId": "eres2netv2-w24s4ep4",
+      "manifestModelKey": "eres2netV2LargeCandidate",
+      "manifestSha256": "sha256:c635880504cbacbc95adbc96a4c1567585c4f229426054c64067cfbead2a0ed9",
+      "adapterId": "modelscope-eres2netv2"
+    },
+    "pyannote": "D:/models/pyannote/speaker-diarization-community-1",
+    "mossformer2Separation": null
+  },
+  "executables": {
+    "ffmpeg": "ffmpeg",
+    "java": "java",
+    "pdfRendererJar": "pdf-renderer/target/pdf-renderer.jar",
+    "pyannotePython": "D:/MediaTranscribeStudio/runtime/pyannote/python.exe"
+  },
+  "runtime": {
+    "maxWorkers": 1,
+    "maxPendingJobs": 1,
+    "modelResidency": "stage",
+    "heartbeatIntervalSeconds": 15,
+    "vadDevice": "cpu",
+    "asrDevice": "cuda:0",
+    "asrDtype": "bfloat16",
+    "camPlusDevice": "cuda:0",
+    "eres2netDevice": "gpu",
+    "pyannoteDevice": "cuda",
+    "strictStartupPreflight": true
+  },
+  "speaker": {
+    "pyannoteMode": "fallback",
+    "localLlmMode": "suggestion-only",
+    "localLlmModel": "claude-sonnet-4-5",
+    "localLlmTimeoutSeconds": 300,
+    "localLlmContextTokens": 32768,
+    "localLlmOutputTokens": 4096,
+    "localLlmBatchSize": 8,
+    "localLlmMaxRounds": 3
+  },
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5",
+    "endpoint": "https://api.anthropic.com/v1",
+    "networkPolicy": "remote-explicit",
+    "apiKeyEnv": "ANTHROPIC_API_KEY",
+    "requireApiKey": true,
+    "responseFormat": "json-schema"
+  },
+  "pdf": {
+    "minimumScore": 85,
+    "maxRounds": 5,
+    "captureDpi": 144,
+    "marginMm": 14,
+    "preferredFont": "LXGW WenKai",
+    "templateId": "mts-cute-transcript-v1",
+    "timeoutSeconds": 300
+  }
+}

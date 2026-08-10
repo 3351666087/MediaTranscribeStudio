@@ -12,14 +12,30 @@ from backend.subtitles import (
     SubtitleCue,
     SubtitleFormat,
     SubtitleOutputMode,
+    SubtitleQAError,
     SubtitleStyle,
     SubtitleTheme,
     arrange_cues,
+    arrange_cues_within_source_duration,
     build_subtitle_output_plan,
     export_subtitles,
     resolve_speaker_colors,
     style_for_theme,
 )
+
+
+def test_source_bound_fallback_rejects_an_impossible_timeline() -> None:
+    with pytest.raises(
+        SubtitleQAError,
+        match="generated subtitle cues exceed the persisted source duration",
+    ):
+        arrange_cues_within_source_duration(
+            [
+                {"startMs": 0, "endMs": 50, "text": "a"},
+                {"startMs": 50, "endMs": 100, "text": "b"},
+            ],
+            source_duration_ms=100,
+        )
 
 
 def test_chinese_punctuation_wrap_preserves_every_source_character() -> None:
@@ -64,6 +80,132 @@ def test_english_long_line_is_split_without_loss_or_overlap() -> None:
     assert "".join(cue.source_text for cue in result.cues) == text
     for left, right in zip(result.cues, result.cues[1:], strict=False):
         assert right.start_ms - left.end_ms >= policy.gap_ms
+
+
+def test_wrapped_speaker_label_lines_have_no_edge_whitespace() -> None:
+    text = (
+        "What your country can do for you, ask what you can do for your country."
+    )
+    result = arrange_cues(
+        [
+            {
+                "startMs": 6490,
+                "endMs": 12150,
+                "text": text,
+                "speaker": "speaker-1",
+                "speakerId": "speaker-1",
+            }
+        ],
+        policy=CuePolicy(
+            max_characters_per_line=38,
+            max_lines=2,
+            max_reading_speed=20,
+            min_cue_ms=800,
+            max_cue_ms=7000,
+            gap_ms=80,
+            include_speaker_labels=True,
+            speaker_label_template="{speaker} ",
+        ),
+    )
+
+    assert result.qa.passed
+    assert result.qa.source_text_preserved
+    assert "".join(cue.source_text for cue in result.cues) == text
+    assert all(
+        line and line == line.strip()
+        for cue in result.cues
+        for line in cue.text.splitlines()
+    )
+    assert all("speaker-1  " not in cue.text for cue in result.cues)
+    for subtitle_format in (SubtitleFormat.SRT, SubtitleFormat.WEBVTT):
+        exported = export_subtitles(result, subtitle_format)
+        assert all(cue.text in exported for cue in result.cues)
+    ass = export_subtitles(result, SubtitleFormat.ASS)
+    ass_text = [
+        line.split(",", 9)[-1]
+        for line in ass.splitlines()
+        if line.startswith("Dialogue:")
+    ]
+    assert len(ass_text) == len(result.cues)
+    assert all(
+        rendered_line and rendered_line == rendered_line.strip()
+        for cue_text in ass_text
+        for rendered_line in cue_text.split(r"\N")
+    )
+
+
+def test_whitespace_runs_preserve_exact_source_without_blank_display_lines() -> None:
+    text = "  Alpha   beta\t\t\tgamma\n\n\n中文  测试  "
+    result = arrange_cues(
+        [
+            {
+                "startMs": 0,
+                "endMs": 30_000,
+                "text": text,
+                "speaker": "Host",
+                "speakerId": "speaker-host",
+            }
+        ],
+        policy=CuePolicy(
+            max_characters_per_line=4,
+            max_lines=1,
+            max_reading_speed=100,
+            min_cue_ms=100,
+            max_cue_ms=1000,
+            gap_ms=0,
+        ),
+    )
+
+    assert result.qa.passed
+    assert result.qa.source_text_preserved
+    assert "".join(cue.source_text for cue in result.cues) == text
+    assert all(
+        line and line == line.strip()
+        for cue in result.cues
+        for line in cue.text.splitlines()
+    )
+    assert all(
+        len(line) <= 4
+        for cue in result.cues
+        for line in cue.text.splitlines()
+    )
+
+
+def test_embedded_newlines_are_layout_safe_without_source_loss() -> None:
+    text = "\n\n，?alpha 。\n\n?\n\nalpha。  !alpha \t?beta   中文   delta"
+    result = arrange_cues(
+        [
+            {
+                "startMs": 0,
+                "endMs": 30_000,
+                "text": text,
+                "speaker": "Host",
+                "speakerId": "speaker-host",
+            }
+        ],
+        policy=CuePolicy(
+            max_characters_per_line=17,
+            max_lines=1,
+            max_reading_speed=100,
+            min_cue_ms=100,
+            max_cue_ms=1000,
+            gap_ms=0,
+        ),
+    )
+
+    assert result.qa.passed
+    assert result.qa.source_text_preserved
+    assert "".join(cue.source_text for cue in result.cues) == text
+    assert all(
+        line and line == line.strip() and "\n" not in line and "\t" not in line
+        for cue in result.cues
+        for line in cue.text.splitlines()
+    )
+    assert all(
+        len(line) <= 17
+        for cue in result.cues
+        for line in cue.text.splitlines()
+    )
 
 
 def test_speaker_labels_and_unicode_survive_all_text_exports() -> None:

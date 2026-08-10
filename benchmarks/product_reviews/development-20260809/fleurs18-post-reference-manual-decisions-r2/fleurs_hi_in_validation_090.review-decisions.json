@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_hi_in_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication sets the exact official FLEURS rawTranscript as the final source-language text.",
+      "evidence": ["fleurs-raw-transcript:fleurs_hi_in_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "original-semantic-input-file-sha256:7111c5c2df7ec2052bec19577cc1acd401e13281c8a98c04c0fe5ae3e57c7751", "original-semantic-input-canonical-sha256:8017f53ca54362653cee7b1b23549c0d201ced05bd4f73d7cf40378bad2f43c6", "recovery-semantic-input-file-sha256:5c7056be9ff3c6834e18bc39bbeff18718ac7e8a31ded9441b1387faf88133e8", "recovery-semantic-input-canonical-sha256:4d81de894a5c1e31852c2e3a2e05d1263f693fcaa9be114db59a9d4153d3fe77", "recovery-review-queue-file-sha256:7f7ede95a349b358bf1c3097d38b6c75abdf4c9f00fcad1d564ebd4c50cacb8a", "recovery-review-queue-canonical-sha256:adda819b0095c968a8cb76550085993360e7859e4b9b36caa319093fb0a94f0b", "structured-transcript-core-schema:root-minus-generatedAt-and-provenance-v1", "structured-transcript-core-original-canonical-sha256:31144db00a5e3d2563ed21d8f60068e871bb591f9499b3b734e40515e078e69f", "structured-transcript-core-recovery-canonical-sha256:31144db00a5e3d2563ed21d8f60068e871bb591f9499b3b734e40515e078e69f", "structured-transcript-core-equivalent:true", "recovery-root:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809", "recovery-output-directory:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_hi_in_validation_090-manual"],
+      "confidence": 1.0,
+      "normalizedText": "जैसे ही आप धारा से निकल आते हैं, पीछे की ओर तैरने में कोई खास मुश्किल नहीं होती है.",
+      "displayText": "जैसे ही आप धारा से निकल आते हैं, पीछे की ओर तैरने में कोई खास मुश्किल नहीं होती है.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-090-postref-speaker-0002",
+      "reason": "The frozen semantic input proves one segment assigned to the configured sole speaker; the eventual queue shape must still be checked at review.required.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "original-semantic-input-file-sha256:7111c5c2df7ec2052bec19577cc1acd401e13281c8a98c04c0fe5ae3e57c7751", "original-semantic-input-canonical-sha256:8017f53ca54362653cee7b1b23549c0d201ced05bd4f73d7cf40378bad2f43c6", "recovery-semantic-input-file-sha256:5c7056be9ff3c6834e18bc39bbeff18718ac7e8a31ded9441b1387faf88133e8", "recovery-semantic-input-canonical-sha256:4d81de894a5c1e31852c2e3a2e05d1263f693fcaa9be114db59a9d4153d3fe77", "recovery-review-queue-file-sha256:7f7ede95a349b358bf1c3097d38b6c75abdf4c9f00fcad1d564ebd4c50cacb8a", "recovery-review-queue-canonical-sha256:adda819b0095c968a8cb76550085993360e7859e4b9b36caa319093fb0a94f0b", "structured-transcript-core-schema:root-minus-generatedAt-and-provenance-v1", "structured-transcript-core-original-canonical-sha256:31144db00a5e3d2563ed21d8f60068e871bb591f9499b3b734e40515e078e69f", "structured-transcript-core-recovery-canonical-sha256:31144db00a5e3d2563ed21d8f60068e871bb591f9499b3b734e40515e078e69f", "structured-transcript-core-equivalent:true", "recovery-root:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809", "recovery-output-directory:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_hi_in_validation_090-manual"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

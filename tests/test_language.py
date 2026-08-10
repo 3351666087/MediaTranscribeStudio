@@ -9,6 +9,7 @@ from backend.errors import WorkerError
 from backend.language import (
     MULTIPLE_LANGUAGES,
     UNDETERMINED_LANGUAGE,
+    language_tags_compatible,
     normalize_language_tag,
     normalize_qwen_language_candidates,
     qwen_language_for_request,
@@ -81,6 +82,14 @@ class LanguageTagTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     normalize_language_tag(value)
+
+    def test_language_evidence_allows_specificity_but_not_language_conflicts(self) -> None:
+        self.assertTrue(language_tags_compatible("zh", "zh-CN"))
+        self.assertTrue(language_tags_compatible("en", "en-US"))
+        self.assertTrue(language_tags_compatible("und", "fr"))
+        self.assertTrue(language_tags_compatible("mul", "ja"))
+        self.assertFalse(language_tags_compatible("en", "fr"))
+        self.assertFalse(language_tags_compatible("zh", "yue"))
 
 
 class QwenLanguageContractTests(unittest.TestCase):

@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribe.studio/schemas/tauri-linux-release-manifest-v1.json",
+  "title": "MediaTranscribe Studio Tauri Linux Release Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contract",
+    "appId",
+    "productName",
+    "releaseId",
+    "version",
+    "platform",
+    "architecture",
+    "channel",
+    "sourceDateEpoch",
+    "build",
+    "bundles",
+    "artifactCount",
+    "totalBytes",
+    "artifacts",
+    "runtimeBootstrap"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0.0"
+    },
+    "contract": {
+      "const": "mts-tauri-linux-release/v1"
+    },
+    "appId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "productName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "releaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "version": {
+      "$ref": "#/$defs/semver"
+    },
+    "platform": {
+      "const": "linux"
+    },
+    "architecture": {
+      "enum": [
+        "x64",
+        "arm64"
+      ]
+    },
+    "channel": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "sourceDateEpoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetTriple",
+        "gitCommit",
+        "lockedInputs",
+        "commands"
+      ],
+      "properties": {
+        "targetTriple": {
+          "enum": [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu"
+          ]
+        },
+        "gitCommit": {
+          "oneOf": [
+            {
+              "const": "unknown"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40,64}$"
+            }
+          ]
+        },
+        "lockedInputs": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/lockedInput"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "bundles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "appimage",
+          "deb",
+          "rpm"
+        ]
+      }
+    },
+    "artifactCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "totalBytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "runtimeBootstrap": {
+      "$ref": "#/$defs/runtimeBootstrap"
+    }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "lockedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "enum": [
+            "apps/desktop/package-lock.json",
+            "apps/desktop/src-tauri/Cargo.lock"
+          ]
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle",
+        "path",
+        "size",
+        "sha256",
+        "executable"
+      ],
+      "properties": {
+        "bundle": {
+          "enum": [
+            "appimage",
+            "deb",
+            "rpm"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^artifacts/(appimage|deb|rpm)/[^/\\\\]+$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "executable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "runtimeBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "embedded",
+        "root",
+        "bundledModelArtifacts",
+        "absolutePathsIncluded",
+        "fileCount",
+        "totalBytes",
+        "files",
+        "missing",
+        "artifactVerifications"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "embedded": {
+          "type": "boolean"
+        },
+        "root": {
+          "const": "mts-runtime"
+        },
+        "bundledModelArtifacts": {
+          "const": false
+        },
+        "absolutePathsIncluded": {
+          "const": false
+        },
+        "fileCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runtimeResource"
+          }
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "artifactVerifications": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/runtimeVerification"
+          }
+        }
+      }
+    },
+    "runtimeResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^mts-runtime/[^/\\\\]+(?:/[^/\\\\]+)*$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "runtimeVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundle",
+        "artifactPath",
+        "verified"
+      ],
+      "properties": {
+        "bundle": {
+          "enum": [
+            "appimage",
+            "deb",
+            "rpm"
+          ]
+        },
+        "artifactPath": {
+          "type": "string",
+          "pattern": "^artifacts/(appimage|deb|rpm)/[^/\\\\]+$"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packageRuntimeRoot": {
+          "type": "string",
+          "pattern": "^usr/lib/[^/\\\\]+/mts-runtime$"
+        },
+        "fileCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verified": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "packageRuntimeRoot",
+              "fileCount",
+              "totalBytes"
+            ]
+          },
+          "else": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

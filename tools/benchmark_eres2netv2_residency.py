@@ -26,6 +26,78 @@ from backend.production_runners import (
 _HISTORICAL_PER_CLIP_SECONDS = 40.0
 
 
+def _resource_snapshot() -> dict[str, float]:
+    snapshot = {
+        "processRssMb": 0.0,
+        "cudaAllocatedMb": 0.0,
+        "cudaReservedMb": 0.0,
+        "cudaPeakAllocatedMb": 0.0,
+        "cudaPeakReservedMb": 0.0,
+    }
+    try:
+        import psutil
+
+        snapshot["processRssMb"] = psutil.Process().memory_info().rss / (
+            1024.0 * 1024.0
+        )
+    except (ImportError, OSError):
+        pass
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            divisor = 1024.0 * 1024.0
+            snapshot.update(
+                {
+                    "cudaAllocatedMb": (
+                        torch.cuda.memory_allocated() / divisor
+                    ),
+                    "cudaReservedMb": torch.cuda.memory_reserved() / divisor,
+                    "cudaPeakAllocatedMb": (
+                        torch.cuda.max_memory_allocated() / divisor
+                    ),
+                    "cudaPeakReservedMb": (
+                        torch.cuda.max_memory_reserved() / divisor
+                    ),
+                }
+            )
+    except (ImportError, RuntimeError):
+        pass
+    return snapshot
+
+
+def _reset_cuda_peaks() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except (ImportError, RuntimeError):
+        pass
+
+
+def _validated_resource_snapshot(
+    probe: Callable[[], Mapping[str, Any]],
+) -> dict[str, float]:
+    required = {
+        "processRssMb",
+        "cudaAllocatedMb",
+        "cudaReservedMb",
+        "cudaPeakAllocatedMb",
+        "cudaPeakReservedMb",
+    }
+    raw = probe()
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        raise RuntimeError("resource probe returned an invalid snapshot")
+    snapshot = {key: float(raw[key]) for key in sorted(required)}
+    if not all(
+        math.isfinite(value) and value >= 0.0
+        for value in snapshot.values()
+    ):
+        raise RuntimeError("resource probe returned an invalid value")
+    return snapshot
+
+
 def _positive_integer(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -66,6 +138,8 @@ def run_benchmark(
     clip_duration_ms: int,
     warm_runs: int,
     verifier_factory: Callable[..., Any] = LocalERes2NetV2Verifier,
+    resource_probe: Callable[[], Mapping[str, Any]] = _resource_snapshot,
+    reset_resource_peaks: Callable[[], None] = _reset_cuda_peaks,
 ) -> dict[str, Any]:
     resolved_model = model_path.resolve(strict=True)
     resolved_audio = audio_path.resolve(strict=True)
@@ -100,6 +174,8 @@ def run_benchmark(
         for offset in offsets_ms
     ]
 
+    reset_resource_peaks()
+    resource_before = _validated_resource_snapshot(resource_probe)
     verifier = verifier_factory(
         model_path=resolved_model,
         device=device,
@@ -109,9 +185,12 @@ def run_benchmark(
         started = time.perf_counter()
         cold_vectors = verifier._embeddings(clips)
         cold_seconds = time.perf_counter() - started
-        pipeline = verifier._pipeline_instance
-        if pipeline is None:
+        resource_after_cold = _validated_resource_snapshot(resource_probe)
+        pipeline_instance = verifier._pipeline_instance
+        if pipeline_instance is None:
             raise RuntimeError("ERes2NetV2 pipeline did not remain resident")
+        pipeline_identity = id(pipeline_instance)
+        del pipeline_instance
         dimensions = {
             len(vector) for vector in cold_vectors
         }
@@ -128,7 +207,8 @@ def run_benchmark(
             warm_seconds.append(time.perf_counter() - started)
             residency_stable = (
                 residency_stable
-                and verifier._pipeline_instance is pipeline
+                and verifier._pipeline_instance is not None
+                and id(verifier._pipeline_instance) == pipeline_identity
             )
             if (
                 len(vectors) != len(clips)
@@ -137,14 +217,16 @@ def run_benchmark(
                 raise RuntimeError(
                     "ERes2NetV2 returned an inconsistent warm batch"
                 )
+        resource_after_warm = _validated_resource_snapshot(resource_probe)
     finally:
         verifier.release_resources()
         released = verifier._pipeline_instance is None
+    resource_after_release = _validated_resource_snapshot(resource_probe)
 
     clip_count = len(clips)
     median_warm_seconds = statistics.median(warm_seconds)
     report: dict[str, Any] = {
-        "schemaVersion": "1.0.0",
+        "schemaVersion": "1.1.0",
         "benchmark": "eres2netv2-batch-residency",
         "model": _model_manifest_evidence(resolved_model),
         "source": {
@@ -179,6 +261,41 @@ def run_benchmark(
             "medianWarmPerClipBelowHistorical": (
                 median_warm_seconds / clip_count
                 < _HISTORICAL_PER_CLIP_SECONDS
+            ),
+        },
+        "resources": {
+            "snapshots": {
+                "beforeModelLoad": resource_before,
+                "afterColdBatch": resource_after_cold,
+                "afterWarmBatches": resource_after_warm,
+                "afterRelease": resource_after_release,
+            },
+            "peakProcessRssMb": max(
+                item["processRssMb"]
+                for item in (
+                    resource_before,
+                    resource_after_cold,
+                    resource_after_warm,
+                    resource_after_release,
+                )
+            ),
+            "peakCudaAllocatedMb": max(
+                item["cudaPeakAllocatedMb"]
+                for item in (
+                    resource_before,
+                    resource_after_cold,
+                    resource_after_warm,
+                    resource_after_release,
+                )
+            ),
+            "peakCudaReservedMb": max(
+                item["cudaPeakReservedMb"]
+                for item in (
+                    resource_before,
+                    resource_after_cold,
+                    resource_after_warm,
+                    resource_after_release,
+                )
             ),
         },
     }

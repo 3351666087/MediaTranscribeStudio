@@ -1,0 +1,952 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "codex-semantic-blind-review-body",
+  "reviewId": "multilingual22-six-model-codex-blind-review-r1",
+  "blindPackage": {
+    "manifestFileSha256": "7b9687fcf5e5218477443fd908207df8be3f138f26ec5a27f05dcd9198fbf6b1",
+    "packetCount": 22,
+    "candidatesPerPacket": 6
+  },
+  "reviewPolicy": {
+    "automaticScoringUsed": false,
+    "referenceTranscriptUsed": false,
+    "identityVaultReadBeforeSealing": false,
+    "allowedSeverities": [
+      "blocker",
+      "major",
+      "minor",
+      "pass"
+    ],
+    "preferenceRule": "Prefer faithful deliverable output; when the visible ASR or speaker timeline is materially suspect, prefer the smallest challenger request that targets the defect."
+  },
+  "reviewer": {
+    "source": "codex-agent",
+    "actor": "codex-semantic-adjudicator",
+    "reviewedAt": "2026-08-09T20:18:57+08:00"
+  },
+  "cases": [
+    {
+      "caseAlias": "case-001",
+      "preferredCandidateAliases": [
+        "candidate-02"
+      ],
+      "tie": false,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-02"
+          ],
+          "severity": "minor",
+          "reason": "The visible Arabic contains several implausible proper-name and phrase combinations. This candidate correctly requests an ASR alternative, but also reopens stable language, speaker, timeline, and disposition domains.",
+          "evidence": {
+            "startMs": 230,
+            "endMs": 11140,
+            "observation": "The full utterance is grammatical in parts but semantically unstable around place and road names."
+          },
+          "recommendedAction": "Keep the ASR challenger request and avoid reopening unrelated domains unless acoustic evidence is also uncertain."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "These results either publish the suspect ASR unchanged or request only a disposition challenger, which cannot repair the visible lexical errors.",
+          "evidence": {
+            "startMs": 230,
+            "endMs": 11140,
+            "observation": "No ASR alternative is requested despite multiple suspicious lexical spans."
+          },
+          "recommendedAction": "Request a provider-native ASR alternative for the segment before composition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-002",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "pass",
+          "reason": "The Arabic sentence is coherent, the one-speaker timeline is consistent, and preserving the visible transcript is appropriate.",
+          "evidence": {
+            "startMs": 550,
+            "endMs": 5950,
+            "observation": "A complete factual sentence about the Amazon River is preserved without invention."
+          },
+          "recommendedAction": "Compose without additional challenger work."
+        },
+        {
+          "candidateAliases": [
+            "candidate-03"
+          ],
+          "severity": "minor",
+          "reason": "The result unnecessarily requests a speech-disposition challenger for clearly transcribable speech.",
+          "evidence": {
+            "startMs": 550,
+            "endMs": 5950,
+            "observation": "The segment is ordinary, coherent speech with no visible disposition ambiguity."
+          },
+          "recommendedAction": "Preserve the current speech disposition and complete composition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-003",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "The two Arabic fragments form an awkward, incomplete construction around the association hunting program. No candidate requests the ASR challenger needed to resolve it.",
+          "evidence": {
+            "startMs": 80,
+            "endMs": 13240,
+            "observation": "The first fragment ends after 'program' and the second begins as an unattached hunting phrase."
+          },
+          "recommendedAction": "Request ASR alternatives for both fragments and then re-evaluate their boundary."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-004",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-05"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-05"
+          ],
+          "severity": "pass",
+          "reason": "All three English turns are coherent and consistently assigned to one speaker; direct composition is deliverable.",
+          "evidence": {
+            "startMs": 540,
+            "endMs": 13800,
+            "observation": "One customer asks three related questions about a joint account."
+          },
+          "recommendedAction": "Preserve the current transcript and timeline."
+        },
+        {
+          "candidateAliases": [
+            "candidate-03",
+            "candidate-04",
+            "candidate-06"
+          ],
+          "severity": "minor",
+          "reason": "These candidates reopen speaker, timeline, or disposition evidence even though the visible content is internally consistent.",
+          "evidence": {
+            "startMs": 540,
+            "endMs": 13800,
+            "observation": "No visible turn or content conflict justifies the requested challenger."
+          },
+          "recommendedAction": "Avoid unnecessary challenger calls and complete composition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-005",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "The Spanish phrase 'quinto sep de Martelli' is visibly suspect. Composition preserves it, while the only challenger request targets disposition rather than ASR.",
+          "evidence": {
+            "startMs": 1340,
+            "endMs": 4610,
+            "observation": "The token 'sep' does not yield a coherent reading in this sentence."
+          },
+          "recommendedAction": "Request an ASR alternative for the full segment."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-006",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05"
+          ],
+          "severity": "pass",
+          "reason": "The Spanish sentence about building a Wi-Fi doorbell is coherent and needs no semantic intervention.",
+          "evidence": {
+            "startMs": 1340,
+            "endMs": 3810,
+            "observation": "The transcript is a complete grammatical statement."
+          },
+          "recommendedAction": "Compose the current candidate."
+        },
+        {
+          "candidateAliases": [
+            "candidate-06"
+          ],
+          "severity": "minor",
+          "reason": "A disposition challenger is unnecessary for clearly transcribable speech.",
+          "evidence": {
+            "startMs": 1340,
+            "endMs": 3810,
+            "observation": "No silence, music, or non-speech ambiguity is visible in the packet."
+          },
+          "recommendedAction": "Keep the current disposition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-007",
+      "preferredCandidateAliases": [
+        "candidate-02",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-02",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "pass",
+          "reason": "The Spanish statement is coherent and is preserved faithfully.",
+          "evidence": {
+            "startMs": 1210,
+            "endMs": 6450,
+            "observation": "Both clauses express a consistent judgment about fairness."
+          },
+          "recommendedAction": "Complete composition without escalation."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-03"
+          ],
+          "severity": "minor",
+          "reason": "The speech-disposition challenger is not supported by any visible ambiguity.",
+          "evidence": {
+            "startMs": 1210,
+            "endMs": 6450,
+            "observation": "The segment is clearly transcribable speech."
+          },
+          "recommendedAction": "Preserve the current speech disposition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-008",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-03",
+        "candidate-05"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-03",
+            "candidate-05"
+          ],
+          "severity": "pass",
+          "reason": "The French content is one continuous customer request fragmented into seven speaker labels. A timeline challenger directly targets the visible defect.",
+          "evidence": {
+            "startMs": 2460,
+            "endMs": 13730,
+            "observation": "Sentence fragments connect continuously from greeting through the question about using a bank card abroad."
+          },
+          "recommendedAction": "Regenerate the one-speaker timeline before composition."
+        },
+        {
+          "candidateAliases": [
+            "candidate-02"
+          ],
+          "severity": "minor",
+          "reason": "The result recognizes speaker uncertainty, but requests every assignment plus an unrelated disposition challenger instead of the smaller timeline repair.",
+          "evidence": {
+            "startMs": 2460,
+            "endMs": 13730,
+            "observation": "The cardinality error spans the whole utterance."
+          },
+          "recommendedAction": "Prefer one timeline challenger over per-segment and disposition escalation."
+        },
+        {
+          "candidateAliases": [
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "Requesting a challenger for only the last speaker assignment cannot resolve the seven-label split across the utterance.",
+          "evidence": {
+            "startMs": 2460,
+            "endMs": 13730,
+            "observation": "At least seven visible labels participate in a single continuous sentence."
+          },
+          "recommendedAction": "Challenge the full timeline/cardinality."
+        },
+        {
+          "candidateAliases": [
+            "candidate-04"
+          ],
+          "severity": "blocker",
+          "reason": "The output publishes seven speakers for an obvious single-speaker sentence, making the transcript and downstream report unusable.",
+          "evidence": {
+            "startMs": 2460,
+            "endMs": 13730,
+            "observation": "The final speaker policy explicitly resolves seven speakers."
+          },
+          "recommendedAction": "Reject composition and regenerate the timeline."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-009",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "The Hindi fragments form a malformed clause at the garage/doorbell boundary. No candidate requests an ASR alternative for the affected text.",
+          "evidence": {
+            "startMs": 480,
+            "endMs": 14140,
+            "observation": "The second fragment begins with an implausible pronoun phrase and does not attach cleanly to the first."
+          },
+          "recommendedAction": "Request ASR alternatives for both fragments and reconsider the split."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-010",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "pass",
+          "reason": "The Hindi casualty report is coherent, preserves its numerical claims, and is ready to compose.",
+          "evidence": {
+            "startMs": 680,
+            "endMs": 12060,
+            "observation": "The sentence consistently distinguishes eight deaths, up to thirty injuries, and an unknown final count."
+          },
+          "recommendedAction": "Preserve the current candidate."
+        },
+        {
+          "candidateAliases": [
+            "candidate-03",
+            "candidate-04"
+          ],
+          "severity": "minor",
+          "reason": "The disposition challenger is unnecessary for a complete spoken sentence.",
+          "evidence": {
+            "startMs": 680,
+            "endMs": 12060,
+            "observation": "No visible non-speech ambiguity exists."
+          },
+          "recommendedAction": "Keep the transcribable-speech disposition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-011",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-06"
+          ],
+          "severity": "pass",
+          "reason": "The Hindi sentence is grammatical and semantically coherent; preserving it is reasonable from the blind packet.",
+          "evidence": {
+            "startMs": 530,
+            "endMs": 7090,
+            "observation": "The sentence gives a consistent statement about swimming after leaving a current."
+          },
+          "recommendedAction": "Compose without escalation."
+        },
+        {
+          "candidateAliases": [
+            "candidate-04",
+            "candidate-05"
+          ],
+          "severity": "minor",
+          "reason": "These candidates request ASR or timeline/disposition work without a visible contradiction in the packet.",
+          "evidence": {
+            "startMs": 530,
+            "endMs": 7090,
+            "observation": "One coherent segment is assigned to one speaker."
+          },
+          "recommendedAction": "Avoid unnecessary challenger generation."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-012",
+      "preferredCandidateAliases": [
+        "candidate-03"
+      ],
+      "tie": false,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-03"
+          ],
+          "severity": "minor",
+          "reason": "This candidate correctly resolves the fragmented Indonesian sentence to one speaker. The visible loanword 'kruaster' remains suspect but the result is otherwise usable.",
+          "evidence": {
+            "startMs": 280,
+            "endMs": 7290,
+            "observation": "All five fragments form one sentence about small Japanese buses."
+          },
+          "recommendedAction": "Keep the one-speaker composition and route the suspect loanword for ASR verification."
+        },
+        {
+          "candidateAliases": [
+            "candidate-02"
+          ],
+          "severity": "minor",
+          "reason": "The result recognizes broad speaker-assignment uncertainty but over-escalates every segment and disposition, and still does not target the suspect loanword.",
+          "evidence": {
+            "startMs": 280,
+            "endMs": 7290,
+            "observation": "The visible issue is global single-speaker fragmentation plus one lexical concern."
+          },
+          "recommendedAction": "Request a timeline merge and an ASR alternative for the lexical segment only."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "These partial challenger requests do not cover the full speaker split; the ASR requests also miss the visibly suspect loanword segment.",
+          "evidence": {
+            "startMs": 280,
+            "endMs": 7290,
+            "observation": "Speaker labels alternate across a single grammatical sentence."
+          },
+          "recommendedAction": "Challenge the full timeline and the precise lexical segment."
+        },
+        {
+          "candidateAliases": [
+            "candidate-04"
+          ],
+          "severity": "major",
+          "reason": "The output preserves two speakers for a sentence that visibly reads as one continuous narration.",
+          "evidence": {
+            "startMs": 280,
+            "endMs": 7290,
+            "observation": "The final speaker policy resolves two speakers despite continuous syntax."
+          },
+          "recommendedAction": "Merge the timeline before publication."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-013",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "pass",
+          "reason": "The Japanese sports sentence is complete and internally consistent, including the 21-20 score and fifteen-match streak.",
+          "evidence": {
+            "startMs": 580,
+            "endMs": 10900,
+            "observation": "Numbers and event relationship remain coherent."
+          },
+          "recommendedAction": "Compose the current candidate."
+        },
+        {
+          "candidateAliases": [
+            "candidate-04"
+          ],
+          "severity": "minor",
+          "reason": "A disposition challenger is unnecessary for clearly transcribable speech.",
+          "evidence": {
+            "startMs": 580,
+            "endMs": 10900,
+            "observation": "The packet contains one ordinary spoken sentence."
+          },
+          "recommendedAction": "Keep the current disposition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-014",
+      "preferredCandidateAliases": [
+        "candidate-02"
+      ],
+      "tie": false,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-02"
+          ],
+          "severity": "pass",
+          "reason": "The phrase using '淡然する' is lexically implausible in context. This candidate correctly requests an ASR alternative for the segment.",
+          "evidence": {
+            "startMs": 1870,
+            "endMs": 10400,
+            "observation": "The verb does not naturally describe consensus formation in this construction."
+          },
+          "recommendedAction": "Generate a provider-native ASR alternative before composition."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "These results preserve the suspect Japanese wording or challenge only speech disposition, leaving the lexical error unresolved.",
+          "evidence": {
+            "startMs": 1870,
+            "endMs": 10400,
+            "observation": "No useful ASR challenger is requested."
+          },
+          "recommendedAction": "Route the segment to ASR alternative generation."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-015",
+      "preferredCandidateAliases": [
+        "candidate-02"
+      ],
+      "tie": false,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-02"
+          ],
+          "severity": "pass",
+          "reason": "The visible token '写真カ' is an implausible character sequence where a person noun is expected. This candidate correctly requests an ASR alternative.",
+          "evidence": {
+            "startMs": 1270,
+            "endMs": 8200,
+            "observation": "The sentence describes a driver hitting a person, but the current token is malformed."
+          },
+          "recommendedAction": "Generate an ASR alternative for the segment."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "These candidates publish the malformed token or request an unrelated disposition challenger.",
+          "evidence": {
+            "startMs": 1270,
+            "endMs": 8200,
+            "observation": "The lexical defect remains unchanged."
+          },
+          "recommendedAction": "Do not compose until the ASR span is challenged."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-016",
+      "preferredCandidateAliases": [
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05"
+          ],
+          "severity": "pass",
+          "reason": "The Korean sentence is grammatical and coherent; direct one-speaker composition is appropriate.",
+          "evidence": {
+            "startMs": 700,
+            "endMs": 10560,
+            "observation": "The route description and difficulty claim form one consistent sentence."
+          },
+          "recommendedAction": "Preserve the current candidate."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-06"
+          ],
+          "severity": "minor",
+          "reason": "The disposition challenger is unnecessary for clearly transcribable speech.",
+          "evidence": {
+            "startMs": 700,
+            "endMs": 10560,
+            "observation": "No visible disposition ambiguity exists."
+          },
+          "recommendedAction": "Complete composition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-017",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04"
+          ],
+          "severity": "pass",
+          "reason": "The Korean transportation sentence is coherent and faithfully preserved.",
+          "evidence": {
+            "startMs": 2090,
+            "endMs": 13340,
+            "observation": "One grammatical sentence is assigned to one speaker."
+          },
+          "recommendedAction": "Compose without escalation."
+        },
+        {
+          "candidateAliases": [
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "minor",
+          "reason": "A speech-disposition challenger adds work without addressing any visible defect.",
+          "evidence": {
+            "startMs": 2090,
+            "endMs": 13340,
+            "observation": "The segment is clearly transcribable."
+          },
+          "recommendedAction": "Preserve the current disposition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-018",
+      "preferredCandidateAliases": [
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "pass",
+          "reason": "The Korean satellite sentence is coherent and needs no semantic correction.",
+          "evidence": {
+            "startMs": 1790,
+            "endMs": 7910,
+            "observation": "Signal reception and immediate reflection are expressed consistently."
+          },
+          "recommendedAction": "Compose the current transcript."
+        },
+        {
+          "candidateAliases": [
+            "candidate-01"
+          ],
+          "severity": "minor",
+          "reason": "The disposition challenger is unnecessary for ordinary speech.",
+          "evidence": {
+            "startMs": 1790,
+            "endMs": 7910,
+            "observation": "No non-speech ambiguity is visible."
+          },
+          "recommendedAction": "Keep the transcribable-speech disposition."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-019",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "The packet declares Cantonese Traditional Chinese, while the visible transcript is Mandarin-style Simplified Chinese. No candidate requests language or ASR correction.",
+          "evidence": {
+            "startMs": 1350,
+            "endMs": 5610,
+            "observation": "Script and wording do not match the declared yue-Hant-HK language."
+          },
+          "recommendedAction": "Request both open-set language identification and an ASR alternative."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-020",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "The declared Cantonese Traditional language conflicts with the visible Mandarin-style Simplified transcript. The disposition-only request does not address this.",
+          "evidence": {
+            "startMs": 920,
+            "endMs": 10650,
+            "observation": "The final text remains in the wrong visible language/script surface."
+          },
+          "recommendedAction": "Request language and ASR challengers before publication."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-021",
+      "preferredCandidateAliases": [
+        "candidate-01",
+        "candidate-02",
+        "candidate-03",
+        "candidate-04",
+        "candidate-05",
+        "candidate-06"
+      ],
+      "tie": true,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01",
+            "candidate-02",
+            "candidate-03",
+            "candidate-04",
+            "candidate-05",
+            "candidate-06"
+          ],
+          "severity": "major",
+          "reason": "The transcript is mixed Simplified/Traditional Mandarin-style text despite a Cantonese Traditional declaration, and the fragment boundary produces a duplicated environment character. No useful challenger is requested.",
+          "evidence": {
+            "startMs": 1500,
+            "endMs": 15850,
+            "observation": "The boundary reads as an unnatural duplicated 'environment' sequence."
+          },
+          "recommendedAction": "Request language identification and ASR alternatives for both fragments."
+        }
+      ]
+    },
+    {
+      "caseAlias": "case-022",
+      "preferredCandidateAliases": [
+        "candidate-01"
+      ],
+      "tie": false,
+      "assessmentGroups": [
+        {
+          "candidateAliases": [
+            "candidate-01"
+          ],
+          "severity": "pass",
+          "reason": "The three Chinese fragments form one short request from one speaker, and this candidate resolves them to one speaker without changing the words.",
+          "evidence": {
+            "startMs": 620,
+            "endMs": 2880,
+            "observation": "The utterance reads continuously as 'Hello, please freeze my card.'"
+          },
+          "recommendedAction": "Publish the one-speaker composition."
+        },
+        {
+          "candidateAliases": [
+            "candidate-04",
+            "candidate-06"
+          ],
+          "severity": "minor",
+          "reason": "A full timeline challenger correctly targets the split but adds a generation round where the existing one-speaker candidate is already visible.",
+          "evidence": {
+            "startMs": 620,
+            "endMs": 2880,
+            "observation": "All fragments form one continuous request."
+          },
+          "recommendedAction": "Select the existing one-speaker timeline when available."
+        },
+        {
+          "candidateAliases": [
+            "candidate-02"
+          ],
+          "severity": "major",
+          "reason": "The request challenges only two assignments and adds disposition work, leaving the global three-label split insufficiently specified.",
+          "evidence": {
+            "startMs": 620,
+            "endMs": 2880,
+            "observation": "The visible defect is timeline-wide."
+          },
+          "recommendedAction": "Challenge the full timeline or select the one-speaker candidate."
+        },
+        {
+          "candidateAliases": [
+            "candidate-03",
+            "candidate-05"
+          ],
+          "severity": "blocker",
+          "reason": "The output publishes three speakers for a single short sentence, corrupting speaker attribution and downstream reporting.",
+          "evidence": {
+            "startMs": 620,
+            "endMs": 2880,
+            "observation": "The final speaker policy explicitly resolves three speakers."
+          },
+          "recommendedAction": "Reject the composition and merge the timeline to one speaker."
+        }
+      ]
+    }
+  ]
+}

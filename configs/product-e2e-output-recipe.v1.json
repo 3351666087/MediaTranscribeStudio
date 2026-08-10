@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "1.0.0",
+  "report": {
+    "template": "soft-glass",
+    "font": "system-sans",
+    "customFontFamily": "",
+    "pageSize": "a4",
+    "density": "balanced",
+    "accentColor": "#176b87"
+  },
+  "subtitles": {
+    "enabled": true,
+    "theme": "youtube-clean",
+    "size": "medium",
+    "safeArea": "broadcast",
+    "position": "smart",
+    "speakerPalette": "adaptive-spectrum",
+    "backgroundOpacity": 72,
+    "maximumLines": 2,
+    "avoidVisualCollisions": true,
+    "wordProgressHighlight": false
+  },
+  "delivery": {
+    "formats": [
+      "pdf",
+      "txt",
+      "json",
+      "srt",
+      "webvtt",
+      "ass"
+    ],
+    "subtitleModes": [
+      "sidecar",
+      "soft-mux",
+      "burn-in"
+    ],
+    "includeMediaMetadata": true,
+    "preserveSourceMedia": true,
+    "fileNamePattern": "{sourceStem}-{artifact}"
+  },
+  "finishing": {
+    "includeCover": true,
+    "includeChapters": true,
+    "includeTimestamps": true,
+    "includeHeader": true,
+    "includeFooter": true,
+    "includeSpeakerIndex": true,
+    "includeConfidenceNotes": false,
+    "chapterStyle": "semantic",
+    "timestampStyle": "segment",
+    "customTitle": ""
+  }
+}

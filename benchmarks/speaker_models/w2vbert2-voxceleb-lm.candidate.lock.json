@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0.0",
+  "candidateId": "w2vbert2-voxceleb-lm",
+  "status": "research-challenger",
+  "modelPromotionAllowed": false,
+  "source": {
+    "provider": "modelscope",
+    "repository": "shangguanqituan/wespeaker-w2v-bert2",
+    "revision": "43838cdfb13a05fee1d2b451435128f0515f775e",
+    "revisionProbe": "git ls-remote https://www.modelscope.cn/shangguanqituan/wespeaker-w2v-bert2.git HEAD",
+    "checkpoint": "w2v_bert2_voxceleb_reproduced_LM.pt",
+    "checkpointBytes": 2353130955,
+    "checkpointSha256": "26d3ac4a724af599d89e6f67d27fc773596e7693bce1055fb4ef9e19607527ca"
+  },
+  "baseModel": {
+    "provider": "huggingface",
+    "repository": "facebook/w2v-bert-2.0",
+    "revision": "da985ba0987f70aaeb84a80f2851cfac8c697a7b",
+    "configRuntimeOverrides": {
+      "apply_spec_augment": false,
+      "mask_feature_prob": 0.0,
+      "mask_time_prob": 0.0
+    }
+  },
+  "wespeaker": {
+    "repository": "https://github.com/wenet-e2e/wespeaker.git",
+    "revision": "dfa741957e5c11f477623b6e583d67d0af25ee88",
+    "license": "Apache-2.0"
+  },
+  "licenseReview": {
+    "modelscopeCardDeclaration": "Apache-2.0",
+    "baseModelMetadataDeclaration": "MIT",
+    "trainingDataDeclaration": "VoxCeleb, inferred only from the checkpoint filename and repository inventory",
+    "decision": "research evaluation only",
+    "reason": "The upstream card does not provide enough weight provenance or training-data terms to approve commercial production promotion."
+  },
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 1447,
+      "sha256": "754a1bca2b275157919c8afd5591eeb46177f93dba0bae3db489d3355f3c8fd0"
+    },
+    {
+      "path": "base-config/config.json",
+      "bytes": 1874,
+      "sha256": "f5572bd5998b68182e9c328a43127ed21fed687f6910497136b91a4e3b0e3675"
+    },
+    {
+      "path": "base-config/preprocessor_config.json",
+      "bytes": 275,
+      "sha256": "8e6281aad64f97e40534135a59dcc5d33571efae376f2a25adf5551951897ab4"
+    },
+    {
+      "path": "config_LM.yaml",
+      "bytes": 2183,
+      "sha256": "78d0131d931ab5d8797b0b565886ae86044e7ca77a479b0dcdad1da28487af63"
+    },
+    {
+      "path": "model_index.json",
+      "bytes": 794,
+      "sha256": "23a73dc81d6cc3e5c8335f858add290a416614c8d1b476bbe1eeb98b3ea622be"
+    },
+    {
+      "path": "w2v_bert2_voxceleb_reproduced_LM.pt",
+      "bytes": 2353130955,
+      "sha256": "26d3ac4a724af599d89e6f67d27fc773596e7693bce1055fb4ef9e19607527ca"
+    }
+  ],
+  "canonicalSha256": "ffcb01567284916e9eb42d2086cfe60e6eda68ba250f2883f63497c17f0e18bc"
+}

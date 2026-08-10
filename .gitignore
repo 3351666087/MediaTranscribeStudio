@@ -72,3 +72,18 @@ config.local.yaml
 
 # Machine-specific validation evidence
 docs/refactor/evidence/environment/
+
+# Local dependency downloads and toolchains
+/.downloads/
+/_downloads/
+/.npm-cache/
+/.pip-cache/
+/.toolchain/
+
+# Machine-bound runtimes, configuration, and evaluation scratch output
+/runtime/
+/tmp/
+/production.config.json
+/mts-eval*.json
+/mts-eval*.jsonl
+/NUL

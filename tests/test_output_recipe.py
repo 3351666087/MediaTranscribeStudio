@@ -79,6 +79,37 @@ def test_recipe_matches_its_portable_schema() -> None:
     Draft202012Validator(schema).validate(recipe_payload())
 
 
+@pytest.mark.parametrize(
+    "recipe_name",
+    (
+        "product-e2e-output-recipe.v1.json",
+        "product-audio-e2e-output-recipe.v1.json",
+    ),
+)
+def test_shipped_product_recipes_match_schema_and_parser(
+    recipe_name: str,
+) -> None:
+    schema = json.loads(RECIPE_SCHEMA.read_text(encoding="utf-8"))
+    payload = json.loads(
+        (ROOT / "configs" / recipe_name).read_text(encoding="utf-8")
+    )
+
+    Draft202012Validator(schema).validate(payload)
+    recipe = parse_output_recipe(payload)
+
+    assert recipe.render_pdf
+    assert recipe.formats == (
+        "pdf",
+        "txt",
+        "json",
+        "srt",
+        "webvtt",
+        "ass",
+    )
+    if "audio" in recipe_name:
+        assert recipe.subtitle_modes == ("sidecar",)
+
+
 def test_recipe_is_strict_canonical_and_hash_stable() -> None:
     payload = recipe_payload()
     first = parse_output_recipe(payload)

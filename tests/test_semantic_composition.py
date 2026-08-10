@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
 
 from backend import (
     BusinessProcessingConfig,
@@ -27,6 +28,7 @@ from backend import (
     build_voice_activity_challenger_result,
     compose_transcript_document,
     extend_semantic_candidate_lattice,
+    semantic_job_prompt_context,
     validate_semantic_composition,
     validate_semantic_candidate_generation,
     validate_semantic_job_arbitration,
@@ -35,7 +37,10 @@ from backend import (
 from backend.persistence import canonical_json_sha256, read_json_strict
 from backend.asr_evidence import build_asr_candidate_set
 from backend.errors import WorkerError
-from backend.semantic_composition import _bounded_transcript_context
+from backend.semantic_composition import (
+    _bounded_transcript_context,
+    _complete_structural_continuity_requests,
+)
 from backend.voice_activity import build_voice_activity
 
 
@@ -54,6 +59,11 @@ REQUEST_KIND = {
     "speaker-assignment": "speaker-assignment-challenger",
     "language-span": "open-set-lid",
     "asr-text": "provider-native-nbest",
+}
+_SEGMENT_ATOMIC_DOMAINS_FOR_TEST = {
+    "speaker-assignment",
+    "language-span",
+    "asr-text",
 }
 
 
@@ -388,6 +398,222 @@ def _full_lattice(document: dict) -> dict:
     )
 
 
+def _speaker_continuity_regression_document(fixture: dict) -> dict:
+    visible = fixture["visibleInput"]
+    binding = fixture["inputBinding"]
+    document = _document()
+    document.update(
+        {
+            "documentId": f"doc-{fixture['fixtureId']}",
+            "jobId": f"job-{fixture['fixtureId']}",
+            "language": visible["language"],
+            "source": {
+                "fileName": "frozen-visible-speaker-continuity.wav",
+                "sha256": binding["sourceMediaSha256"],
+                "durationMs": binding["sourceDurationMs"],
+            },
+            "speakerPolicy": {
+                "mode": "auto",
+                "resolvedCount": visible["speakerCount"],
+                "speakerIds": visible["speakerIds"],
+            },
+            "speakers": [
+                {"id": speaker_id}
+                for speaker_id in visible["speakerIds"]
+            ],
+        }
+    )
+    document["segments"] = []
+    for item in visible["segments"]:
+        segment = _segment(
+            item["segmentId"],
+            start_ms=item["startMs"],
+            speaker_id=item["speakerId"],
+            text=item["text"],
+        )
+        segment.update(
+            {
+                "endMs": item["endMs"],
+                "language": item["language"],
+                "speakerScores": [
+                    {
+                        "speakerId": speaker_id,
+                        "score": (
+                            0.9 if speaker_id == item["speakerId"] else 0.6
+                        ),
+                    }
+                    for speaker_id in visible["speakerIds"]
+                ],
+                "speakerMargin": 0.3,
+            }
+        )
+        document["segments"].append(segment)
+    document["provenance"] = {
+        "offline": True,
+        "models": [],
+        "frozenTranscriptDocumentSha256": binding[
+            "transcriptDocumentSha256"
+        ],
+        "frozenCandidateLatticeSha256": binding[
+            "candidateLatticeSha256"
+        ],
+    }
+    return document
+
+
+def _speaker_continuity_regression_lattice(document: dict) -> dict:
+    segments = document["segments"]
+    speaker_ids = document["speakerPolicy"]["speakerIds"]
+    source_duration_ms = document["source"]["durationMs"]
+    current_turns = [
+        {
+            "startMs": segment["startMs"],
+            "endMs": segment["endMs"],
+            "speakerId": segment["speakerId"],
+            "overlap": False,
+        }
+        for segment in segments
+    ]
+    consolidated_turns = [
+        {**turn, "speakerId": speaker_ids[0]}
+        for turn in current_turns
+    ]
+    candidate_groups: dict[str, list[dict]] = {
+        "speech-disposition": [
+            {
+                "scopeId": "media",
+                "candidates": [
+                    _candidate(
+                        {
+                            "classification": "transcribable-speech",
+                            "startMs": 0,
+                            "endMs": source_duration_ms,
+                        },
+                        current=True,
+                    )
+                ],
+            }
+        ],
+        "speaker-cardinality-timeline": [
+            {
+                "scopeId": "media",
+                "candidates": [
+                    _candidate(
+                        {
+                            "speakerCount": len(speaker_ids),
+                            "speakerIds": speaker_ids,
+                            "timelineKind": "current-transcript",
+                            "startMs": 0,
+                            "endMs": source_duration_ms,
+                            "turns": current_turns,
+                        },
+                        current=True,
+                    ),
+                    _candidate(
+                        {
+                            "speakerCount": 1,
+                            "speakerIds": [speaker_ids[0]],
+                            "timelineKind": "overlap-preserving",
+                            "startMs": 0,
+                            "endMs": source_duration_ms,
+                            "turns": consolidated_turns,
+                        },
+                        current=False,
+                    ),
+                    _candidate(
+                        {
+                            "speakerCount": 1,
+                            "speakerIds": [speaker_ids[0]],
+                            "timelineKind": "single-speaker",
+                            "startMs": 0,
+                            "endMs": source_duration_ms,
+                            "turns": consolidated_turns,
+                        },
+                        current=False,
+                    ),
+                ],
+            }
+        ],
+        "speaker-assignment": [],
+        "language-span": [],
+        "asr-text": [],
+    }
+    base_language = document["language"].split("-", 1)[0]
+    for segment in segments:
+        scope_id = f"segment:{segment['id']}"
+        candidate_groups["speaker-assignment"].append(
+            {
+                "scopeId": scope_id,
+                "candidates": [
+                    _candidate(
+                        {
+                            "segmentId": segment["id"],
+                            "startMs": segment["startMs"],
+                            "endMs": segment["endMs"],
+                            "speakerId": speaker_id,
+                            "score": (
+                                0.9
+                                if speaker_id == segment["speakerId"]
+                                else 0.6
+                            ),
+                        },
+                        current=speaker_id == segment["speakerId"],
+                    )
+                    for speaker_id in speaker_ids
+                ],
+            }
+        )
+        candidate_groups["language-span"].append(
+            {
+                "scopeId": scope_id,
+                "candidates": [
+                    _candidate(
+                        {
+                            "segmentId": segment["id"],
+                            "startMs": segment["startMs"],
+                            "endMs": segment["endMs"],
+                            "language": language,
+                            "confidence": None,
+                        },
+                        current=language == segment["language"],
+                    )
+                    for language in (segment["language"], base_language)
+                ],
+            }
+        )
+        candidate_set_sha256 = hashlib.sha256(
+            segment["id"].encode("utf-8")
+        ).hexdigest()
+        candidate_groups["asr-text"].append(
+            {
+                "scopeId": scope_id,
+                "candidates": [
+                    _candidate(
+                        {
+                            "segmentId": segment["id"],
+                            "startMs": segment["startMs"],
+                            "endMs": segment["endMs"],
+                            "text": segment["normalizedText"],
+                            "language": segment["language"],
+                            "sourceCandidateId": (
+                                f"asr-{candidate_set_sha256[:24]}"
+                            ),
+                            "candidateSetSha256": candidate_set_sha256,
+                        },
+                        current=True,
+                    )
+                ],
+            }
+        )
+    return build_semantic_candidate_lattice(
+        source_media_sha256=document["source"]["sha256"],
+        transcript_sha256=canonical_json_sha256(document),
+        transcript_schema_version=document["schemaVersion"],
+        source_duration_ms=source_duration_ms,
+        candidate_groups=candidate_groups,
+    )
+
+
 def _candidate_for(group: dict, predicate) -> str:
     return next(
         item["candidateId"] for item in group["candidates"] if predicate(item)
@@ -593,7 +819,11 @@ def _positional_response(
             if candidate["selectionEligible"] is True
         ]
         choices.append(eligible.index(selected))
-    response: dict = {"choiceIndexes": choices}
+    response: dict = {
+        "choiceByPosition": {
+            str(index): choice for index, choice in enumerate(choices)
+        }
+    }
     if translation_texts is not None:
         response["translationTexts"] = translation_texts
     return response
@@ -679,28 +909,1052 @@ def test_job_runner_uses_one_complete_high_authority_response() -> None:
     ).run(document, candidate_lattice=lattice)
 
     assert artifact["status"] == "ready-to-compose"
-    assert artifact["promptVersion"] == "semantic-job-candidate-arbitration-v8"
+    assert artifact["promptVersion"] == "semantic-job-candidate-arbitration-v17"
     assert len(provider.requests) == 1
     request = provider.requests[0]
     assert "total speaker count and complete timeline" in request["system_prompt"]
     assert "human locks" in request["system_prompt"]
     assert "current has no default priority" in request["system_prompt"]
+    assert "one speaker cannot produce two independent overlapping" in request[
+        "system_prompt"
+    ]
     assert (
         "More or fewer speakers, turns, boundaries, or words are not quality evidence"
         in request["system_prompt"]
     )
+    assert "multilingual-fidelity calibration rubric" in request["system_prompt"]
+    assert "same speaker and language" in request["system_prompt"]
+    assert "joined wording still exposes a concrete lexical" in request[
+        "system_prompt"
+    ]
+    assert "request provider-native N-best for every ASR group" in request[
+        "system_prompt"
+    ]
+    assert "singleton candidate is not itself a defect" in request[
+        "system_prompt"
+    ]
+    assert "visibly incompatible with the source language's normal" in request[
+        "system_prompt"
+    ]
+    assert "never invent the replacement text yourself" in request[
+        "system_prompt"
+    ]
+    assert "incumbent speaker labels as truth" in request["system_prompt"]
+    assert "Request speaker-cardinality-timeline plus every affected" in request[
+        "system_prompt"
+    ]
+    assert "Never substitute language-span, ASR-text" in request[
+        "system_prompt"
+    ]
+    assert "For speaker Apply" not in request["system_prompt"]
+    assert "For speaker The host" not in request["system_prompt"]
+    assert "flagged. decisions" not in request["system_prompt"]
+    assert "For structural decisions, timestamps are hard evidence" in request[
+        "system_prompt"
+    ]
+    assert "smallest domain that can repair that defect" in request["system_prompt"]
+    assert "Evaluate every target domain independently" in request["system_prompt"]
+    assert "does not resolve or suppress an independent ASR" in request[
+        "system_prompt"
+    ]
+    assert "final lexical, grammatical, and syntactic-slot" in request[
+        "system_prompt"
+    ]
     user_prompt = json.loads(request["user_prompt"])
-    assert (
-        user_prompt["outputRules"]["currentCandidateHasDefaultPriority"]
-        is False
-    )
+    assert user_prompt["decisionPhase"] == "joint-final"
+    assert user_prompt["outputRules"]["currentCandidateHasDefaultPriority"] is False
     assert user_prompt["outputRules"]["requireCrossDomainConsistency"] is True
-    assert user_prompt["decisionProtocol"] == {
-        "choiceIndexesAlignWithGroupPositions": True,
-        "candidateChoiceField": "choiceIndex",
-        "requestDefaultChallengerIndex": -1,
+    assert user_prompt["outputRules"][
+        "visibleOrthographyOrScriptDefectRequiresAsrRequest"
+    ] is True
+    assert user_prompt["semanticCalibration"] == {
+        "rubricVersion": "multilingual-fidelity-v2",
+        "referenceTranscriptVisible": False,
+        "modelIdentityHasPriority": False,
+        "challengerPolicy": "smallest-evidence-backed-domain-only",
+        "preserve": [
+            "complete-spoken-meaning",
+            "source-script-and-diacritics",
+            "code-switch-boundaries",
+            "named-entities-numbers-units-dates-negation",
+        ],
+        "forbid": [
+            "translation-of-source-candidate",
+            "style-only-rewrite",
+            "fluency-only-correction",
+            "unrelated-domain-reopening",
+        ],
+        "inspect": [
+            "segment-internal-lexical-and-grammatical-coherence",
+            "same-speaker-same-language-adjacent-joined-coherence",
+            "cross-boundary-omission-duplication-or-dangling-phrase",
+            "candidate-coverage-and-repairability",
+            "source-orthography-script-and-syntactic-slot-compatibility",
+            "timestamp-ordered-lexical-continuity-across-speaker-labels",
+            "speaker-switches-versus-visible-turn-taking-cues",
+            "independent-domain-defect-sweep-after-structural-review",
+        ],
+        "crossSegmentAsrPolicy": {
+            "joinOnlyImmediateTimestampAdjacentSameSpeakerSameLanguage": True,
+            "individualFragmentIncompletenessAloneIsDefect": False,
+            "joinedConcreteLexicalOrGrammaticalDefectRequiresAsrRequestWhenUnresolved": True,
+            "requestEveryAffectedAsrGroup": True,
+            "singletonCandidateAloneIsDefect": False,
+            "reopenUnrelatedDomains": False,
+        },
+        "speakerContinuityPolicy": {
+            "incumbentSpeakerLabelsAreEvidenceNotTruth": True,
+            "inspectCompleteTimestampOrderedVisibleText": True,
+            "stableLanguageSingleUtteranceAcrossRapidSpeakerSwitchesSignalsSpeakerChallengerNeed": True,
+            "lexicalContinuityAloneProvesSingleSpeaker": False,
+            "lexicalContinuityAloneAuthorizesAutomaticMerge": False,
+            "resolveTimelineBeforeAssignments": True,
+            "requestTimelineAndEveryAffectedAssignmentWhenUnresolved": True,
+            "languageAsrOrDispositionCanSubstituteForSpeakerRepair": False,
+        },
+        "crossDomainReviewPolicy": {
+            "evaluateEveryTargetDomainIndependently": True,
+            "structuralRequestSuppressesIndependentAsrDefect": False,
+            "asrRequestSuppressesIndependentSpeakerDefect": False,
+            "allowMultipleBoundedRequestsPerScope": True,
+            "finalLexicalSweepAfterStructuralReview": True,
+        },
     }
-    assert request["response_schema"]["required"] == ["choiceIndexes"]
+    assert user_prompt["outputRules"]["requestOnlyForConcreteVisibleDefect"] is True
+    assert user_prompt["outputRules"]["requestSmallestRelevantDomain"] is True
+    assert user_prompt["outputRules"][
+        "inspectAdjacentSameSpeakerLanguageAsrContinuity"
+    ] is True
+    assert user_prompt["outputRules"][
+        "requestAllAsrGroupsContributingToJoinedDefect"
+    ] is True
+    assert user_prompt["outputRules"][
+        "singletonAsrCandidateAloneDoesNotAuthorizeRequest"
+    ] is True
+    assert user_prompt["outputRules"][
+        "inspectTranscriptIndependentOfIncumbentSpeakerLabels"
+    ] is True
+    assert user_prompt["outputRules"][
+        "speakerContinuityDefectRequiresTimelineAndAssignmentResolution"
+    ] is True
+    assert user_prompt["outputRules"][
+        "languageAsrOrDispositionCannotSubstituteForSpeakerRepair"
+    ] is True
+    assert user_prompt["outputRules"][
+        "lexicalContinuityAloneDoesNotProveSameSpeaker"
+    ] is True
+    assert user_prompt["outputRules"][
+        "evaluateEveryTargetDomainIndependently"
+    ] is True
+    assert user_prompt["outputRules"][
+        "allowMultipleBoundedRequestsPerScope"
+    ] is True
+    assert user_prompt["outputRules"][
+        "finalLexicalSweepAfterStructuralReview"
+    ] is True
+    assert user_prompt["decisionProtocol"][
+        "choiceByPositionKeysAlignWithGroupPositions"
+    ] is True
+    assert user_prompt["decisionProtocol"]["responseChoiceField"] == (
+        "choiceByPosition"
+    )
+    assert user_prompt["decisionProtocol"]["candidateChoiceField"] == (
+        "choiceIndex"
+    )
+    assert user_prompt["decisionProtocol"][
+        "requestDefaultChallengerIndex"
+    ] == -1
+    assert all(
+        bound["minimum"] == -1 and bound["maximum"] >= 0
+        for bound in user_prompt["decisionProtocol"][
+            "choiceIndexBoundsByGroupPosition"
+        ]
+    )
+    assert request["response_schema"]["required"] == ["choiceByPosition"]
+    assert all(
+        item["minimum"] == -1
+        for item in request["response_schema"]["properties"][
+            "choiceByPosition"
+        ]["properties"].values()
+    )
+
+
+def test_prompt_exposes_visible_language_calibration_as_advisory_evidence() -> None:
+    document = _document()
+    document["segments"][0]["language"] = "yue-Hant-HK"
+    document["segments"][0]["normalizedText"] = "from our department"
+    lattice = _full_lattice(document)
+    context = semantic_job_prompt_context(lattice, document=document)
+
+    segment = context["transcriptSegments"][0]
+    calibration = segment["visibleLanguageCalibration"]
+    assert calibration["claimedLanguageConflict"] is True
+    assert calibration["recommendedDomains"] == ["language-span", "asr-text"]
+    assert context["visibleLanguageCalibration"] == {
+        "schemaVersion": "1.0.0",
+        "heuristicOnly": True,
+        "flaggedSegmentCount": 1,
+        "flaggedSegmentIds": ["segment-1"],
+        "recommendedDomainCounts": {"language-span": 1, "asr-text": 1},
+    }
+    assert context["visibleSpeakerContinuity"] == {
+        "schemaVersion": "1.0.0",
+        "heuristicOnly": True,
+        "segmentCount": 2,
+        "distinctSpeakerCount": 2,
+        "speakerLabelRunCount": 2,
+        "speakerSwitchCount": 1,
+        "distinctLanguageCount": 2,
+        "languageSwitchCount": 1,
+        "overlapSegmentCount": 0,
+        "adjacentPairCount": 1,
+        "zeroGapAdjacentPairCount": 1,
+        "positiveGapAdjacentPairCount": 0,
+        "largestAdjacentGapMs": 0,
+        "visibleSpanMs": 2000,
+    }
+
+
+def test_frozen_arabic_cross_segment_lexical_major_requests_both_asr_groups() -> None:
+    fixture_path = (
+        ROOT
+        / "benchmarks"
+        / "product_reviews"
+        / "development-20260809"
+        / "fleurs_ar_eg_validation_090.semantic-v13-major-regression.v1.json"
+    )
+    fixture = read_json_strict(fixture_path)
+    fixture_body = copy.deepcopy(fixture)
+    fixture_hash = fixture_body.pop("canonicalSha256")
+    assert canonical_json_sha256(fixture_body) == fixture_hash
+    assert fixture["visibilityPolicy"] == {
+        "caseIdIsAuditOnly": True,
+        "referenceTranscriptVisibleToArbitrator": False,
+        "expectedDecisionVisibleToArbitrator": False,
+        "modelIdentityVisibleToArbitrator": False,
+    }
+
+    visible = fixture["visibleInput"]
+    binding = fixture["inputBinding"]
+    document = _document()
+    document.update(
+        {
+            "documentId": "doc-frozen-visible-arabic-regression",
+            "jobId": "job-frozen-visible-arabic-regression",
+            "language": visible["language"],
+            "source": {
+                "fileName": "frozen-visible-arabic.wav",
+                "sha256": binding["sourceMediaSha256"],
+                "durationMs": binding["sourceDurationMs"],
+            },
+            "speakerPolicy": {
+                "mode": "manual",
+                "resolvedCount": visible["speakerCount"],
+                "speakerIds": ["speaker-1"],
+            },
+            "speakers": [{"id": "speaker-1"}],
+        }
+    )
+    document["segments"] = []
+    for item in visible["segments"]:
+        segment = _segment(
+            item["segmentId"],
+            start_ms=item["startMs"],
+            speaker_id=item["speakerId"],
+            text=item["text"],
+        )
+        segment.update(
+            {
+                "endMs": item["endMs"],
+                "language": item["language"],
+                "speakerScores": [
+                    {"speakerId": item["speakerId"], "score": 0.9}
+                ],
+                "speakerMargin": 2.0,
+            }
+        )
+        document["segments"].append(segment)
+    document["provenance"] = {
+        "offline": True,
+        "models": [],
+        "frozenTranscriptDocumentSha256": binding[
+            "transcriptDocumentSha256"
+        ],
+        "frozenCandidateLatticeSha256": binding[
+            "candidateLatticeSha256"
+        ],
+    }
+    lattice = build_semantic_candidate_lattice_from_document(document)
+
+    class VisibleEvidenceProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.request: dict | None = None
+
+        def generate_json(self, **kwargs):
+            self.request = dict(kwargs)
+            prompt = json.loads(kwargs["user_prompt"])
+            return {
+                "choiceByPosition": {
+                    str(group["groupPosition"]): (
+                        -1
+                        if group["domain"] == "asr-text"
+                        else next(
+                            candidate["choiceIndex"]
+                            for candidate in group["candidates"]
+                            if candidate["current"] is True
+                        )
+                    )
+                    for group in prompt["candidateLattice"]["targetGroups"]
+                }
+            }
+
+    provider = VisibleEvidenceProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-semantic-arbitrator",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(document, candidate_lattice=lattice)
+
+    assert provider.request is not None
+    serialized_prompt = provider.request["user_prompt"]
+    system_prompt = provider.request["system_prompt"]
+    prompt = json.loads(serialized_prompt)
+    assert fixture["auditBinding"]["caseId"] not in serialized_prompt
+    assert fixture["blindReviewFinding"]["reason"] not in serialized_prompt
+    assert "provider-native N-best for every ASR group" in system_prompt
+    assert prompt["semanticCalibration"]["rubricVersion"] == (
+        "multilingual-fidelity-v2"
+    )
+    assert [
+        {
+            key: segment[key]
+            for key in (
+                "segmentId",
+                "startMs",
+                "endMs",
+                "speakerId",
+                "language",
+                "text",
+            )
+        }
+        for segment in prompt["candidateLattice"]["transcriptSegments"]
+    ] == [
+        {
+            key: segment[key]
+            for key in (
+                "segmentId",
+                "startMs",
+                "endMs",
+                "speakerId",
+                "language",
+                "text",
+            )
+        }
+        for segment in visible["segments"]
+    ]
+    asr_groups = [
+        group
+        for group in prompt["candidateLattice"]["targetGroups"]
+        if group["domain"] == "asr-text"
+    ]
+    assert {
+        group["scopeId"]: group["candidateCoverage"]
+        for group in asr_groups
+    } == {
+        f"segment:{segment['segmentId']}": {
+            "selectableCandidateCount": segment[
+                "asrSelectableCandidateCount"
+            ],
+            "distinctSummaryCount": segment["asrDistinctSummaryCount"],
+            "singleSelectableCandidate": True,
+            "hasDistinctAlternative": False,
+        }
+        for segment in visible["segments"]
+    }
+    assert artifact["status"] == "candidate-generation-required"
+    assert [
+        {
+            key: request[key]
+            for key in ("domain", "scopeId", "requestKind")
+        }
+        for request in artifact["candidateGenerationRequests"]
+    ] == fixture["blindReviewFinding"]["expectedRequests"]
+    assert {
+        request["domain"]
+        for request in artifact["candidateGenerationRequests"]
+    } == {"asr-text"}
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "minds_fr_fr_089.semantic-v13-major-regression.v1.json",
+        "minds_zh_cn_258.semantic-v13-major-regression.v1.json",
+    ],
+)
+def test_frozen_speaker_continuity_majors_request_structural_domains(
+    fixture_name: str,
+) -> None:
+    fixture_path = (
+        ROOT
+        / "benchmarks"
+        / "product_reviews"
+        / "development-20260809"
+        / fixture_name
+    )
+    fixture = read_json_strict(fixture_path)
+    fixture_body = copy.deepcopy(fixture)
+    fixture_hash = fixture_body.pop("canonicalSha256")
+    assert canonical_json_sha256(fixture_body) == fixture_hash
+    visible = fixture["visibleInput"]
+    binding = fixture["inputBinding"]
+    document = _speaker_continuity_regression_document(fixture)
+    lattice = _speaker_continuity_regression_lattice(document)
+    context = semantic_job_prompt_context(lattice, document=document)
+    continuity = context["visibleSpeakerContinuity"]
+    assert continuity["segmentCount"] == len(visible["segments"])
+    assert continuity["distinctSpeakerCount"] == visible["speakerCount"]
+    assert continuity["speakerSwitchCount"] == len(visible["segments"]) - 1
+    assert continuity["languageSwitchCount"] == 0
+    assert continuity["overlapSegmentCount"] == 0
+    assert continuity["zeroGapAdjacentPairCount"] == (
+        len(visible["segments"]) - 1
+        - (1 if fixture["auditBinding"]["caseId"] == "minds_fr_fr_089" else 0)
+    )
+    assert continuity["visibleSpanMs"] == (
+        visible["segments"][-1]["endMs"]
+        - visible["segments"][0]["startMs"]
+    )
+
+    class StructuralReviewProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.request: dict | None = None
+
+        def generate_json(self, **kwargs):
+            self.request = dict(kwargs)
+            prompt = json.loads(kwargs["user_prompt"])
+            choices = {}
+            for group in prompt["candidateLattice"]["targetGroups"]:
+                if group["domain"] in {
+                    "speaker-cardinality-timeline",
+                    "speaker-assignment",
+                }:
+                    choices[str(group["groupPosition"])] = -1
+                else:
+                    choices[str(group["groupPosition"])] = next(
+                        candidate["choiceIndex"]
+                        for candidate in group["candidates"]
+                        if candidate["current"] is True
+                    )
+            return {"choiceByPosition": choices}
+
+    provider = StructuralReviewProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-semantic-arbitrator",
+        context_tokens=65_536,
+        output_tokens=4_096,
+        batch_size=32,
+    ).run(document, candidate_lattice=lattice)
+
+    assert provider.request is not None
+    serialized_prompt = provider.request["user_prompt"]
+    prompt = json.loads(serialized_prompt)
+    system_prompt = provider.request["system_prompt"]
+    assert fixture["auditBinding"]["caseId"] not in serialized_prompt
+    assert fixture["blindReviewFinding"]["reason"] not in serialized_prompt
+    assert "incumbent speaker labels as truth" in system_prompt
+    assert "do not automatically merge speakers" in system_prompt
+    assert "Never substitute language-span, ASR-text" in system_prompt
+    assert prompt["semanticCalibration"]["speakerContinuityPolicy"] == {
+        "incumbentSpeakerLabelsAreEvidenceNotTruth": True,
+        "inspectCompleteTimestampOrderedVisibleText": True,
+        "stableLanguageSingleUtteranceAcrossRapidSpeakerSwitchesSignalsSpeakerChallengerNeed": True,
+        "lexicalContinuityAloneProvesSingleSpeaker": False,
+        "lexicalContinuityAloneAuthorizesAutomaticMerge": False,
+        "resolveTimelineBeforeAssignments": True,
+        "requestTimelineAndEveryAffectedAssignmentWhenUnresolved": True,
+        "languageAsrOrDispositionCanSubstituteForSpeakerRepair": False,
+    }
+    prompt_segments = prompt["candidateLattice"]["transcriptSegments"]
+    assert [
+        (
+            segment["segmentId"],
+            segment["startMs"],
+            segment["endMs"],
+            segment["speakerId"],
+            segment["language"],
+            segment["text"],
+        )
+        for segment in prompt_segments
+    ] == [
+        (
+            segment["segmentId"],
+            segment["startMs"],
+            segment["endMs"],
+            segment["speakerId"],
+            segment["language"],
+            segment["text"],
+        )
+        for segment in visible["segments"]
+    ]
+    assert prompt["candidateLattice"]["transcriptContextPolicy"][
+        "allTargetSegmentsIncluded"
+    ] is True
+    timeline_groups = [
+        group
+        for group in prompt["candidateLattice"]["targetGroups"]
+        if group["domain"] == "speaker-cardinality-timeline"
+    ]
+    assert len(timeline_groups) == 1
+    assert timeline_groups[0]["candidateCoverage"] == {
+        "selectableCandidateCount": visible["timelineSelectableCandidateCount"],
+        "distinctSummaryCount": visible["timelineSelectableCandidateCount"],
+        "singleSelectableCandidate": False,
+        "hasDistinctAlternative": True,
+    }
+    assignment_groups = [
+        group
+        for group in prompt["candidateLattice"]["targetGroups"]
+        if group["domain"] == "speaker-assignment"
+    ]
+    assert {
+        group["scopeId"]: group["candidateCoverage"][
+            "selectableCandidateCount"
+        ]
+        for group in assignment_groups
+    } == {
+        f"segment:{segment['segmentId']}": visible[
+            "speakerAssignmentSelectableCandidateCountPerSegment"
+        ]
+        for segment in visible["segments"]
+    }
+    assert artifact["status"] == "candidate-generation-required"
+    actual_requests = {
+        (item["domain"], item["scopeId"], item["requestKind"])
+        for item in artifact["candidateGenerationRequests"]
+    }
+    expected_requests = {
+        (item["domain"], item["scopeId"], item["requestKind"])
+        for item in fixture["blindReviewFinding"]["expectedRequests"]
+    }
+    assert actual_requests == expected_requests
+    assert {
+        item["domain"] for item in artifact["candidateGenerationRequests"]
+    } == {"speaker-cardinality-timeline", "speaker-assignment"}
+    assert {
+        item["domain"] for item in artifact["selections"]
+        if "domain" in item
+    }.issubset({
+        "speech-disposition",
+        "language-span",
+        "asr-text",
+    })
+
+
+def test_runner_restricts_frozen_human_locked_choices_before_provider() -> None:
+    document = _document()
+    document["segments"][0]["humanLocked"] = True
+    lattice = _full_lattice(document)
+    locked_language_lattice_group = next(
+        group
+        for domain in lattice["domains"]
+        if domain["domain"] == "language-span"
+        for group in domain["groups"]
+        if group["scopeId"] == "segment:segment-1"
+    )
+    assert locked_language_lattice_group["eligibleCandidateCount"] == 2
+
+    class CapturingCurrentProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.requests: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            self.requests.append(dict(kwargs))
+            prompt = json.loads(kwargs["user_prompt"])
+            return {
+                "choiceByPosition": {
+                    str(group["groupPosition"]): next(
+                        candidate["choiceIndex"]
+                        for candidate in group["candidates"]
+                        if candidate["current"] is True
+                    )
+                    for group in prompt["candidateLattice"]["targetGroups"]
+                }
+            }
+
+    provider = CapturingCurrentProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(document, candidate_lattice=lattice)
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    prompt = json.loads(request["user_prompt"])
+    groups = prompt["candidateLattice"]["targetGroups"]
+    schema_by_position = request["response_schema"]["properties"][
+        "choiceByPosition"
+    ]["properties"]
+    restricted = {
+        (group["domain"], group["scopeId"]): group
+        for group in groups
+        if group.get("humanLockRestricted") is True
+    }
+    assert set(restricted) == {
+        ("speech-disposition", "media"),
+        ("speaker-cardinality-timeline", "media"),
+        *{
+            (domain, "segment:segment-1")
+            for domain in _SEGMENT_ATOMIC_DOMAINS_FOR_TEST
+        },
+    }
+    for group in restricted.values():
+        assert group["requestDefaultChallengerAllowed"] is False
+        assert len(group["candidates"]) == 1
+        candidate = group["candidates"][0]
+        assert candidate["current"] is True
+        assert group["humanLockAllowedCandidateChoiceIndexes"] == [
+            candidate["choiceIndex"]
+        ]
+        assert schema_by_position[str(group["groupPosition"])]["enum"] == [
+            candidate["choiceIndex"]
+        ]
+
+    unlocked = [
+        group for group in groups if group["scopeId"] == "segment:segment-2"
+    ]
+    assert {group["domain"] for group in unlocked} == (
+        _SEGMENT_ATOMIC_DOMAINS_FOR_TEST
+    )
+    for group in unlocked:
+        assert "humanLockRestricted" not in group
+        assert group["requestDefaultChallengerAllowed"] is True
+        assert len(group["candidates"]) == 2
+        assert -1 in schema_by_position[str(group["groupPosition"])]["enum"]
+
+    composition = build_semantic_composition(document, lattice, artifact)
+    assert composition["humanLocksPreserved"] is True
+    assert composition["segments"][0]["speakerId"] == "speaker-1"
+    assert composition["segments"][0]["language"] == "en"
+    assert composition["segments"][0]["finalText"] == "Hello"
+
+
+def test_runner_keeps_timeline_challenger_that_preserves_locked_turn() -> None:
+    document = _document()
+    document["segments"][1]["humanLocked"] = True
+    lattice = _full_lattice(document)
+
+    class CapturingCurrentProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.requests: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            self.requests.append(dict(kwargs))
+            prompt = json.loads(kwargs["user_prompt"])
+            return {
+                "choiceByPosition": {
+                    str(group["groupPosition"]): next(
+                        candidate["choiceIndex"]
+                        for candidate in group["candidates"]
+                        if candidate["current"] is True
+                    )
+                    for group in prompt["candidateLattice"]["targetGroups"]
+                }
+            }
+
+    provider = CapturingCurrentProvider()
+    SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(document, candidate_lattice=lattice)
+
+    request = provider.requests[0]
+    prompt = json.loads(request["user_prompt"])
+    timeline = next(
+        group
+        for group in prompt["candidateLattice"]["targetGroups"]
+        if group["domain"] == "speaker-cardinality-timeline"
+    )
+    assert timeline["humanLockRestricted"] is True
+    assert timeline["requestDefaultChallengerAllowed"] is False
+    assert {candidate["summary"]["timelineKind"] for candidate in timeline["candidates"]} == {
+        "current-transcript",
+        "challenger",
+    }
+    allowed = timeline["humanLockAllowedCandidateChoiceIndexes"]
+    assert allowed == sorted(
+        candidate["choiceIndex"] for candidate in timeline["candidates"]
+    )
+    timeline_schema = request["response_schema"]["properties"][
+        "choiceByPosition"
+    ]["properties"][str(timeline["groupPosition"])]
+    assert timeline_schema["enum"] == allowed
+    assert -1 not in timeline_schema["enum"]
+
+
+def test_runner_enforces_assignments_supported_by_committed_timeline() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+
+    class TimelineAwareProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.requests: list[dict] = []
+            self.segment_two_attempts = 0
+
+        def generate_json(self, **kwargs):
+            self.requests.append(dict(kwargs))
+            prompt = json.loads(kwargs["user_prompt"])
+            groups = sorted(
+                prompt["candidateLattice"]["targetGroups"],
+                key=lambda item: item["groupPosition"],
+            )
+            choices: dict[str, int] = {}
+            for group in groups:
+                candidates = group["candidates"]
+                if group["domain"] == "speaker-cardinality-timeline":
+                    choice = next(
+                        candidate["choiceIndex"]
+                        for candidate in candidates
+                        if candidate["summary"]["timelineKind"] == "challenger"
+                    )
+                elif (
+                    group["domain"] == "speaker-assignment"
+                    and group["scopeId"] == "segment:segment-2"
+                ):
+                    key = "structurallyCompatibleWithCommittedTimeline"
+                    if self.segment_two_attempts == 0:
+                        choice = next(
+                            candidate["choiceIndex"]
+                            for candidate in candidates
+                            if candidate[key] is False
+                        )
+                    else:
+                        choice = next(
+                            candidate["choiceIndex"]
+                            for candidate in candidates
+                            if candidate[key] is True
+                        )
+                    self.segment_two_attempts += 1
+                else:
+                    choice = 0
+                choices[str(group["groupPosition"])] = choice
+            return {"choiceByPosition": choices}
+
+    provider = TimelineAwareProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=3,
+        max_batch_attempts=2,
+    ).run(document, candidate_lattice=lattice)
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.requests) == 4
+    segment_two_requests = [
+        request
+        for request in provider.requests
+        if "segment:segment-2"
+        in json.loads(request["user_prompt"])["targetScopeIds"]
+    ]
+    assert len(segment_two_requests) == 2
+    first_request = segment_two_requests[0]
+    first_prompt = json.loads(first_request["user_prompt"])
+    assignment_group = next(
+        group
+        for group in first_prompt["candidateLattice"]["targetGroups"]
+        if group["domain"] == "speaker-assignment"
+    )
+    compatible = assignment_group[
+        "structurallyAllowedCandidateChoiceIndexes"
+    ]
+    incompatible = [
+        candidate["choiceIndex"]
+        for candidate in assignment_group["candidates"]
+        if candidate["structurallyCompatibleWithCommittedTimeline"] is False
+    ]
+    assert len(compatible) == 1
+    assert len(incompatible) == 1
+    position = str(assignment_group["groupPosition"])
+    choice_schema = first_request["response_schema"]["properties"][
+        "choiceByPosition"
+    ]["properties"][position]
+    assert choice_schema["enum"] == [-1, *compatible]
+    assert incompatible[0] not in choice_schema["enum"]
+    bound = first_prompt["decisionProtocol"][
+        "choiceIndexBoundsByGroupPosition"
+    ][assignment_group["groupPosition"]]
+    assert bound["allowedChoiceIndexes"] == [-1, *compatible]
+    retry_prompt = json.loads(segment_two_requests[1]["user_prompt"])
+    assert retry_prompt["correction"]["validationFailureCode"] == (
+        "COMMITTED_TIMELINE_CONFLICT"
+    )
+
+    composition = build_semantic_composition(document, lattice, artifact)
+    assert composition["segments"][1]["speakerId"] == "speaker-2"
+
+
+def test_runner_retries_same_batch_timeline_assignment_conflict() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+
+    class ConflictingThenConsistentProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.requests: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            self.requests.append(dict(kwargs))
+            prompt = json.loads(kwargs["user_prompt"])
+            groups = sorted(
+                prompt["candidateLattice"]["targetGroups"],
+                key=lambda item: item["groupPosition"],
+            )
+            first_attempt = len(self.requests) == 1
+            choices: dict[str, int] = {}
+            for group in groups:
+                candidates = group["candidates"]
+                if first_attempt and group["domain"] == (
+                    "speaker-cardinality-timeline"
+                ):
+                    choice = next(
+                        item["choiceIndex"]
+                        for item in candidates
+                        if item["summary"]["timelineKind"] == "challenger"
+                    )
+                elif (
+                    first_attempt
+                    and group["domain"] == "speaker-assignment"
+                    and group["scopeId"] == "segment:segment-2"
+                ):
+                    choice = next(
+                        item["choiceIndex"]
+                        for item in candidates
+                        if item["summary"]["speakerId"] == "speaker-1"
+                    )
+                else:
+                    choice = next(
+                        item["choiceIndex"]
+                        for item in candidates
+                        if item["current"] is True
+                    )
+                choices[str(group["groupPosition"])] = choice
+            return {"choiceByPosition": choices}
+
+    provider = ConflictingThenConsistentProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+        max_batch_attempts=2,
+    ).run(document, candidate_lattice=lattice)
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.requests) == 2
+    retry_prompt = json.loads(provider.requests[1]["user_prompt"])
+    assert retry_prompt["correction"]["validationFailureCode"] == (
+        "COMMITTED_TIMELINE_CONFLICT"
+    )
+    composition = build_semantic_composition(document, lattice, artifact)
+    assert [segment["speakerId"] for segment in composition["segments"]] == [
+        "speaker-1",
+        "speaker-2",
+    ]
+
+
+def test_runner_rejects_legacy_live_full_response_that_bypasses_consistency() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+
+    with pytest.raises(WorkerError) as caught:
+        SemanticJobArbitrationRunner(
+            provider=MappingLocalLLMProvider([_ready_response(lattice)]),
+            model="fixture-9b",
+            context_tokens=32_768,
+            output_tokens=4_096,
+            batch_size=8,
+            max_batch_attempts=1,
+        ).run(document, candidate_lattice=lattice)
+
+    assert caught.value.code == "SEMANTIC_JOB_PROVIDER_FAILED"
+    assert "STRICT_JSON_OR_SCHEMA_INVALID" in caught.value.details["reason"]
+    assert caught.value.details["attemptDiagnostics"][0][
+        "validationFailureCode"
+    ] == "STRICT_JSON_OR_SCHEMA_INVALID"
+
+
+def test_runner_rearbitrates_segment_triads_when_carried_timeline_is_missing() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    previous = _artifact(
+        lattice,
+        _request_or_select_response(
+            lattice,
+            force_request_domains=frozenset(
+                {"speaker-cardinality-timeline"}
+            ),
+        ),
+    )
+    selected_by_group = {
+        group["groupId"]: group["currentCandidateId"]
+        for domain in lattice["domains"]
+        for group in domain["groups"]
+        if group["status"] == "available"
+    }
+
+    class CapturingProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            target_ids = _prompt_target_group_ids(lattice, prompt)
+            return _positional_response(
+                lattice,
+                target_group_ids=target_ids,
+                selected_by_group=selected_by_group,
+            )
+
+    provider = CapturingProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(
+        document,
+        candidate_lattice=lattice,
+        carried_lattice=lattice,
+        carried_arbitration=previous,
+    )
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.prompts) == 1
+    prompt = provider.prompts[0]
+    target_groups = prompt["candidateLattice"]["targetGroups"]
+    assert {
+        (group["domain"], group["scopeId"]) for group in target_groups
+    } == {
+        ("speaker-cardinality-timeline", "media"),
+        *{
+            (domain, f"segment:segment-{segment_number}")
+            for segment_number in (1, 2)
+            for domain in _SEGMENT_ATOMIC_DOMAINS_FOR_TEST
+        },
+    }
+    assert [
+        item["domain"] for item in prompt["committedSelections"]
+    ] == ["speech-disposition"]
+    assert prompt["committedRequests"] == [
+        {
+            "domain": "speaker-cardinality-timeline",
+            "scopeId": "media",
+            "requestKind": "timeline-challenger",
+        }
+    ]
+    assert prompt["outputRules"][
+        "committedRequestsAreUnresolvedEvidenceGaps"
+    ] is True
+    build_semantic_composition(document, lattice, artifact)
+
+
+def test_challenger_request_does_not_raise_minimum_above_generator_contract() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+
+    class RequestTimelineProvider(MappingLocalLLMProvider):
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            return {
+                "choiceIndexes": [
+                    -1 if group["domain"] == "speaker-cardinality-timeline" else 0
+                    for group in prompt["candidateLattice"]["targetGroups"]
+                ]
+            }
+
+    artifact = SemanticJobArbitrationRunner(
+        provider=RequestTimelineProvider([]),
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(document, candidate_lattice=lattice)
+
+    request = artifact["candidateGenerationRequests"][0]
+    timeline_group = next(
+        domain["groups"][0]
+        for domain in lattice["domains"]
+        if domain["domain"] == "speaker-cardinality-timeline"
+    )
+    assert timeline_group["eligibleCandidateCount"] > 1
+    assert request["domain"] == "speaker-cardinality-timeline"
+    assert request["minimumAlternativeCount"] == 2
+
+
+def test_singleton_groups_remain_model_visible_with_translation() -> None:
+    document = _document()
+    for segment in document["segments"]:
+        segment["speakerScores"] = [
+            {"speakerId": segment["speakerId"], "score": 1.0}
+        ]
+        segment["speakerMargin"] = 1.0
+    lattice = build_semantic_candidate_lattice_from_document(document)
+
+    class TranslationProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            return {
+                "choiceIndexes": [0] * prompt["targetGroupCount"],
+                "translationTexts": ["你好", "世界"],
+            }
+
+    provider = TranslationProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+        translation_targets=("zh-CN",),
+    ).run(document, candidate_lattice=lattice)
+
+    assert len(provider.prompts) == 1
+    target_groups = provider.prompts[0]["candidateLattice"]["targetGroups"]
+    available_group_count = sum(
+        domain["availableGroupCount"] for domain in lattice["domains"]
+    )
+    assert len(target_groups) == available_group_count
+    assert sum(group["domain"] == "asr-text" for group in target_groups) == 2
+    assert [item["text"] for item in artifact["translations"]] == [
+        "你好",
+        "世界",
+    ]
 
 
 def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> None:
@@ -791,10 +2045,683 @@ def test_job_runner_decides_structure_before_scope_atomic_segment_triads() -> No
         )
 
 
+def test_job_runner_carries_unresolved_requests_across_batches() -> None:
+    """A structural challenger request must remain visible to later batches."""
+
+    document = _document()
+    lattice = _full_lattice(document)
+    selected_by_group = {
+        group["groupId"]: group["currentCandidateId"]
+        for domain in lattice["domains"]
+        for group in domain["groups"]
+        if group["status"] == "available"
+    }
+
+    class RequestThenSelectProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+            self.system_prompts: list[str] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            self.system_prompts.append(str(kwargs["system_prompt"]))
+            target_ids = _prompt_target_group_ids(lattice, prompt)
+            choices = dict(selected_by_group)
+            if len(self.prompts) == 1:
+                timeline_id = next(
+                    group_id
+                    for group_id in target_ids
+                    if next(
+                        domain["domain"]
+                        for domain in lattice["domains"]
+                        if any(
+                            group["groupId"] == group_id
+                            for group in domain["groups"]
+                        )
+                    )
+                    == "speaker-cardinality-timeline"
+                )
+                choices[timeline_id] = None
+            return _positional_response(
+                lattice,
+                target_group_ids=target_ids,
+                selected_by_group=choices,
+            )
+
+    provider = RequestThenSelectProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=2,
+    ).run(document, candidate_lattice=lattice)
+
+    assert len(provider.prompts) == 3
+    assert "committedRequests" not in provider.prompts[0]
+    expected = {
+        "domain": "speaker-cardinality-timeline",
+        "scopeId": "media",
+        "requestKind": "timeline-challenger",
+    }
+    assert expected in provider.prompts[1]["committedRequests"]
+    assert expected in provider.prompts[2]["committedRequests"]
+    assert provider.prompts[1]["outputRules"][
+        "committedRequestsAreUnresolvedEvidenceGaps"
+    ] is True
+    assert provider.prompts[1]["outputRules"][
+        "committedRequestsAreNotFacts"
+    ] is True
+    transcript_policy = provider.prompts[1]["candidateLattice"][
+        "transcriptContextPolicy"
+    ]
+    assert transcript_policy["committedStructuralFullTranscriptRequested"] is True
+    assert transcript_policy["allTargetSegmentsIncluded"] is True
+    assert transcript_policy["includedSegmentCount"] == transcript_policy[
+        "totalSegmentCount"
+    ]
+    assert (
+        "treat every speaker-assignment group in that run as affected"
+        in provider.system_prompts[1]
+    )
+    assert artifact["status"] == "candidate-generation-required"
+
+
+def test_batch_eight_exposes_complete_active_speaker_continuity_run() -> None:
+    fixture = read_json_strict(
+        ROOT
+        / "benchmarks"
+        / "product_reviews"
+        / "development-20260809"
+        / "minds_fr_fr_089.semantic-v13-major-regression.v1.json"
+    )
+    document = _speaker_continuity_regression_document(fixture)
+    lattice = _speaker_continuity_regression_lattice(document)
+    expected_scopes = [
+        f"segment:{segment['segmentId']}"
+        for segment in fixture["visibleInput"]["segments"]
+    ]
+
+    class RunAwareProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+            self.native_assignment_requests: list[str] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            active_scopes = {
+                scope_id
+                for run in prompt["candidateLattice"][
+                    "activeSpeakerContinuityRuns"
+                ]
+                for scope_id in run["unresolvedAssignmentScopes"]
+            }
+            choices: dict[str, int] = {}
+            for group in prompt["candidateLattice"]["targetGroups"]:
+                choice = next(
+                    candidate["choiceIndex"]
+                    for candidate in group["candidates"]
+                    if candidate["current"] is True
+                )
+                if group["domain"] == "speaker-cardinality-timeline":
+                    choice = -1
+                elif (
+                    group["domain"] == "speaker-assignment"
+                    and group["scopeId"] in active_scopes
+                ):
+                    choice = -1
+                    self.native_assignment_requests.append(group["scopeId"])
+                choices[str(group["groupPosition"])] = choice
+            return {"choiceByPosition": choices}
+
+    provider = RunAwareProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-semantic-arbitrator",
+        context_tokens=65_536,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(document, candidate_lattice=lattice)
+
+    assert provider.prompts[0]["decisionPhase"] == "global-structure"
+    assert provider.prompts[0]["candidateLattice"][
+        "activeSpeakerContinuityRuns"
+    ] == []
+    segment_prompts = provider.prompts[1:]
+    assert len(segment_prompts) > 1
+    for prompt in segment_prompts:
+        runs = prompt["candidateLattice"]["activeSpeakerContinuityRuns"]
+        assert len(runs) == 1
+        run = runs[0]
+        assert run["orderedScopes"] == expected_scopes
+        assert run["barriers"] == []
+        assert run["unresolvedTimelineScopes"] == ["media"]
+        assert run["unresolvedAssignmentScopes"] == expected_scopes
+        assert set(run["requestedAssignmentScopes"]).issubset(expected_scopes)
+        membership = run["currentBatchMembership"]
+        assert membership["targetAssignmentScopes"] == prompt[
+            "targetScopeIds"
+        ]
+        assert prompt["outputRules"][
+            "activeSpeakerContinuityRunsAreAdvisory"
+        ] is True
+        assert prompt["outputRules"][
+            "activeRunContextDoesNotProveSpeakerIdentity"
+        ] is True
+
+    assert provider.native_assignment_requests == expected_scopes
+    assert {
+        request["scopeId"]
+        for request in artifact["candidateGenerationRequests"]
+        if request["domain"] == "speaker-assignment"
+    } == set(expected_scopes)
+    assert artifact["status"] == "candidate-generation-required"
+
+
+def test_batch_eight_keeps_independent_asr_request_with_speaker_requests() -> None:
+    fixture = read_json_strict(
+        ROOT
+        / "benchmarks"
+        / "product_reviews"
+        / "development-20260809"
+        / "fleurs_id_id_validation_003.semantic-v14-major-regression.v1.json"
+    )
+    document = _speaker_continuity_regression_document(fixture)
+    lattice = _speaker_continuity_regression_lattice(document)
+    defective_scope = "segment:window-000001.speaker-run-03"
+
+    class IndependentDomainProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+            self.native_request_decisions: list[tuple[str, str, str]] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            choices: dict[str, int] = {}
+            for group in prompt["candidateLattice"]["targetGroups"]:
+                choice = next(
+                    candidate["choiceIndex"]
+                    for candidate in group["candidates"]
+                    if candidate["current"] is True
+                )
+                if group["domain"] == "speaker-cardinality-timeline":
+                    choice = -1
+                elif (
+                    group["domain"] == "speaker-assignment"
+                    and prompt["candidateLattice"][
+                        "activeSpeakerContinuityRuns"
+                    ]
+                ):
+                    choice = -1
+                elif (
+                    group["domain"] == "asr-text"
+                    and group["scopeId"] == defective_scope
+                ):
+                    choice = -1
+                if choice == -1:
+                    request_kind = {
+                        "speaker-cardinality-timeline": "timeline-challenger",
+                        "speaker-assignment": "speaker-assignment-challenger",
+                        "asr-text": "provider-native-nbest",
+                    }[group["domain"]]
+                    self.native_request_decisions.append(
+                        (group["domain"], group["scopeId"], request_kind)
+                    )
+                choices[str(group["groupPosition"])] = choice
+            return {"choiceByPosition": choices}
+
+    provider = IndependentDomainProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-semantic-arbitrator",
+        context_tokens=65_536,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(document, candidate_lattice=lattice)
+
+    expected = {
+        (item["domain"], item["scopeId"], item["requestKind"])
+        for item in fixture["blindReviewFinding"]["expectedRequests"]
+    }
+    actual = {
+        (item["domain"], item["scopeId"], item["requestKind"])
+        for item in artifact["candidateGenerationRequests"]
+    }
+    assert actual == expected
+    assert set(provider.native_request_decisions) == expected
+
+    defective_prompt = next(
+        prompt
+        for prompt in provider.prompts
+        if any(
+            group["domain"] == "asr-text"
+            and group["scopeId"] == defective_scope
+            for group in prompt["candidateLattice"]["targetGroups"]
+        )
+    )
+    target_domains = {
+        group["domain"]
+        for group in defective_prompt["candidateLattice"]["targetGroups"]
+        if group["scopeId"] == defective_scope
+    }
+    assert target_domains == {
+        "speaker-assignment",
+        "language-span",
+        "asr-text",
+    }
+    assert defective_prompt["semanticCalibration"][
+        "crossDomainReviewPolicy"
+    ] == {
+        "evaluateEveryTargetDomainIndependently": True,
+        "structuralRequestSuppressesIndependentAsrDefect": False,
+        "asrRequestSuppressesIndependentSpeakerDefect": False,
+        "allowMultipleBoundedRequestsPerScope": True,
+        "finalLexicalSweepAfterStructuralReview": True,
+    }
+    assert defective_prompt["outputRules"][
+        "allowMultipleBoundedRequestsPerScope"
+    ] is True
+    assert artifact["status"] == "candidate-generation-required"
+
+
+def _continuity_guard_document(rows: list[dict]) -> dict:
+    document = _document()
+    speaker_ids = list(dict.fromkeys(str(row["speakerId"]) for row in rows))
+    document.update(
+        {
+            "language": "fr-FR",
+            "source": {
+                **document["source"],
+                "durationMs": max(int(row["endMs"]) for row in rows),
+            },
+            "speakerPolicy": {
+                "mode": "auto",
+                "resolvedCount": len(speaker_ids),
+                "speakerIds": speaker_ids,
+            },
+            "speakers": [{"id": speaker_id} for speaker_id in speaker_ids],
+        }
+    )
+    document["segments"] = []
+    for row in rows:
+        segment = _segment(
+            str(row["id"]),
+            start_ms=int(row["startMs"]),
+            speaker_id=str(row["speakerId"]),
+            text=str(row["text"]),
+        )
+        segment.update(
+            {
+                "endMs": int(row["endMs"]),
+                "language": str(row.get("language") or "fr-FR"),
+                "overlapping": bool(row.get("overlapping", False)),
+                "speakerScores": [
+                    {
+                        "speakerId": speaker_id,
+                        "score": (
+                            0.9 if speaker_id == row["speakerId"] else 0.6
+                        ),
+                    }
+                    for speaker_id in speaker_ids
+                ],
+            }
+        )
+        document["segments"].append(segment)
+    return document
+
+
+def _continuity_guard_response(
+    lattice: dict,
+    *,
+    assignment_anchor_scopes: tuple[str, ...],
+    timeline_request_kind: str = "timeline-challenger",
+) -> dict:
+    response = _select_current_response(lattice)
+    groups = {
+        (domain["domain"], group["scopeId"]): group
+        for domain in lattice["domains"]
+        for group in domain["groups"]
+    }
+    requested = [
+        (
+            groups[("speaker-cardinality-timeline", "media")],
+            "speaker-cardinality-timeline",
+            timeline_request_kind,
+        ),
+        *[
+            (
+                groups[("speaker-assignment", scope_id)],
+                "speaker-assignment",
+                "speaker-assignment-challenger",
+            )
+            for scope_id in assignment_anchor_scopes
+        ],
+    ]
+    requested_group_ids = {str(group["groupId"]) for group, _, _ in requested}
+    response["selections"] = [
+        selection
+        for selection in response["selections"]
+        if selection["groupId"] not in requested_group_ids
+    ]
+    response["candidateGenerationRequests"] = [
+        {
+            "domain": domain,
+            "groupId": group["groupId"],
+            "scopeId": group["scopeId"],
+            "requestKind": request_kind,
+            "minimumAlternativeCount": 2,
+            "reasonCodes": ["SEMANTIC_REQUESTED_CHALLENGER"],
+            "evidenceRefs": [
+                f"candidate-lattice:{lattice['latticeId']}",
+                f"candidate-group:{group['groupId']}",
+            ],
+        }
+        for group, domain, request_kind in requested
+    ]
+    return response
+
+
+def _assignment_group_ids(lattice: dict) -> set[str]:
+    return {
+        str(group["groupId"])
+        for domain in lattice["domains"]
+        if domain["domain"] == "speaker-assignment"
+        for group in domain["groups"]
+    }
+
+
+def test_structural_continuity_guard_completes_assignment_evidence_gap() -> None:
+    """One anchored assignment request expands to its complete visible run."""
+
+    document = _continuity_guard_document(
+        [
+            {
+                "id": "segment-1",
+                "startMs": 0,
+                "endMs": 900,
+                "speakerId": "speaker-1",
+                "text": "Bonjour je vous",
+            },
+            {
+                "id": "segment-2",
+                "startMs": 900,
+                "endMs": 1_800,
+                "speakerId": "speaker-2",
+                "text": "contactais pour savoir",
+            },
+            {
+                "id": "segment-3",
+                "startMs": 1_800,
+                "endMs": 2_700,
+                "speakerId": "speaker-3",
+                "text": "si la carte",
+            },
+        ]
+    )
+    lattice = _speaker_continuity_regression_lattice(document)
+    response = _continuity_guard_response(
+        lattice,
+        assignment_anchor_scopes=("segment:segment-1",),
+    )
+
+    _complete_structural_continuity_requests(
+        response,
+        lattice=lattice,
+        document=document,
+        requestable_group_ids=_assignment_group_ids(lattice),
+    )
+    artifact = _artifact(lattice, response)
+
+    assert artifact["status"] == "candidate-generation-required"
+    assert {
+        (item["domain"], item["scopeId"], item["requestKind"])
+        for item in artifact["candidateGenerationRequests"]
+    } == {
+        (
+            "speaker-cardinality-timeline",
+            "media",
+            "timeline-challenger",
+        ),
+        *{
+            (
+                "speaker-assignment",
+                f"segment:segment-{index}",
+                "speaker-assignment-challenger",
+            )
+            for index in (1, 2, 3)
+        },
+    }
+    assert {
+        item["scopeId"]
+        for item in artifact["candidateGenerationRequests"]
+        if item["reasonCodes"] == ["DETERMINISTIC_SPEAKER_CONTINUITY_GAP"]
+    } == {"segment:segment-2", "segment:segment-3"}
+
+
+def test_structural_continuity_guard_accepts_repeated_label_inside_run() -> None:
+    document = _continuity_guard_document(
+        [
+            {
+                "id": f"segment-{index}",
+                "startMs": (index - 1) * 900,
+                "endMs": index * 900,
+                "speakerId": speaker_id,
+                "text": text,
+            }
+            for index, (speaker_id, text) in enumerate(
+                (
+                    ("speaker-1", "Bonjour"),
+                    ("speaker-1", "je vous"),
+                    ("speaker-2", "contactais"),
+                    ("speaker-1", "pour savoir"),
+                ),
+                start=1,
+            )
+        ]
+    )
+    lattice = _speaker_continuity_regression_lattice(document)
+    response = _continuity_guard_response(
+        lattice,
+        assignment_anchor_scopes=("segment:segment-3",),
+    )
+
+    _complete_structural_continuity_requests(
+        response,
+        lattice=lattice,
+        document=document,
+        requestable_group_ids=_assignment_group_ids(lattice),
+    )
+    artifact = _artifact(lattice, response)
+
+    assert {
+        item["scopeId"]
+        for item in artifact["candidateGenerationRequests"]
+        if item["domain"] == "speaker-assignment"
+    } == {f"segment:segment-{index}" for index in range(1, 5)}
+
+
+def test_structural_continuity_guard_only_completes_anchored_local_run() -> None:
+    document = _continuity_guard_document(
+        [
+            {
+                "id": "prefix",
+                "startMs": 0,
+                "endMs": 600,
+                "speakerId": "speaker-1",
+                "language": "en-US",
+                "text": "Welcome.",
+            },
+            {
+                "id": "run-1",
+                "startMs": 600,
+                "endMs": 1_200,
+                "speakerId": "speaker-1",
+                "text": "Bonjour je",
+            },
+            {
+                "id": "run-2",
+                "startMs": 1_200,
+                "endMs": 1_800,
+                "speakerId": "speaker-2",
+                "text": "vous contacte",
+            },
+            {
+                "id": "run-3",
+                "startMs": 1_800,
+                "endMs": 2_400,
+                "speakerId": "speaker-3",
+                "text": "pour savoir.",
+            },
+            {
+                "id": "suffix-1",
+                "startMs": 2_400,
+                "endMs": 3_000,
+                "speakerId": "speaker-2",
+                "text": "Merci",
+            },
+            {
+                "id": "suffix-2",
+                "startMs": 3_000,
+                "endMs": 3_600,
+                "speakerId": "speaker-1",
+                "text": "beaucoup",
+            },
+        ]
+    )
+    lattice = _speaker_continuity_regression_lattice(document)
+    response = _continuity_guard_response(
+        lattice,
+        assignment_anchor_scopes=("segment:run-2",),
+    )
+
+    _complete_structural_continuity_requests(
+        response,
+        lattice=lattice,
+        document=document,
+        requestable_group_ids=_assignment_group_ids(lattice),
+    )
+    artifact = _artifact(lattice, response)
+
+    assert {
+        item["scopeId"]
+        for item in artifact["candidateGenerationRequests"]
+        if item["domain"] == "speaker-assignment"
+    } == {"segment:run-1", "segment:run-2", "segment:run-3"}
+
+
+@pytest.mark.parametrize(
+    "barrier",
+    [
+        "unknown-language",
+        "multiple-language",
+        "explicit-overlap",
+        "timestamp-overlap",
+        "language-change",
+        "long-gap",
+        "strong-terminal",
+    ],
+)
+def test_structural_continuity_guard_does_not_cross_run_barrier(
+    barrier: str,
+) -> None:
+    document = _continuity_guard_document(
+        [
+            {
+                "id": f"segment-{index}",
+                "startMs": (index - 1) * 900,
+                "endMs": index * 900,
+                "speakerId": f"speaker-{((index - 1) % 3) + 1}",
+                "text": f"fragment {index}",
+            }
+            for index in range(1, 6)
+        ]
+    )
+    lattice = _speaker_continuity_regression_lattice(document)
+    response = _continuity_guard_response(
+        lattice,
+        assignment_anchor_scopes=("segment:segment-1",),
+    )
+    before = copy.deepcopy(response)
+    if barrier == "unknown-language":
+        document["segments"][2]["language"] = "und"
+    elif barrier == "multiple-language":
+        document["segments"][2]["language"] = "mul"
+    elif barrier == "explicit-overlap":
+        document["segments"][2]["overlapping"] = True
+    elif barrier == "timestamp-overlap":
+        document["segments"][2]["startMs"] = 1_700
+    elif barrier == "language-change":
+        document["segments"][2]["language"] = "es-ES"
+    elif barrier == "long-gap":
+        for segment in document["segments"][2:]:
+            segment["startMs"] += 1_301
+            segment["endMs"] += 1_301
+    else:
+        document["segments"][1]["normalizedText"] = "fragment 2."
+
+    _complete_structural_continuity_requests(
+        response,
+        lattice=lattice,
+        document=document,
+        requestable_group_ids=_assignment_group_ids(lattice),
+    )
+
+    assert response == before
+    _artifact(lattice, response)
+
+
+@pytest.mark.parametrize(
+    ("assignment_anchor_scopes", "timeline_request_kind"),
+    [
+        ((), "timeline-challenger"),
+        (("segment:segment-1",), "boundary-recompute"),
+    ],
+)
+def test_structural_continuity_guard_requires_exact_request_anchors(
+    assignment_anchor_scopes: tuple[str, ...],
+    timeline_request_kind: str,
+) -> None:
+    document = _continuity_guard_document(
+        [
+            {
+                "id": f"segment-{index}",
+                "startMs": (index - 1) * 900,
+                "endMs": index * 900,
+                "speakerId": f"speaker-{index}",
+                "text": f"fragment {index}",
+            }
+            for index in range(1, 4)
+        ]
+    )
+    lattice = _speaker_continuity_regression_lattice(document)
+    response = _continuity_guard_response(
+        lattice,
+        assignment_anchor_scopes=assignment_anchor_scopes,
+        timeline_request_kind=timeline_request_kind,
+    )
+    before = copy.deepcopy(response)
+
+    _complete_structural_continuity_requests(
+        response,
+        lattice=lattice,
+        document=document,
+        requestable_group_ids=_assignment_group_ids(lattice),
+    )
+
+    assert response == before
+    _artifact(lattice, response)
+
+
 def test_semantic_transcript_context_keeps_targets_and_bounds_global_text() -> None:
     segments = [
         {"segmentId": f"segment-{index}", "text": str(index)}
-        for index in range(20)
+        for index in range(40)
     ]
 
     local, local_policy = _bounded_transcript_context(
@@ -817,8 +2744,38 @@ def test_semantic_transcript_context_keeps_targets_and_bounds_global_text() -> N
     assert local_policy["mode"] == "target-segments-with-adjacent-context"
     assert len(global_sample) == 8
     assert global_sample[0]["segmentId"] == "segment-0"
-    assert global_sample[-1]["segmentId"] == "segment-19"
+    assert global_sample[-1]["segmentId"] == "segment-39"
     assert global_policy["mode"] == "uniform-global-sample"
+
+
+def test_semantic_transcript_context_keeps_compact_complete_utterances() -> None:
+    segments = [
+        {"segmentId": f"segment-{index}", "text": text}
+        for index, text in enumerate(
+            [
+                "Bonjour je vous",
+                "contactais pour savoir",
+                "si la",
+                "carte que",
+                "j'ai",
+                "dans votre banque",
+                "pourrait marcher à l'étranger notamment",
+                "si je pars en vacances ou si",
+                "je pars faire des études",
+            ]
+        )
+    ]
+
+    selected, policy = _bounded_transcript_context(
+        segments,
+        scope_ids=["media"],
+    )
+
+    assert [item["segmentId"] for item in selected] == [
+        item["segmentId"] for item in segments
+    ]
+    assert policy["mode"] == "complete-compact-transcript"
+    assert policy["includedSegmentCount"] == 9
 
 
 def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
@@ -884,11 +2841,11 @@ def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
     assert prompt["translationTargets"] == ["zh-CN"]
     assert prompt["outputRules"]["translateSelectedAsrInSameResponse"] is True
     assert request["response_schema"]["required"] == [
-        "choiceIndexes",
+        "choiceByPosition",
         "translationTexts",
     ]
     assert set(request["response_schema"]["properties"]) == {
-        "choiceIndexes",
+        "choiceByPosition",
         "translationTexts",
     }
     assert prompt["translationSlots"]
@@ -950,7 +2907,7 @@ def test_job_runner_co_generates_translation_and_business_reuses_without_llm(
     )
     translation = json.loads(translation_path.read_text(encoding="utf-8"))
     assert translation["promptVersion"] == (
-        "semantic-job-candidate-arbitration-v8"
+        "semantic-job-candidate-arbitration-v17"
     )
     assert [item["text"] for item in translation["segments"]] == [
         "你好",
@@ -1023,7 +2980,7 @@ def test_positional_response_requires_every_translation_slot() -> None:
 
     diagnostic = captured.value.details["attemptDiagnostics"][0]
     assert diagnostic["validationFailureCode"] == "TRANSLATION_INVALID"
-    assert diagnostic["responseFields"] == ["choiceIndexes"]
+    assert diagnostic["responseFields"] == ["choiceByPosition"]
 
 
 def test_positional_response_discards_unbound_translation_for_candidate_request() -> None:
@@ -1045,8 +3002,8 @@ def test_positional_response_discards_unbound_translation_for_candidate_request(
                     "占位译文" for _slot in prompt["translationSlots"]
                 ],
             )
-            response["choiceIndexes"][
-                prompt["translationSlots"][0]["groupPosition"]
+            response["choiceByPosition"][
+                str(prompt["translationSlots"][0]["groupPosition"])
             ] = -1
             return response
 
@@ -1238,7 +3195,7 @@ def test_job_runner_fails_closed_after_batch_retry_bound() -> None:
 
 def test_translation_mode_allows_non_asr_batch_to_omit_translations() -> None:
     document = _document()
-    lattice = build_semantic_candidate_lattice_from_document(document)
+    lattice = _full_lattice(document)
     complete = _request_or_select_response(
         lattice,
         force_request_domains=frozenset({"asr-text"}),
@@ -1488,7 +3445,7 @@ def test_model_can_request_bounded_candidate_generation_for_risky_domains() -> N
 
 def test_runner_preserves_model_requested_bounded_candidates() -> None:
     document = _document()
-    lattice = build_semantic_candidate_lattice_from_document(document)
+    lattice = _full_lattice(document)
     complete_response = _request_or_select_response(
         lattice,
         force_request_domains=frozenset(
@@ -1548,7 +3505,7 @@ def test_runner_preserves_model_requested_bounded_candidates() -> None:
     )
 
 
-def test_runner_rearbitrates_unchanged_groups_when_cross_domain_lattice_changes() -> None:
+def test_runner_carries_unchanged_groups_when_cross_domain_lattice_changes() -> None:
     document = _document()
     initial = build_semantic_candidate_lattice_from_document(document)
     previous = _artifact(initial, _request_or_select_response(initial))
@@ -1609,12 +3566,21 @@ def test_runner_rearbitrates_unchanged_groups_when_cross_domain_lattice_changes(
 
     class CapturingProvider(MappingLocalLLMProvider):
         def __init__(self) -> None:
-            super().__init__([response])
+            super().__init__([])
             self.requests: list[dict] = []
 
         def generate_json(self, **kwargs):
             self.requests.append(dict(kwargs))
-            return super().generate_json(**kwargs)
+            prompt = json.loads(kwargs["user_prompt"])
+            target_ids = set(_prompt_target_group_ids(extended, prompt))
+            return {
+                **response,
+                "decisions": [
+                    decision
+                    for decision in response["decisions"]
+                    if decision["groupId"] in target_ids
+                ],
+            }
 
     provider = CapturingProvider()
     artifact = SemanticJobArbitrationRunner(
@@ -1632,14 +3598,345 @@ def test_runner_rearbitrates_unchanged_groups_when_cross_domain_lattice_changes(
 
     assert artifact["metrics"]["selectedGroupCount"] == 8
     first_prompt = json.loads(provider.requests[0]["user_prompt"])
-    assert set(_prompt_target_group_ids(extended, first_prompt)) == {
-        selection["groupId"] for selection in complete["selections"]
+    all_group_ids = {
+        group["groupId"]
+        for domain in extended["domains"]
+        for group in domain["groups"]
+        if group["status"] == "available"
     }
+    speech_group_id = next(
+        group["groupId"]
+        for domain in extended["domains"]
+        if domain["domain"] == "speech-disposition"
+        for group in domain["groups"]
+    )
+    # The global speech decision is carried across the timeline extension;
+    # changing the structural timeline intentionally reopens every segment
+    # atomic triad for one consistent joint decision.
+    assert set(_prompt_target_group_ids(extended, first_prompt)) == (
+        all_group_ids - {speech_group_id}
+    )
     selected = {
         item["groupId"]: item["selectedCandidateId"]
         for item in artifact["selections"]
     }
     assert selected[extended_timeline["groupId"]] == challenger_id
+
+
+def test_runner_retries_incompatible_language_asr_pair() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+
+    class MismatchThenCurrentProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            choices: list[int] = []
+            for group in prompt["candidateLattice"]["targetGroups"]:
+                if (
+                    len(self.prompts) == 1
+                    and group["domain"] == "language-span"
+                    and group["scopeId"] == "segment:segment-2"
+                ):
+                    choices.append(1)
+                else:
+                    choices.append(0)
+            return {"choiceIndexes": choices}
+
+    provider = MismatchThenCurrentProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=32,
+        max_batch_attempts=2,
+    ).run(document, candidate_lattice=lattice)
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.prompts) == 2
+    assert provider.prompts[1]["correction"]["validationFailureCode"] == (
+        "CROSS_DOMAIN_INCONSISTENCY"
+    )
+
+
+def test_arbitration_rejects_incompatible_language_asr_pair() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    response = _select_current_response(lattice)
+    language_group = next(
+        group
+        for domain in lattice["domains"]
+        if domain["domain"] == "language-span"
+        for group in domain["groups"]
+        if group["scopeId"] == "segment:segment-2"
+    )
+    french = _candidate_for(
+        language_group,
+        lambda item: item["payload"]["language"] == "fr",
+    )
+    selection = next(
+        item
+        for item in response["selections"]
+        if item["groupId"] == language_group["groupId"]
+    )
+    selection["rankedCandidateIds"] = [
+        french,
+        *[
+            candidate_id
+            for candidate_id in selection["rankedCandidateIds"]
+            if candidate_id != french
+        ],
+    ]
+    selection["evidenceRefs"] = [
+        f"candidate-lattice:{lattice['latticeId']}",
+        f"candidate-group:{language_group['groupId']}",
+        f"candidate:{french}",
+    ]
+
+    with pytest.raises(
+        SemanticCompositionError,
+        match="selected language and ASR text candidates disagree",
+    ):
+        _artifact(lattice, response)
+
+
+def test_composition_accepts_primary_and_regional_language_tags() -> None:
+    document = _document()
+    lattice = _full_lattice(document)
+    language_group = next(
+        group
+        for domain in lattice["domains"]
+        if domain["domain"] == "language-span"
+        for group in domain["groups"]
+        if group["scopeId"] == "segment:segment-2"
+    )
+    asr_group = next(
+        group
+        for domain in lattice["domains"]
+        if domain["domain"] == "asr-text"
+        for group in domain["groups"]
+        if group["scopeId"] == "segment:segment-2"
+    )
+    # The fixture is English; rebuild only the two payloads through the
+    # existing immutable challenger extension so candidate hashes stay bound.
+    regional_language = copy.deepcopy(
+        next(
+            item
+            for item in language_group["candidates"]
+            if item["candidateId"] == language_group["currentCandidateId"]
+        )["payload"]
+    )
+    regional_language["language"] = "en-US"
+    supplemental = [
+        {
+            "domain": "language-span",
+            "groupId": language_group["groupId"],
+            "scopeId": language_group["scopeId"],
+            "candidates": [
+                {
+                    "payload": regional_language,
+                    "producers": [PRODUCER],
+                    "selectionEligible": True,
+                    "eligibilityReason": "eligible",
+                }
+            ],
+        }
+    ]
+    extended = extend_semantic_candidate_lattice(
+        lattice,
+        supplemental_groups=supplemental,
+    )
+    response = _select_current_response(extended)
+    regional_id = _candidate_for(
+        next(
+            group
+            for domain in extended["domains"]
+            if domain["domain"] == "language-span"
+            for group in domain["groups"]
+            if group["scopeId"] == language_group["scopeId"]
+        ),
+        lambda item: item["payload"]["language"] == "en-US",
+    )
+    selection = next(
+        item
+        for item in response["selections"]
+        if item["groupId"] == language_group["groupId"]
+    )
+    selection["rankedCandidateIds"] = [
+        regional_id,
+        *[
+            candidate_id
+            for candidate_id in selection["rankedCandidateIds"]
+            if candidate_id != regional_id
+        ],
+    ]
+    selection["evidenceRefs"] = [
+        f"candidate-lattice:{extended['latticeId']}",
+        f"candidate-group:{language_group['groupId']}",
+        f"candidate:{regional_id}",
+    ]
+    arbitration = _artifact(extended, response)
+    composition = build_semantic_composition(document, extended, arbitration)
+    assert composition["status"] == "composition-complete"
+
+
+def test_runner_retries_repeat_request_after_challenger_was_fulfilled() -> None:
+    document = _document()
+    initial = build_semantic_candidate_lattice_from_document(document)
+    previous = _artifact(
+        initial,
+        _request_or_select_response(
+            initial,
+            force_request_domains=frozenset({"language-span"}),
+        ),
+    )
+    language_groups = next(
+        domain
+        for domain in initial["domains"]
+        if domain["domain"] == "language-span"
+    )["groups"]
+    supplemental_groups = []
+    for index, group in enumerate(language_groups):
+        payload = copy.deepcopy(group["candidates"][0]["payload"])
+        payload["language"] = ("fr" if index == 0 else "de")
+        payload["confidence"] = None
+        supplemental_groups.append(
+            {
+                "domain": "language-span",
+                "groupId": group["groupId"],
+                "scopeId": group["scopeId"],
+                "candidates": [
+                    {
+                        "payload": payload,
+                        "producers": [PRODUCER],
+                        "selectionEligible": True,
+                        "eligibilityReason": "eligible",
+                    }
+                ],
+            }
+        )
+    extended = extend_semantic_candidate_lattice(
+        initial,
+        supplemental_groups=supplemental_groups,
+    )
+
+    class RepeatThenSelectProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            choice = -1 if len(self.prompts) == 1 else 0
+            return {
+                "choiceIndexes": [choice] * prompt["targetGroupCount"]
+            }
+
+    provider = RepeatThenSelectProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(
+        document,
+        candidate_lattice=extended,
+        carried_lattice=initial,
+        carried_arbitration=previous,
+    )
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.prompts) == 2
+    assert any(
+        group["requestDefaultChallengerAllowed"] is False
+        for group in provider.prompts[0]["candidateLattice"]["targetGroups"]
+    )
+    assert provider.prompts[1]["correction"][
+        "validationFailureCode"
+    ] == "CANDIDATE_REQUEST_EXHAUSTED"
+    assert all(
+        bound["minimum"]
+        == (
+            -1
+            if group["requestDefaultChallengerAllowed"]
+            else 0
+        )
+        for bound, group in zip(
+            provider.prompts[1]["correction"][
+                "requiredChoiceIndexBounds"
+            ],
+            provider.prompts[0]["candidateLattice"]["targetGroups"],
+            strict=True,
+        )
+    )
+
+
+def test_runner_retries_repeat_request_after_duplicate_challenger_exhaustion() -> None:
+    document = _document()
+    lattice = build_semantic_candidate_lattice_from_document(document)
+    previous = _artifact(
+        lattice,
+        _request_or_select_response(
+            lattice,
+            force_request_domains=frozenset({"language-span"}),
+        ),
+    )
+
+    class RepeatThenSelectProvider(MappingLocalLLMProvider):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.prompts: list[dict] = []
+
+        def generate_json(self, **kwargs):
+            prompt = json.loads(kwargs["user_prompt"])
+            self.prompts.append(prompt)
+            choice = -1 if len(self.prompts) == 1 else 0
+            return {
+                "choiceIndexes": [choice] * prompt["targetGroupCount"]
+            }
+
+    provider = RepeatThenSelectProvider()
+    artifact = SemanticJobArbitrationRunner(
+        provider=provider,
+        model="fixture-9b",
+        context_tokens=32_768,
+        output_tokens=4_096,
+        batch_size=8,
+    ).run(
+        document,
+        candidate_lattice=lattice,
+        carried_lattice=lattice,
+        carried_arbitration=previous,
+    )
+
+    assert artifact["status"] == "ready-to-compose"
+    assert len(provider.prompts) == 2
+    first_groups = provider.prompts[0]["candidateLattice"]["targetGroups"]
+    assert all(
+        group["requestDefaultChallengerAllowed"]
+        is (group["domain"] != "language-span")
+        for group in first_groups
+    )
+    assert provider.prompts[1]["correction"][
+        "validationFailureCode"
+    ] == "CANDIDATE_REQUEST_EXHAUSTED"
+    assert all(
+        bound["minimum"] == (-1 if group["domain"] != "language-span" else 0)
+        for bound, group in zip(
+            provider.prompts[1]["correction"][
+                "requiredChoiceIndexBounds"
+            ],
+            first_groups,
+            strict=True,
+        )
+    )
 
 
 def test_request_kind_cannot_cross_domain_and_available_ranking_is_complete() -> None:
@@ -2016,6 +4313,7 @@ def test_persistent_orchestrator_resumes_a_bounded_two_round_loop(
             candidate_lattice: dict,
             carried_lattice: dict | None = None,
             carried_arbitration: dict | None = None,
+            exhausted_request_group_ids=frozenset(),
         ) -> dict:
             self.calls += 1
             assert current_document == document
@@ -2120,6 +4418,419 @@ def test_persistent_orchestrator_resumes_a_bounded_two_round_loop(
     assert projected["semanticTimeline"] == resumed.composition["timeline"]
 
 
+def test_orchestrator_releases_generators_before_next_arbitration(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+    events: list[str] = []
+
+    class TwoRoundArbitrator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, current_document, *, candidate_lattice, **_kwargs):
+            assert current_document == document
+            self.calls += 1
+            events.append(f"arbitrate-{self.calls}")
+            response = (
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset(
+                        {"speaker-cardinality-timeline"}
+                    ),
+                )
+                if self.calls == 1
+                else _select_current_response(candidate_lattice)
+            )
+            return _artifact(candidate_lattice, response)
+
+        def release_resources(self) -> None:
+            events.append("release-arbitrator")
+
+    def generate_timeline(request, _document, current_lattice):
+        events.append("generate-timeline")
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        payload = copy.deepcopy(current["payload"])
+        payload["timelineKind"] = "challenger"
+        return {
+            "producer": PRODUCER,
+            "candidates": [{"payload": payload}],
+        }
+
+    class TrackingRegistry(SemanticCandidateGenerationRegistry):
+        def release_resources(self) -> None:
+            events.append("release-generators")
+
+    result = SemanticCompositionOrchestrator(
+        arbitrator=TwoRoundArbitrator(),  # type: ignore[arg-type]
+        generators=TrackingRegistry(
+            {"timeline-challenger": generate_timeline}
+        ),
+        max_rounds=1,
+    ).run(document, artifact_root=tmp_path / "semantic")
+
+    assert result.round_count == 2
+    assert events == [
+        "arbitrate-1",
+        "release-arbitrator",
+        "generate-timeline",
+        "release-generators",
+        "arbitrate-2",
+    ]
+
+
+def test_orchestrator_fails_closed_when_between_round_release_fails(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class RequestingArbitrator:
+        def run(self, current_document, *, candidate_lattice, **_kwargs):
+            assert current_document == document
+            return _artifact(
+                candidate_lattice,
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset(
+                        {"speaker-cardinality-timeline"}
+                    ),
+                ),
+            )
+
+        def release_resources(self) -> None:
+            return None
+
+    def generate_timeline(request, _document, current_lattice):
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        payload = copy.deepcopy(current["payload"])
+        payload["timelineKind"] = "challenger"
+        return {
+            "producer": PRODUCER,
+            "candidates": [{"payload": payload}],
+        }
+
+    class FailingReleaseRegistry(SemanticCandidateGenerationRegistry):
+        def release_resources(self) -> None:
+            raise RuntimeError("fixture release failure")
+
+    orchestrator = SemanticCompositionOrchestrator(
+        arbitrator=RequestingArbitrator(),  # type: ignore[arg-type]
+        generators=FailingReleaseRegistry(
+            {"timeline-challenger": generate_timeline}
+        ),
+        max_rounds=1,
+    )
+
+    with pytest.raises(WorkerError) as captured:
+        orchestrator.run(document, artifact_root=tmp_path / "semantic")
+
+    assert captured.value.code == (
+        "SEMANTIC_CANDIDATE_RESOURCE_RELEASE_FAILED"
+    )
+    assert captured.value.retryable is True
+    assert captured.value.details == {"exceptionType": "RuntimeError"}
+
+
+def test_orchestrator_fails_closed_when_arbitrator_release_fails(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class FailingArbitrator:
+        def run(self, current_document, *, candidate_lattice, **_kwargs):
+            assert current_document == document
+            return _artifact(
+                candidate_lattice,
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset(
+                        {"speaker-cardinality-timeline"}
+                    ),
+                ),
+            )
+
+        def release_resources(self) -> None:
+            raise RuntimeError("fixture arbitrator release failure")
+
+    class UnusedRegistry(SemanticCandidateGenerationRegistry):
+        def fulfill(self, *_args, **_kwargs):
+            pytest.fail("candidate generation must not start after release failure")
+
+    def unused_timeline_challenger(*_args, **_kwargs):
+        pytest.fail("candidate generation must not start after release failure")
+
+    orchestrator = SemanticCompositionOrchestrator(
+        arbitrator=FailingArbitrator(),  # type: ignore[arg-type]
+        generators=UnusedRegistry({"timeline-challenger": unused_timeline_challenger}),
+        max_rounds=1,
+    )
+
+    with pytest.raises(WorkerError) as captured:
+        orchestrator.run(document, artifact_root=tmp_path / "semantic")
+
+    assert captured.value.code == "SEMANTIC_ARBITRATOR_RESOURCE_RELEASE_FAILED"
+    assert captured.value.retryable is True
+    assert captured.value.details == {"exceptionType": "RuntimeError"}
+
+
+def test_orchestrator_final_generation_receives_arbitration_only_pass(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class FinalGenerationArbitrator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.exhausted_by_call: list[set[str]] = []
+
+        def run(self, current_document, *, candidate_lattice, **kwargs):
+            assert current_document == document
+            self.calls += 1
+            self.exhausted_by_call.append(
+                set(kwargs.get("exhausted_request_group_ids", ()))
+            )
+            response = (
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset(
+                        {"speech-disposition"}
+                    ),
+                )
+                if self.calls == 1
+                else _select_current_response(candidate_lattice)
+            )
+            return _artifact(candidate_lattice, response)
+
+        def release_resources(self) -> None:
+            return None
+
+    def generate_speech(request, _document, current_lattice):
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        payload = copy.deepcopy(current["payload"])
+        payload.update(
+            {
+                "speechDurationMs": 1_900,
+                "speechRatio": 0.95,
+                "speechWindowCount": 2,
+            }
+        )
+        return {
+            "producer": PRODUCER,
+            "candidates": [{"payload": payload}],
+        }
+
+    arbitrator = FinalGenerationArbitrator()
+    result = SemanticCompositionOrchestrator(
+        arbitrator=arbitrator,  # type: ignore[arg-type]
+        generators=SemanticCandidateGenerationRegistry(
+            {"speech-disposition-challenger": generate_speech}
+        ),
+        max_rounds=1,
+    ).run(document, artifact_root=tmp_path / "semantic")
+
+    assert result.round_count == 2
+    assert arbitrator.calls == 2
+    assert len(result.generation_paths) == 1
+    assert result.arbitration["status"] == "ready-to-compose"
+    assert result.composition["status"] == "composition-complete"
+    assert result.arbitration_path.parent.name == "round-02"
+    available_group_ids = {
+        group["groupId"]
+        for domain in result.final_lattice["domains"]
+        for group in domain["groups"]
+        if group["status"] == "available"
+    }
+    assert arbitrator.exhausted_by_call == [set(), available_group_ids]
+
+
+def test_orchestrator_carries_duplicate_one_shot_request_as_exhausted(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class ExhaustionAwareArbitrator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, current_document, *, candidate_lattice, **_kwargs):
+            assert current_document == document
+            self.calls += 1
+            response = (
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset(
+                        {"speaker-cardinality-timeline"}
+                    ),
+                )
+                if self.calls == 1
+                else _select_current_response(candidate_lattice)
+            )
+            return _artifact(candidate_lattice, response)
+
+        def release_resources(self) -> None:
+            return None
+
+    def duplicate_timeline(request, _document, current_lattice):
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        return {
+            "producer": PRODUCER,
+            "candidates": [{"payload": copy.deepcopy(current["payload"])}],
+        }
+
+    arbitrator = ExhaustionAwareArbitrator()
+    result = SemanticCompositionOrchestrator(
+        arbitrator=arbitrator,  # type: ignore[arg-type]
+        generators=SemanticCandidateGenerationRegistry(
+            {"timeline-challenger": duplicate_timeline}
+        ),
+        max_rounds=2,
+    ).run(document, artifact_root=tmp_path / "semantic")
+
+    assert result.round_count == 2
+    assert arbitrator.calls == 2
+    generation = read_json_strict(result.generation_paths[0])
+    assert generation["status"] == "partial"
+    assert generation["supplementalGroups"] == []
+    assert generation["fulfilledRequests"] == []
+    assert generation["metrics"]["generatedCandidateCount"] == 0
+    assert generation["metrics"]["unfulfilledRequestCount"] == 1
+    assert generation["outputLattice"] == result.initial_lattice
+    schema = json.loads(
+        (
+            ROOT
+            / "contracts"
+            / "semantic-candidate-generation.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator(schema).validate(generation)
+
+
+def test_orchestrator_accumulates_exhausted_requests_across_all_rounds(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class AlternatingRequestArbitrator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.exhausted_by_call: list[set[str]] = []
+
+        def run(
+            self,
+            current_document,
+            *,
+            candidate_lattice,
+            exhausted_request_group_ids=frozenset(),
+            **_kwargs,
+        ):
+            assert current_document == document
+            self.calls += 1
+            self.exhausted_by_call.append(set(exhausted_request_group_ids))
+            force_domain = (
+                "speaker-cardinality-timeline"
+                if self.calls == 1
+                else "speech-disposition"
+                if self.calls == 2
+                else None
+            )
+            response = (
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset({force_domain}),
+                )
+                if force_domain is not None
+                else _select_current_response(candidate_lattice)
+            )
+            return _artifact(candidate_lattice, response)
+
+        def release_resources(self) -> None:
+            return None
+
+    def duplicate_candidate(request, _document, current_lattice):
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        return {
+            "producer": PRODUCER,
+            "candidates": [{"payload": copy.deepcopy(current["payload"])}],
+        }
+
+    arbitrator = AlternatingRequestArbitrator()
+    result = SemanticCompositionOrchestrator(
+        arbitrator=arbitrator,  # type: ignore[arg-type]
+        generators=SemanticCandidateGenerationRegistry(
+            {
+                "timeline-challenger": duplicate_candidate,
+                "speech-disposition-challenger": duplicate_candidate,
+            }
+        ),
+        max_rounds=3,
+    ).run(document, artifact_root=tmp_path / "semantic")
+
+    initial_groups = {
+        domain["domain"]: group["groupId"]
+        for domain in result.initial_lattice["domains"]
+        for group in domain["groups"]
+        if group["scopeId"] == "media"
+    }
+    timeline_group_id = initial_groups["speaker-cardinality-timeline"]
+    speech_group_id = initial_groups["speech-disposition"]
+    assert result.round_count == 3
+    assert arbitrator.exhausted_by_call == [
+        set(),
+        {timeline_group_id},
+        {timeline_group_id, speech_group_id},
+    ]
+
+
 def test_orchestrator_persists_redacted_arbitration_failure(
     tmp_path: Path,
 ) -> None:
@@ -2186,6 +4897,82 @@ def test_orchestrator_persists_redacted_arbitration_failure(
     )
 
 
+def test_orchestrator_persists_redacted_candidate_generation_failure(
+    tmp_path: Path,
+) -> None:
+    document = _document()
+
+    class RequestingArbitrator:
+        model = "fixture-9b"
+
+        def run(self, current_document, *, candidate_lattice, **_kwargs):
+            assert current_document == document
+            return _artifact(
+                candidate_lattice,
+                _request_or_select_response(
+                    candidate_lattice,
+                    force_request_domains=frozenset(
+                        {"speaker-cardinality-timeline"}
+                    ),
+                ),
+            )
+
+        def release_resources(self) -> None:
+            return None
+
+    def invalid_timeline(request, _document, current_lattice):
+        group = next(
+            group
+            for domain in current_lattice["domains"]
+            for group in domain["groups"]
+            if group["groupId"] == request["groupId"]
+        )
+        current = next(
+            candidate
+            for candidate in group["candidates"]
+            if candidate["candidateId"] == group["currentCandidateId"]
+        )
+        payload = copy.deepcopy(current["payload"])
+        payload["speakerCount"] += 1
+        return {
+            "producer": PRODUCER,
+            "candidates": [{"payload": payload}],
+        }
+
+    orchestrator = SemanticCompositionOrchestrator(
+        arbitrator=RequestingArbitrator(),  # type: ignore[arg-type]
+        generators=SemanticCandidateGenerationRegistry(
+            {"timeline-challenger": invalid_timeline}
+        ),
+    )
+
+    with pytest.raises(
+        WorkerError,
+        match="semantic candidate generation failed closed",
+    ) as captured:
+        orchestrator.run(document, artifact_root=tmp_path / "semantic")
+
+    assert captured.value.code == "SEMANTIC_CANDIDATE_GENERATION_FAILED"
+    assert "speakerCount" in captured.value.details["reason"]
+    assert captured.value.details["exceptionType"] == (
+        "SemanticCandidateLatticeError"
+    )
+    path = Path(captured.value.details["diagnosticArtifactPath"])
+    artifact = read_json_strict(path)
+    serialized = json.dumps(artifact, ensure_ascii=False)
+    assert artifact["artifactType"] == "semantic-candidate-generation-failure"
+    assert artifact["sourceContentPersisted"] is False
+    assert artifact["input"]["candidateGenerationRequests"][0][
+        "minimumAlternativeCount"
+    ] == 2
+    assert "Hello" not in serialized
+    assert "World" not in serialized
+    assert (
+        captured.value.details["diagnosticArtifactSha256"]
+        == canonical_json_sha256(artifact)
+    )
+
+
 def test_composition_is_the_final_scoring_and_delivery_authority() -> None:
     document = _document()
     lattice = _full_lattice(document)
@@ -2242,3 +5029,86 @@ def test_composition_is_the_final_scoring_and_delivery_authority() -> None:
     )
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(final)
+
+
+def test_manual_text_revision_overrides_composition_in_delivery_and_final() -> None:
+    document = _document()
+    document["segments"][0]["normalizedText"] = "Hello, manually reviewed."
+    document["segments"][0]["displayText"] = "Hello, manually reviewed."
+    document["segments"][0]["revisions"] = [
+        {
+            "id": "revision-manual-text-1",
+            "type": "text",
+            "source": "manual",
+            "actor": "codex-semantic-adjudicator",
+            "occurredAt": "2026-08-09T06:04:05Z",
+            "before": "Hello",
+            "after": "Hello, manually reviewed.",
+            "reasonCode": "MANUAL_TEXT_REVIEW",
+            "confidence": 1.0,
+            "evidenceRefs": ["semantic-review:segment-1"],
+        }
+    ]
+    lattice = _full_lattice(document)
+    arbitration = _artifact(lattice, _ready_response(lattice))
+    composition = build_semantic_composition(
+        document,
+        lattice,
+        arbitration,
+        generated_at="2026-08-09T06:05:00Z",
+    )
+    assert composition["segments"][0]["finalText"] != (
+        "Hello, manually reviewed."
+    )
+
+    delivery = compose_transcript_document(
+        document,
+        composition,
+        input_lattice=lattice,
+        arbitration_artifact=arbitration,
+    )
+    assert delivery["segments"][0]["normalizedText"] == (
+        "Hello, manually reviewed."
+    )
+    assert delivery["segments"][0]["displayText"] == (
+        "Hello, manually reviewed."
+    )
+
+    review_queue = {
+        "jobId": document["jobId"],
+        "items": [],
+        "decisions": [],
+        "openCount": 0,
+    }
+    final = build_final_composed_transcript(
+        document,
+        review_queue,
+        composition,
+        arbitration,
+        lattice,
+        generated_at="2026-08-09T06:06:00Z",
+    )
+    assert final["schemaVersion"] == "1.3.0"
+    assert final["finalTextAuthority"] == (
+        "manual-text-revision-over-semantic-composition"
+    )
+    assert final["segments"][0]["finalText"] == "Hello, manually reviewed."
+    assert final["segments"][1]["finalText"] == (
+        composition["segments"][1]["finalText"]
+    )
+
+    schema = json.loads(
+        (
+            ROOT
+            / "contracts"
+            / "final-adjudicated-transcript.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator(schema).validate(final)
+
+    invalid_authority = copy.deepcopy(final)
+    invalid_authority["finalTextAuthority"] = (
+        "semantic-composition-selected-asr-text"
+    )
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate(invalid_authority)

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_hi_in_validation_030-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001.rf01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-030-postref-text-0001",
+      "reason": "Post-reference Codex adjudication restores the official FLEURS names, orthography, and wording for the first timed fragment.",
+      "evidence": ["fleurs-raw-transcript:fleurs_hi_in_validation_030", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:480-11440ms"],
+      "confidence": 1.0,
+      "normalizedText": "इससे पहले, रिंग के सीईओ, जेमी सिमिनॉफ ने बताया था कि कंपनी तब शुरू हुई जब उसके दरवाज़े की घंटी उसके गेराज में स्थित",
+      "displayText": "इससे पहले, रिंग के सीईओ, जेमी सिमिनॉफ ने बताया था कि कंपनी तब शुरू हुई जब उसके दरवाज़े की घंटी उसके गेराज में स्थित",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf01:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-030-postref-speaker-0002",
+      "reason": "The first timed fragment belongs to the sole continuous reader.",
+      "evidence": ["audio:480-11440ms", "manifest:expected-speaker-count=1", "review-queue-file-sha256:e00f01d081e6ac193a971bb0b6a8a0b6ef66d6cfb82b81de2cff672114376705"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf02:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-030-postref-text-0003",
+      "reason": "Post-reference Codex adjudication restores the exact official closing phrase for the second timed fragment.",
+      "evidence": ["fleurs-raw-transcript:fleurs_hi_in_validation_030", "audio:11440-14140ms", "context:preceding-fragment"],
+      "confidence": 1.0,
+      "normalizedText": "दुकान से सुनाई नहीं देती थी।",
+      "displayText": "दुकान से सुनाई नहीं देती थी।",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001.rf02:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-030-postref-speaker-0004",
+      "reason": "The closing timed fragment belongs to the same sole continuous reader.",
+      "evidence": ["audio:11440-14140ms", "manifest:expected-speaker-count=1", "review-queue-file-sha256:e00f01d081e6ac193a971bb0b6a8a0b6ef66d6cfb82b81de2cff672114376705"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

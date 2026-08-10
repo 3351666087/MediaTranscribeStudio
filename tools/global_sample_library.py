@@ -14,7 +14,9 @@ _ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,95}$")
 _REVISION = re.compile(r"^[0-9a-f]{40}$")
 _LANGUAGE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})+$")
 _SPLITS = frozenset({"development", "regression", "held-out"})
-_ACQUISITION_KINDS = frozenset({"hf-viewer-row", "hf-streaming-row"})
+_ACQUISITION_KINDS = frozenset(
+    {"hf-viewer-row", "hf-viewer-search-row", "hf-streaming-row"}
+)
 _TOP_LEVEL_FIELDS = frozenset(
     {
         "schemaVersion",
@@ -64,6 +66,9 @@ _ACQUISITION_FIELDS = frozenset(
         "speakerId",
         "recordingField",
         "recordingId",
+        "rowIdField",
+        "rowId",
+        "searchQuery",
     }
 )
 _REQUIRED_ACQUISITION_FIELDS = frozenset({"kind", "config", "split", "rowIndex"})
@@ -249,6 +254,9 @@ def _case(value: Any, index: int, source_ids: set[str]) -> GlobalSampleCase:
         "speakerId",
         "recordingField",
         "recordingId",
+        "rowIdField",
+        "rowId",
+        "searchQuery",
     ):
         if optional_field not in acquisition:
             continue
@@ -274,6 +282,23 @@ def _case(value: Any, index: int, source_ids: set[str]) -> GlobalSampleCase:
     ):
         raise GlobalSampleLibraryError(
             f"{field}.acquisition recordingField and recordingId must be paired"
+        )
+    if ("rowIdField" in optional_acquisition) != (
+        "rowId" in optional_acquisition
+    ):
+        raise GlobalSampleLibraryError(
+            f"{field}.acquisition rowIdField and rowId must be paired"
+        )
+    if kind == "hf-viewer-search-row":
+        required_search_fields = {"searchQuery", "rowIdField", "rowId"}
+        if not required_search_fields <= set(optional_acquisition):
+            raise GlobalSampleLibraryError(
+                f"{field}.acquisition search rows require searchQuery, "
+                "rowIdField, and rowId"
+            )
+    elif "searchQuery" in optional_acquisition:
+        raise GlobalSampleLibraryError(
+            f"{field}.acquisition searchQuery requires hf-viewer-search-row"
         )
     return GlobalSampleCase(
         case_id=case_id,

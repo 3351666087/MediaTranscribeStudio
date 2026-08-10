@@ -1,4 +1,4 @@
-"""Versioned scoring subject after semantic processing and human review."""
+"""Versioned scoring subject after semantic processing and manual review."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from .semantic_processing import (
 )
 from .semantic_candidate_lattice import validate_semantic_candidate_lattice
 from .semantic_composition import (
+    has_manual_text_revision,
     validate_semantic_composition,
     validate_semantic_job_arbitration,
 )
@@ -23,8 +24,11 @@ from .voice_activity import validate_voice_activity
 
 
 FINAL_ADJUDICATED_TRANSCRIPT_SCHEMA_VERSION = "1.1.0"
-FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION = "1.2.0"
+FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION = "1.3.0"
+_FINAL_COMPOSED_TRANSCRIPT_LEGACY_SCHEMA_VERSION = "1.2.0"
 FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE = "final-adjudicated-transcript"
+_COMPOSITION_TEXT_AUTHORITY = "semantic-composition-selected-asr-text"
+_MANUAL_TEXT_AUTHORITY = "manual-text-revision-over-semantic-composition"
 
 
 def _fail(code: str, message: str, **details: Any) -> WorkerError:
@@ -500,7 +504,7 @@ def validate_final_adjudicated_transcript(
 def _composition_final_segments(
     document: Mapping[str, Any],
     composition: Mapping[str, Any],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     raw_segments = document.get("segments")
     composed_segments = composition.get("segments")
     if not isinstance(raw_segments, list) or not isinstance(
@@ -522,6 +526,7 @@ def _composition_final_segments(
             "source transcript segments must have unique identities",
         )
     output: list[dict[str, Any]] = []
+    has_manual_text_authority = False
     for index, segment in enumerate(composed_segments):
         if not isinstance(segment, Mapping):
             raise _fail(
@@ -538,6 +543,19 @@ def _composition_final_segments(
                 "semantic composition is rebound to another transcript segment",
                 segmentId=segment_id,
             )
+        manual_text_authority = has_manual_text_revision(source)
+        final_text = (
+            source.get("normalizedText")
+            if manual_text_authority
+            else segment.get("finalText")
+        )
+        if not isinstance(final_text, str) or not final_text.strip():
+            raise _fail(
+                "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
+                "composed final transcript text authority is invalid",
+                segmentId=segment_id,
+            )
+        has_manual_text_authority |= manual_text_authority
         output.append(
             {
                 "id": segment_id,
@@ -545,7 +563,7 @@ def _composition_final_segments(
                 "endMs": segment["endMs"],
                 "speakerId": segment["speakerId"],
                 "language": segment["language"],
-                "finalText": segment["finalText"],
+                "finalText": final_text.strip(),
                 "rawTextSha256": segment["rawTextSha256"],
                 "overlapping": segment["overlapping"],
                 "humanLocked": segment["humanLocked"],
@@ -557,7 +575,7 @@ def _composition_final_segments(
             "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
             "semantic composition must preserve every source segment",
         )
-    return output
+    return output, has_manual_text_authority
 
 
 def _changed_selection_count(
@@ -663,7 +681,20 @@ def build_final_composed_transcript(
             "FINAL_ADJUDICATION_TRANSCRIPT_INVALID",
             "transcript source identity or duration is invalid",
         )
-    segments = _composition_final_segments(document, composition)
+    segments, has_manual_text_authority = _composition_final_segments(
+        document,
+        composition,
+    )
+    schema_version = (
+        FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION
+        if has_manual_text_authority
+        else _FINAL_COMPOSED_TRANSCRIPT_LEGACY_SCHEMA_VERSION
+    )
+    final_text_authority = (
+        _MANUAL_TEXT_AUTHORITY
+        if has_manual_text_authority
+        else _COMPOSITION_TEXT_AUTHORITY
+    )
     generated = generated_at or utc_now()
     if not isinstance(generated, str) or not generated or len(generated) > 64:
         raise _fail(
@@ -671,7 +702,7 @@ def build_final_composed_transcript(
             "final composed generatedAt is invalid",
         )
     artifact = {
-        "schemaVersion": FINAL_COMPOSED_TRANSCRIPT_SCHEMA_VERSION,
+        "schemaVersion": schema_version,
         "artifactType": FINAL_ADJUDICATED_TRANSCRIPT_ARTIFACT_TYPE,
         "artifactId": f"final-composed-{document_id}",
         "jobId": job_id,
@@ -712,7 +743,7 @@ def build_final_composed_transcript(
         },
         "speakerPolicy": dict(composition["speakerPolicy"]),
         "timeline": dict(composition["timeline"]),
-        "finalTextAuthority": "semantic-composition-selected-asr-text",
+        "finalTextAuthority": final_text_authority,
         "timelineAuthority": "semantic-composition-selected-timeline",
         "segments": segments,
     }
@@ -771,7 +802,7 @@ def validate_final_composed_transcript(
     if set(value) != required:
         raise _fail(
             "FINAL_ADJUDICATION_ARTIFACT_INVALID",
-            "composed final adjudication fields do not match schema 1.2.0",
+            "composed final adjudication fields do not match its schema",
         )
     rebuilt = build_final_composed_transcript(
         expected_document,

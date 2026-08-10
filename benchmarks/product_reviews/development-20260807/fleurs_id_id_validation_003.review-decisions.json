@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_id_id_validation_003",
+  "automaticScoring": false,
+  "preReviewCommands": [
+    {
+      "type": "speaker.merge",
+      "sourceSpeakerId": "speaker-2",
+      "targetSpeakerId": "speaker-1",
+      "decisionId": "fleurs-id-003-merge-0001",
+      "reason": "Independent full-recording review found one continuous speaker; the alternating cluster labels are an acoustic split error.",
+      "evidence": ["audio:full", "review-queue-sha256:3d042634c8449a3cdec4c9d968df1fe7c6f6824ae3ba0c6f439e5dbe51bd9ba7"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    }
+  ],
+  "decisions": [
+    {
+      "itemId": "speaker-count-confidence",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0001",
+      "reason": "The complete utterance contains one continuous voice with no audible speaker change.",
+      "evidence": ["audio:full"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "speaker-count-range",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0002",
+      "reason": "Full-utterance listening rejects the wide automatic range and resolves the count to one.",
+      "evidence": ["audio:full", "speaker-merge:fleurs-id-003-merge-0001"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.speaker-run-01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0003",
+      "reason": "The opening phrase belongs to the sole speaker and is coherent with the following clause.",
+      "evidence": ["audio:280-2220ms", "context:full-utterance"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.speaker-run-01:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0004",
+      "reason": "Manual review confirms the merged sole-speaker assignment for the opening phrase.",
+      "evidence": ["audio:280-2220ms", "speaker-merge:fleurs-id-003-merge-0001"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-03:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0005",
+      "reason": "The word dilayani continues the same sentence and the same voice.",
+      "evidence": ["audio:2220-3000ms", "context:full-utterance"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-03:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0006",
+      "reason": "Manual review confirms the merged sole-speaker assignment for this continuation.",
+      "evidence": ["audio:2220-3000ms", "speaker-merge:fleurs-id-003-merge-0001"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.speaker-run-03:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0007",
+      "reason": "Listening and sentence context support Bus Coaster as the named vehicle term; kruaster is an ASR error.",
+      "evidence": ["audio:3000-5600ms", "context:full-utterance"],
+      "confidence": 0.94,
+      "normalizedText": "oleh Bus Coaster Jepang kecil",
+      "displayText": "oleh Bus Coaster Jepang kecil",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.speaker-run-03:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0008",
+      "reason": "Manual review confirms the corrected phrase and its merged sole-speaker assignment.",
+      "evidence": ["audio:3000-5600ms", "speaker-merge:fleurs-id-003-merge-0001"],
+      "confidence": 0.96,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-07:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0009",
+      "reason": "The phrase yang nyaman is audible and continues the same single-speaker sentence.",
+      "evidence": ["audio:5600-6420ms", "context:full-utterance"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-07:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0010",
+      "reason": "Manual review confirms the merged sole-speaker assignment for this phrase.",
+      "evidence": ["audio:5600-6420ms", "speaker-merge:fleurs-id-003-merge-0001"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-08:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0011",
+      "reason": "The closing phrase dan kokoh is audible and belongs to the sole speaker.",
+      "evidence": ["audio:6420-7290ms", "context:full-utterance"],
+      "confidence": 0.98,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-08:SECONDARY_LOW_MARGIN_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-id-003-review-0012",
+      "reason": "The secondary-model margin does not indicate a real voice change in the closing phrase.",
+      "evidence": ["audio:6420-7290ms", "audio:full"],
+      "confidence": 0.97,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    }
+  ]
+}

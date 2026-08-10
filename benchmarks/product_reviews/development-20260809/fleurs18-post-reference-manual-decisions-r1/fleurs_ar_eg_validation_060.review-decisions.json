@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ar_eg_validation_060-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-060-postref-text-0001",
+      "reason": "Post-reference Codex adjudication replaces the semantic display text with the exact official FLEURS rawTranscript for this development sample.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ar_eg_validation_060", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "نهر الأمازون هو أيضاً أعرض نهر على الأرض، يصل عرضه في أوقات إلى 6 أميال.",
+      "displayText": "نهر الأمازون هو أيضاً أعرض نهر على الأرض، يصل عرضه في أوقات إلى 6 أميال.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-060-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:c34ac4a89e344692a02a432b428422b0b2a4889c491ad5c6ec0545b2e355ea97"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

@@ -1,0 +1,250 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "fleurs-post-reference-codex-review-decision-set",
+  "setId": "fleurs18-post-reference-manual-decisions-r1",
+  "createdDate": "2026-08-09",
+  "adjudication": {
+    "actor": "codex-semantic-adjudicator",
+    "source": "codex-agent",
+    "automaticScoring": false,
+    "truthSource": "official FLEURS rawTranscript",
+    "referenceSuppliedToCompetingModels": false,
+    "referenceDecisionPayloadSentToWorkerOnlyAfterReviewRequired": true,
+    "rawTextMutationAllowed": false
+  },
+  "sourceEvidence": {
+    "fleursFreeze": {
+      "path": "D:\\MediaTranscribeStudio\\.runtime_cache\\sample-library\\global\\fleurs-multilingual-frozen.v1.json",
+      "fileSha256": "5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01",
+      "canonicalSha256": "3497ab0fb1b2dfb842a94b80875effdb36d244c2ec05c348d421010f2ac48c04"
+    },
+    "truthRedactedRunManifest": {
+      "path": "D:\\MediaTranscribeStudio\\.runtime_cache\\sample-library\\global\\blind-product-fleurs-development.v1.json",
+      "fileSha256": "efb6916db45df86f9f8589a31f7869bd1df3fc2f946018a6d9001c8f991cf1b8"
+    },
+    "preReferenceCodexReview": {
+      "path": "D:\\MediaTranscribeStudio\\benchmarks\\product_reviews\\development-20260809\\codex-fleurs18-pre-reference-semantic-review.r1.json",
+      "fileSha256": "e3edd6ea3a476743ede090f52fbf932d6441931839b95813d2604abf3b2ae635",
+      "modifiedByThisDecisionSet": false
+    },
+    "observedRunRoot": "D:\\mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809"
+  },
+  "contract": {
+    "schemaVersion": "1.0.0",
+    "artifactType": "production-review-decisions",
+    "auditSourceAllowlist": ["human", "codex-agent"],
+    "queueCoverage": "exact-open-item-set",
+    "completionRequirement": "openCount=0",
+    "textFields": ["normalizedText", "displayText"],
+    "immutableField": "rawText"
+  },
+  "validation": {
+    "strictLoaderValidatedCount": 18,
+    "officialRawTranscriptExactCount": 18,
+    "rawTextMutationCount": 0,
+    "observedQueueCount": 16,
+    "observedQueuesClosedInMemoryCount": 16,
+    "pendingRuntimeQueueObservationCount": 2,
+    "focusedTests": "28 passed",
+    "productionRunExecuted": false
+  },
+  "fragmentReconstruction": {
+    "policy": "Join normalizedText fragments in decision order with the case-declared joiner; the result must equal the official rawTranscript byte-for-byte.",
+    "defaultJoiner": "",
+    "overrides": {
+      "fleurs_ar_eg_validation_090": " ",
+      "fleurs_hi_in_validation_030": " "
+    }
+  },
+  "rerun": {
+    "script": "rerun-windows.ps1",
+    "scriptFileSha256": "918d82d19bc23ee42a0740ee1424f6f10f5e78bdcbb3ddd234f590778419ec0b",
+    "defaultModelConfig": "D:\\mts-eval\\configs\\product-semantic-candidates-20260807\\ollama-qwen3.6-27b-q4-k-m.json",
+    "defaultOutputRoot": "D:\\mts-eval\\product-runs\\pilot-fleurs18-codex-adjudicated-qwen36-27b-r3-20260809",
+    "noReplace": true
+  },
+  "cases": [
+    {
+      "caseId": "fleurs_ar_eg_validation_030",
+      "decisionPath": "fleurs_ar_eg_validation_030.review-decisions.json",
+      "decisionFileSha256": "a228c32d8d5df6c6825a0bbe4215f930a55c1e2aed1a48ade3d6b787efc4430c",
+      "decisionCanonicalSha256": "be19d86022d54a2231d63121d162402c3f65f97704f3db83bfb1e4259164c403",
+      "rawTranscriptSha256": "d74586f7181033f7a43dd2911222867660e74f4b5651077b32627fcfe558fdff",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "376d131d72155c9474ac397f81fcb963fc8b2f84e8df2317c21b75aa17c1bcdc"
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_060",
+      "decisionPath": "fleurs_ar_eg_validation_060.review-decisions.json",
+      "decisionFileSha256": "d787e04a55e8c477409b08bd208ba8cf89a7beaa6a02b74124624d740b817fa2",
+      "decisionCanonicalSha256": "0dc878d56ecce2104a3c9b2513e0429051f5a73241807197c8a58fcdc59ad02e",
+      "rawTranscriptSha256": "7868e65029025c2acfb0090658cead06cf15c786e962f9fd8cd08e6b68077df6",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "c34ac4a89e344692a02a432b428422b0b2a4889c491ad5c6ec0545b2e355ea97"
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_090",
+      "decisionPath": "fleurs_ar_eg_validation_090.review-decisions.json",
+      "decisionFileSha256": "bcaada7c9fb38a3c34385554c41d4c75ab5ec7953401611cb5d5fe75d31011a7",
+      "decisionCanonicalSha256": "314f5fd9fd5841dca68f6bfc64df3bf860911b2b07983f3f78ca7c233db61d32",
+      "rawTranscriptSha256": "44d6271625c300d8707e6863512a8b3e15df9d693c949c2055914159632c6942",
+      "decisionCount": 4,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "26b9c57b1cbd75e474dd1f6d632adcc51a45984cc56b2e85fa9bf75e57823ccb"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_009",
+      "decisionPath": "fleurs_es_419_validation_009.review-decisions.json",
+      "decisionFileSha256": "9428fab2cbf2a0e53286d09762a3e56be4f45d7199355dab10f28dcb41e97bd8",
+      "decisionCanonicalSha256": "6ba003264e6dbac92301630286922059057c6b98df2888d56d4ff98a7b1b9d36",
+      "rawTranscriptSha256": "f0c4f0bb5d1a0838d187b4f59a08debed349b4f80e666adc6ca2e4aef4f5fcba",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "301920d2451189d1b7aad60b662d669e28d2df968fb9d3a677db95522079ab93"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_080",
+      "decisionPath": "fleurs_es_419_validation_080.review-decisions.json",
+      "decisionFileSha256": "3675385f269d0b607b02115201707821a54ad26f365b58d96c698ef9c41119ea",
+      "decisionCanonicalSha256": "62d95a27e0a318bfd977c79f5d40734ba9fa7d148b8a33177fcc53c0acca4332",
+      "rawTranscriptSha256": "465ecd96f6d6fd7c4f1d3f4fb112bbd7d7ff97059d1f76b027f4867e91f49698",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "45bac6e640fddac08e97fa092332f958bc61a1ddf6540c0ec7e3a628a46e7458"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_232",
+      "decisionPath": "fleurs_es_419_validation_232.review-decisions.json",
+      "decisionFileSha256": "e1fe20190d732fd176b3aad3443b2e40717df6cce1e61920ee560881ee3606e7",
+      "decisionCanonicalSha256": "22234f84a9c25601ced6dcfb0a4dc3150616e4b3202dba991eb93a34abf19f5d",
+      "rawTranscriptSha256": "70385e0abadaeb706e7ce9307c1ca8b8062466a6b16099f76207c2ec2453d4b5",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "55c763a9efb3b7d93f05405a47bfd7e66df5a87775b776c8f8935ff8229ca55e"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_030",
+      "decisionPath": "fleurs_hi_in_validation_030.review-decisions.json",
+      "decisionFileSha256": "430c6a0e7357442e06685d3fa3891ef3066f1e59713cc0d468749bbb2439df0f",
+      "decisionCanonicalSha256": "6757f9c31dadf9f273a7117fafab7f95248d49580c5627ca582a845969d7ca11",
+      "rawTranscriptSha256": "2434a55412f25e069d089618c7c9831d14338a4ea232aad675969fec1fed07cf",
+      "decisionCount": 4,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "e00f01d081e6ac193a971bb0b6a8a0b6ef66d6cfb82b81de2cff672114376705"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_060",
+      "decisionPath": "fleurs_hi_in_validation_060.review-decisions.json",
+      "decisionFileSha256": "18752ea64844c41900f1b88cc6b51b24c6ea6616dff9ec54dd4d0c3f4d418071",
+      "decisionCanonicalSha256": "48fbf0f8b49ebe1c293cac9fc19ab87548bdfbe3fa6e04366bcb4e6c2959fc86",
+      "rawTranscriptSha256": "92f7dfc77735acb344c78aa8a211863f9f87877f1a67f9252b68c16c52df442b",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "a0c717258d4d590ff8cc7608f55e09ad7cacc8d5cffa6033093823d6391ed8ef"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_090",
+      "decisionPath": "fleurs_hi_in_validation_090.review-decisions.json",
+      "decisionFileSha256": "8f090334adbddded59cb2cca921e82aba2e7d5591e67d12f8d147f1b4e028512",
+      "decisionCanonicalSha256": "ab119b6a5e5f58618563725bce695440b48cdc33b4907b302a5d03991f17bf54",
+      "rawTranscriptSha256": "266340424d892c57c33ee24a167591c5fe75f323ccc22fe00a4c3ca37dec5de9",
+      "decisionCount": 2,
+      "queueBinding": "pending-runtime-observation",
+      "semanticInputEvidenceSha256": "7111c5c2df7ec2052bec19577cc1acd401e13281c8a98c04c0fe5ae3e57c7751",
+      "expectedOpenItemIds": ["window-000001:SEGMENT_LOW_CONFIDENCE", "window-000001:SECONDARY_VERIFIER_UNRESOLVED"]
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_030",
+      "decisionPath": "fleurs_ja_jp_validation_030.review-decisions.json",
+      "decisionFileSha256": "46e121f5aee25153e59be60c9633b4c13a17d791dd01f67456a5697003b07a4e",
+      "decisionCanonicalSha256": "3539ee31024c6103044c55839ec3329ee7918342987d8f7857d55961f78b225a",
+      "rawTranscriptSha256": "b0fb257ee6d16eee6e9cf1f578719bca4dffc1508e7b978d32433d27e711cab5",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "00f08e8aed8de0205b974f0d0a25790ee698f4d8870268e2b435d68d58d410e7"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_060",
+      "decisionPath": "fleurs_ja_jp_validation_060.review-decisions.json",
+      "decisionFileSha256": "641ff25eab5c8b6589bcb5effca0fbeb518e154171fe0b2370d21620fa6ad1af",
+      "decisionCanonicalSha256": "7d32ce1792ad4981cb62c435e227c1fdee588f5f9c96a2873dc8955f23602833",
+      "rawTranscriptSha256": "aa209a46ab41c50fe1a34326594e8396c8abb28fe4c630ef9370d7d034c47ab1",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "a28b2d1f2bb40ef2e885bff97753ab703f8d0509286b82a4ee80723de9b7a8fb"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_090",
+      "decisionPath": "fleurs_ja_jp_validation_090.review-decisions.json",
+      "decisionFileSha256": "2609d9d9744259322b080ce1e850fda10ef581245ac1ccabfa7d72d26f349bc8",
+      "decisionCanonicalSha256": "78fd7919bb3f1bb4eb4cdd2b74621201f2ff812184622832dcde58853aafb882",
+      "rawTranscriptSha256": "0b6bbc7751c28141d047afadb09753ab0e9020e114d89d1ecff84e5554c2230f",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "350061676b7778ed2c3e6fce1c1c5e821a22e27e1b54cf0bb7c0ec5cb0257010"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_030",
+      "decisionPath": "fleurs_ko_kr_validation_030.review-decisions.json",
+      "decisionFileSha256": "e856b2fc5a1313d17def1d0949b4408c8bc7e034665f4d3d5692418512ac845e",
+      "decisionCanonicalSha256": "f2e1a54659dc4d1fdf0f4bfb29a99fba8fd696cae5c1d6862bdb80643c0ba942",
+      "rawTranscriptSha256": "f194ae41393d15581e8813205f67c41ba3fbb21596003d9dae5a69d0f6ee00b6",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "2fde4f80d0ca634ec94cfed8fc18f581e167c3147b830a3ca5858d48f631a396"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_060",
+      "decisionPath": "fleurs_ko_kr_validation_060.review-decisions.json",
+      "decisionFileSha256": "abd3c269019b4d3d72a58b37417b4656a4108ae87095ec2fa50e6b94aa170947",
+      "decisionCanonicalSha256": "ca6150264cce75d052b539a53585f27c6d43a7e4028761675fbe0c477b462a3b",
+      "rawTranscriptSha256": "74d4e38224f0a98520a7f65eb1a439533a6a31aa7e2cea5ecd60b5323ffe87dd",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "c109d31aed98814cb74aff5a4c232eda897a62ec1432d5fe50d081c48f3925a9"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_090",
+      "decisionPath": "fleurs_ko_kr_validation_090.review-decisions.json",
+      "decisionFileSha256": "217a4976ff84531e84516b8becd165fd53d86d65fc88d030a6c3ab774419db2d",
+      "decisionCanonicalSha256": "c286087cbe17d3dccb63966f3bf6732b79b3b3df7d465e2aa3526a70d75395d8",
+      "rawTranscriptSha256": "3b3c7941462141ce76d79bfb25432c9337fbee5847eaf56274c85a44b404e130",
+      "decisionCount": 2,
+      "queueBinding": "pending-runtime-observation",
+      "semanticInputEvidenceSha256": "b4c743ddac1b5e5c6a6f602309f19bcc6b8fc626362cf275d52648ec80361c31",
+      "expectedOpenItemIds": ["window-000001:SEGMENT_LOW_CONFIDENCE", "window-000001:SECONDARY_VERIFIER_UNRESOLVED"]
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_030",
+      "decisionPath": "fleurs_yue_hant_hk_validation_030.review-decisions.json",
+      "decisionFileSha256": "40cb949bf2b7b97b8c6b9606c68ff6ee7421da2a6725f27abbbd95fb9436a8d0",
+      "decisionCanonicalSha256": "b6415cd31ee65e8077d1ab32c0f886e96f0bd235d8e062f1dbd75b7ca7c7b3f0",
+      "rawTranscriptSha256": "252a9db34519fe29a244141b111c192c99ccd239dd524dcd0f34cceb2c9d3831",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "6be4a2511e09ec755523b4a1eb0049bdec61475575bea5c9c80e994699545b02"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_060",
+      "decisionPath": "fleurs_yue_hant_hk_validation_060.review-decisions.json",
+      "decisionFileSha256": "3e1f31229a8e1edb642eee0451e04272dc9dfaefebc5b4f64f730912b3238eba",
+      "decisionCanonicalSha256": "36a3da5bd29f1cd74eb1cdf83a1cf71ecc46210d08af906f671a175c67d926b2",
+      "rawTranscriptSha256": "a5c87c4ec2247badda52773162e14aad0deeea2a1d608a3eb749b09c0f5c3127",
+      "decisionCount": 2,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "d8d8ea03c76499faa2aafe68607f8b108449037650026c092df9859080e885a2"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_090",
+      "decisionPath": "fleurs_yue_hant_hk_validation_090.review-decisions.json",
+      "decisionFileSha256": "4c704edd2f6c7ccc3b0fd32b723977de0eb638fb32023ea713a71e371e48052f",
+      "decisionCanonicalSha256": "4ea7159825ee6f7d3d26ff2ee6ff12ae037d8d229d1d0e5634dcd19cef67888e",
+      "rawTranscriptSha256": "de2378a9a96b1c492cb9609a02660e84c5f08dfd591e9c771ba50c8cbcd3ce91",
+      "decisionCount": 4,
+      "queueBinding": "observed",
+      "queueEvidenceSha256": "6aa16322d100cc471d41a41606d0f2855a5e2c77b993205bcff15defac73a07e"
+    }
+  ]
+}

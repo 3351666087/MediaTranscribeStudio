@@ -42,7 +42,14 @@ from .final_adjudication import (
     validate_final_composed_transcript,
     validate_final_no_speech_adjudication,
 )
-from .local_llm import LocalLLMConfig, LocalLLMProvider, OllamaLocalProvider
+from .local_llm import (
+    LLMProviderConfig,
+    LocalLLMConfig,
+    LocalLLMProvider,
+    OllamaLocalProvider,
+    create_llm_provider,
+    provider_config_from_mapping,
+)
 from .language import normalize_language_tag
 from .media_probe import MediaProbeResult
 from .models import (
@@ -217,6 +224,7 @@ class WorkerService:
         | None = None,
         semantic_required: bool = False,
         semantic_model: str | None = None,
+        llm_provider_config: LLMProviderConfig | None = None,
         media_probe: Any | None = None,
         output_publisher: Callable[..., OutputPublicationManifest]
         | None = publish_output_plans,
@@ -283,6 +291,12 @@ class WorkerService:
             if isinstance(semantic_model, str)
             else None
         )
+        if llm_provider_config is not None and not isinstance(
+            llm_provider_config,
+            LLMProviderConfig,
+        ):
+            raise ValueError("llm_provider_config must be an LLMProviderConfig")
+        self.llm_provider_config = llm_provider_config
         self.media_probe = media_probe
         self.output_publisher = output_publisher
         self.subtitle_delivery_executor = subtitle_delivery_executor
@@ -320,6 +334,17 @@ class WorkerService:
             "businessPromptVersion",
             "localLlmEndpoint",
             "localLlmEndpointPolicy",
+            "llmProvider",
+            "llmNetworkPolicy",
+            "llmEndpoint",
+            "llmApiKeyEnv",
+            "llmHeaderEnv",
+            "llmProxyUrl",
+            "llmRequireApiKey",
+            "llmAllowModelOverride",
+            "llmResponseFormat",
+            "llmProviderConfig",
+            "endpointPolicy",
         }
         unknown_fields = sorted(set(payload) - allowed_fields)
         if unknown_fields:
@@ -381,45 +406,177 @@ class WorkerService:
             raise invalid_request(
                 "localLlmMode must be disabled, suggestion-only, business, or enabled"
             )
-        configured_local_llm_model = self.semantic_model or "qwen3.5:9b"
-        local_llm_model_raw = payload.get(
-            "localLlmModel",
-            configured_local_llm_model,
+        configured_llm = self.llm_provider_config
+        if configured_llm is None:
+            default_llm: dict[str, Any] = {
+                "provider": "ollama-loopback",
+                "model": self.semantic_model or "qwen3.5:27b-q4_K_M",
+                "endpoint": "http://127.0.0.1:11434",
+                "networkPolicy": "loopback-only",
+                "apiKeyEnv": None,
+                "headerEnv": {},
+                "proxyUrl": None,
+                "requireApiKey": False,
+                "allowModelOverride": False,
+                "timeoutSeconds": 300.0,
+                "contextTokens": 8_192,
+                "outputTokens": 1_024,
+                "expectedDigest": None,
+            }
+        else:
+            default_llm = {
+                "provider": configured_llm.provider,
+                "model": configured_llm.model,
+                "endpoint": configured_llm.endpoint,
+                "networkPolicy": configured_llm.network_policy,
+                "apiKeyEnv": configured_llm.api_key_env,
+                "headerEnv": dict(configured_llm.header_env),
+                "proxyUrl": configured_llm.proxy,
+                "requireApiKey": configured_llm.require_api_key,
+                "allowModelOverride": configured_llm.allow_model_override,
+                "timeoutSeconds": configured_llm.timeout_seconds,
+                "contextTokens": configured_llm.context_tokens,
+                "outputTokens": configured_llm.output_tokens,
+                "expectedDigest": configured_llm.expected_model_digest,
+            }
+        nested_config = payload.get("llmProviderConfig")
+        if nested_config is not None and not isinstance(nested_config, Mapping):
+            raise invalid_request("llmProviderConfig must be an object")
+        llm_values = dict(default_llm)
+        if isinstance(nested_config, Mapping):
+            llm_values.update(dict(nested_config))
+        # Prefixed top-level fields are intentionally explicit so a desktop
+        # client can change transport without replacing the whole config.
+        top_level_overrides = {
+            "provider": payload.get("llmProvider"),
+            "model": payload.get("localLlmModel"),
+            "endpoint": payload.get("llmEndpoint", payload.get("localLlmEndpoint")),
+            "networkPolicy": payload.get(
+                "llmNetworkPolicy",
+                payload.get(
+                    "endpointPolicy",
+                    payload.get("localLlmEndpointPolicy"),
+                ),
+            ),
+            "apiKeyEnv": payload.get("llmApiKeyEnv"),
+            "headerEnv": payload.get("llmHeaderEnv"),
+            "proxyUrl": payload.get("llmProxyUrl"),
+            "requireApiKey": payload.get("llmRequireApiKey"),
+            "allowModelOverride": payload.get("llmAllowModelOverride"),
+            "responseFormat": payload.get("llmResponseFormat"),
+        }
+        for key, value in top_level_overrides.items():
+            if value is not None:
+                llm_values[key] = value
+        # Supplying a key environment variable is an explicit authentication
+        # intent.  Require the secret before the first provider call unless
+        # the caller deliberately opted out with ``requireApiKey=false``.
+        # This matters for arbitrary OpenAI-compatible relays, whose generic
+        # preset cannot know whether authentication is mandatory.
+        nested_requires_key = isinstance(nested_config, Mapping) and any(
+            key in nested_config for key in ("requireApiKey", "require_api_key")
         )
+        request_requires_key = "llmRequireApiKey" in payload
+        override_explicit = (
+            "llmAllowModelOverride" in payload
+            or (
+                isinstance(nested_config, Mapping)
+                and any(
+                    key in nested_config
+                    for key in ("allowModelOverride", "allow_model_override")
+                )
+            )
+        )
+        if (
+            not nested_requires_key
+            and not request_requires_key
+            and isinstance(llm_values.get("apiKeyEnv"), str)
+            and llm_values["apiKeyEnv"].strip()
+            and llm_values.get("networkPolicy") == "remote-explicit"
+        ):
+            llm_values["requireApiKey"] = True
+        local_llm_model_raw = llm_values.get("model")
         if not isinstance(local_llm_model_raw, str):
             raise invalid_request("localLlmModel must be a string")
-        local_llm_model = (
-            local_llm_model_raw.strip() or configured_local_llm_model
-        )
+        local_llm_model = local_llm_model_raw.strip() or str(
+            default_llm["model"]
+        ).strip()
+        llm_values["model"] = local_llm_model
+        allow_model_override = llm_values.get("allowModelOverride", False)
+        if not isinstance(allow_model_override, bool):
+            raise invalid_request("llmAllowModelOverride must be a boolean")
+        # Remote deployments commonly expose several model IDs behind one
+        # endpoint (including relays and vendor deployment aliases).  A
+        # configurable remote profile therefore permits a task to select its
+        # model unless the operator explicitly disabled overrides.  The
+        # loopback/offline profile remains digest-pinned and fail-closed.
+        requested_policy = str(llm_values.get("networkPolicy", "")).strip().casefold()
+        remote_override_default = requested_policy in {
+            "remote-explicit",
+            "https-only",
+            "https-required",
+            "https-or-loopback",
+            "remote-allowed",
+            "remote-https",
+        }
+        if remote_override_default and not override_explicit:
+            allow_model_override = True
+            llm_values["allowModelOverride"] = True
         if (
             self.semantic_model is not None
             and local_llm_model != self.semantic_model
+            and not allow_model_override
         ):
             raise invalid_request(
                 "localLlmModel must match the configured production model"
             )
-        endpoint_raw = payload.get(
-            "localLlmEndpoint", "http://127.0.0.1:11434"
-        )
-        if not isinstance(endpoint_raw, str):
-            raise invalid_request("localLlmEndpoint must be a string")
-        endpoint = endpoint_raw.strip() or "http://127.0.0.1:11434"
-        endpoint_policy_raw = payload.get(
-            "localLlmEndpointPolicy", "loopback-only"
-        )
-        if not isinstance(endpoint_policy_raw, str):
-            raise invalid_request("localLlmEndpointPolicy must be a string")
-        endpoint_policy = endpoint_policy_raw.strip() or "loopback-only"
-        if endpoint_policy != "loopback-only":
-            raise invalid_request(
-                "localLlmEndpointPolicy must be loopback-only"
-            )
         try:
-            LocalLLMConfig(model=local_llm_model, endpoint=endpoint)
-        except ValueError as exc:
+            normalized_llm_config = provider_config_from_mapping(llm_values)
+        except (TypeError, ValueError) as exc:
             raise invalid_request(
-                "localLlmEndpoint must be a valid loopback-only endpoint"
+                "LLM provider configuration is invalid",
+                reason="configuration validation failed",
             ) from exc
+        normalized_policy = (
+            "loopback-only"
+            if isinstance(normalized_llm_config, LocalLLMConfig)
+            else normalized_llm_config.network_policy
+        )
+        if (
+            configured_llm is not None
+            and configured_llm.network_policy == "loopback-only"
+            and normalized_policy != "loopback-only"
+        ):
+            raise invalid_request(
+                "request cannot broaden the configured LLM network policy"
+            )
+        if (
+            configured_llm is not None
+            and configured_llm.network_policy == "loopback-only"
+            and not configured_llm.allow_model_override
+            and allow_model_override
+        ):
+            raise invalid_request(
+                "request cannot enable an unconfigured LLM model override"
+            )
+        if isinstance(normalized_llm_config, LocalLLMConfig):
+            provider_id = "ollama-loopback"
+            endpoint = normalized_llm_config.endpoint
+            endpoint_policy = "loopback-only"
+            api_key_env = None
+            header_env: dict[str, str] = {}
+            proxy = None
+            require_api_key = False
+            allow_model_override = False
+        else:
+            provider_id = normalized_llm_config.provider
+            endpoint = normalized_llm_config.endpoint
+            endpoint_policy = normalized_llm_config.network_policy
+            api_key_env = normalized_llm_config.api_key_env
+            header_env = dict(normalized_llm_config.header_env)
+            proxy = normalized_llm_config.proxy
+            require_api_key = normalized_llm_config.require_api_key
+            allow_model_override = normalized_llm_config.allow_model_override
         local_llm_auto_apply = payload.get("localLlmAutoApply", False)
         if not isinstance(local_llm_auto_apply, bool):
             raise invalid_request("localLlmAutoApply must be a boolean")
@@ -470,6 +627,14 @@ class WorkerService:
             local_llm_mode=local_llm_mode,
             local_llm_model=local_llm_model,
             local_llm_endpoint=endpoint,
+            llm_provider=provider_id,
+            llm_network_policy=endpoint_policy,
+            llm_api_key_env=api_key_env,
+            llm_header_env=header_env,
+            llm_proxy=proxy,
+            llm_require_api_key=require_api_key,
+            llm_allow_model_override=allow_model_override,
+            llm_provider_config=normalized_llm_config,
             business_config=business_config,
             output_recipe=output_recipe,
         )
@@ -1509,20 +1674,7 @@ class WorkerService:
                 "transcript document has no canonical generated date",
             )
         generated_date = generated_at[:10]
-        try:
-            compiled = compile_output_customizations(
-                recipe,
-                source_path=record.request.source_path,
-                output_directory=record.request.output_directory,
-                media_probe=media_probe,
-                media_probe_artifact=media_probe_artifact,
-            )
-        except OutputRecipeError as exc:
-            raise WorkerError(
-                "OUTPUT_RECIPE_COMPILE_FAILED",
-                "the canonical output recipe could not be compiled",
-                details={"reason": str(exc)},
-            ) from exc
+        compiled = self._compile_output_recipe_customizations(record)
         plans: list[OutputExecutionPlan] = []
         plan_paths: list[str] = []
         plan_hashes: list[str] = []
@@ -1577,6 +1729,35 @@ class WorkerService:
         record.output_plan_paths = plan_paths
         record.output_plan_hashes = plan_hashes
         return record.output_execution_plans
+
+    def _compile_output_recipe_customizations(
+        self,
+        record: JobRecord,
+    ) -> tuple[Any, ...]:
+        recipe = record.request.output_recipe
+        if recipe is None:
+            return ()
+        media_probe = record.media_probe_result
+        media_probe_artifact = record.media_probe_artifact
+        if media_probe is None or media_probe_artifact is None:
+            raise WorkerError(
+                "MEDIA_PROBE_REQUIRED",
+                "output planning requires persisted trusted media-probe evidence",
+            )
+        try:
+            return compile_output_customizations(
+                recipe,
+                source_path=record.request.source_path,
+                output_directory=record.request.output_directory,
+                media_probe=media_probe,
+                media_probe_artifact=media_probe_artifact,
+            )
+        except OutputRecipeError as exc:
+            raise WorkerError(
+                "OUTPUT_RECIPE_COMPILE_FAILED",
+                "the canonical output recipe could not be compiled",
+                details={"reason": str(exc)},
+            ) from exc
 
     def _execute_transcript_exports(
         self,
@@ -2415,11 +2596,11 @@ class WorkerService:
         try:
             release()
         except Exception as exc:
-            code = (
-                "SEMANTIC_RESOURCE_RELEASE_FAILED"
-                if stage == "semantic_processing"
-                else "BUSINESS_RESOURCE_RELEASE_FAILED"
-            )
+            code = {
+                "semantic_processing": "SEMANTIC_RESOURCE_RELEASE_FAILED",
+                "semantic_composition": "SEMANTIC_RESOURCE_RELEASE_FAILED",
+                "business_processing": "BUSINESS_RESOURCE_RELEASE_FAILED",
+            }.get(stage, "STAGE_RESOURCE_RELEASE_FAILED")
             raise WorkerError(
                 code,
                 f"{stage} could not release its local model resources",
@@ -2438,12 +2619,20 @@ class WorkerService:
         if self.business_provider_factory is not None:
             provider = self.business_provider_factory(record.request)
         if provider is None:
-            provider = OllamaLocalProvider(
-                LocalLLMConfig(
-                    model=record.request.business_config.model,
-                    endpoint=record.request.local_llm_endpoint,
-                )
+            configured_provider = getattr(
+                record.request,
+                "llm_provider_config",
+                None,
             )
+            if configured_provider is not None:
+                provider = create_llm_provider(configured_provider)
+            else:
+                provider = OllamaLocalProvider(
+                    LocalLLMConfig(
+                        model=record.request.business_config.model,
+                        endpoint=record.request.local_llm_endpoint,
+                    )
+                )
         return BusinessProcessingRunner(
             provider=provider,
             cancellation_check=context.raise_if_cancelled,
@@ -2464,13 +2653,23 @@ class WorkerService:
         if provider is None and self.business_provider_factory is not None:
             provider = self.business_provider_factory(record.request)
         model = self.semantic_model or record.request.local_llm_model
+        if getattr(record.request, "llm_allow_model_override", False):
+            model = record.request.local_llm_model
         if provider is None:
-            provider = OllamaLocalProvider(
-                LocalLLMConfig(
-                    model=model,
-                    endpoint=record.request.local_llm_endpoint,
-                )
+            configured_provider = getattr(
+                record.request,
+                "llm_provider_config",
+                None,
             )
+            if configured_provider is not None:
+                provider = create_llm_provider(configured_provider)
+            else:
+                provider = OllamaLocalProvider(
+                    LocalLLMConfig(
+                        model=model,
+                        endpoint=record.request.local_llm_endpoint,
+                    )
+                )
         return SemanticProcessingRunner(
             provider=provider,
             model=model,
@@ -3070,6 +3269,9 @@ class WorkerService:
         try:
             context.raise_if_cancelled()
             self._probe_source_media(record, context)
+            # Reject media-incompatible delivery modes before transcription,
+            # semantic arbitration, or human review can consume resources.
+            self._compile_output_recipe_customizations(record)
             context.raise_if_cancelled()
             self._transition(record, JobStatus.RUNNING, "transcription")
             self._emit(record, "job.started", {"status": "running"})

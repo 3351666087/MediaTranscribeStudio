@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ar_eg_validation_030-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-030-postref-text-0001",
+      "reason": "Post-reference Codex adjudication replaces the semantic display text with the exact official FLEURS rawTranscript for this development sample.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ar_eg_validation_030", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "يحتوي الامتداد بين بوينت ماريون و فيرمونت على أصعب ظروف القيادة على طريق بافلو-بيتسبرغ السريع، حيث يمر بشكل منتظم عبر تضاريس غابات معزولة.",
+      "displayText": "يحتوي الامتداد بين بوينت ماريون و فيرمونت على أصعب ظروف القيادة على طريق بافلو-بيتسبرغ السريع، حيث يمر بشكل منتظم عبر تضاريس غابات معزولة.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ar-eg-030-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:376d131d72155c9474ac397f81fcb963fc8b2f84e8df2317c21b75aa17c1bcdc"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

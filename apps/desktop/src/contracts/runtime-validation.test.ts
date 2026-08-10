@@ -317,10 +317,10 @@ describe("dynamic speaker runtime validation", () => {
     const parsed = parseStudioSnapshot(structuredClone(studioFixture));
 
     parsed.strategies.forEach((strategy) => {
-      expect(strategy.semanticModel).toBe("qwen3.5:9b");
+      expect(strategy.semanticModel).toBe("qwen3.5:27b-q4_K_M");
       expect(strategy.semanticModelStatus).toBe("suggestion_only");
       expect(strategy.semanticModelEvaluation).toContain(
-        "required for fail-closed semantic arbitration",
+        "won the current multilingual semantic challenge",
       );
       expect(strategy.semanticGuardrail).toContain(
         "cannot create speakers",
@@ -348,7 +348,7 @@ describe("dynamic speaker runtime validation", () => {
       mutate: (strategy: Record<string, unknown>) => {
         strategy.semanticModel = "qwen3.5:4b";
       },
-      expected: /qwen3\.5:9b/u,
+      expected: /qwen3\.5:27b-q4_K_M/u,
     },
     {
       label: "empty evaluation",
@@ -1047,12 +1047,37 @@ describe("dynamic speaker runtime validation", () => {
     );
   });
 
-  it("rejects a retired local model in production requests", () => {
+  it("accepts a user-selected model and rejects an empty model id", () => {
     const request = validCreateRequest({ mode: "auto" }, []);
-    request.localLlmModel = "qwen3.5:4b";
+    request.localLlmModel = "vendor/custom-semantic-model";
+
+    expect(() => assertCreateJobRequest(request)).not.toThrow();
+
+    request.localLlmModel = "";
 
     expect(() => assertCreateJobRequest(request)).toThrow(
-      /must be exactly "qwen3\.5:9b"/u,
+      /localLlmModel/u,
+    );
+  });
+
+  it("accepts explicit remote providers without accepting raw keys or HTTP remotes", () => {
+    const request = validCreateRequest({ mode: "auto" }, []);
+    request.localLlmModel = "gpt-5";
+    request.localLlmEndpoint = "https://relay.example.com/v1";
+    request.localLlmEndpointPolicy = "remote-explicit";
+    request.llmProvider = "openai-compatible";
+    request.llmApiKeyEnv = "RELAY_API_KEY";
+    request.llmProxyUrl = "http://127.0.0.1:7890";
+
+    expect(() => assertCreateJobRequest(request)).not.toThrow();
+
+    request.localLlmEndpoint = "http://relay.example.com/v1";
+    expect(() => assertCreateJobRequest(request)).toThrow(/HTTPS/u);
+
+    request.localLlmEndpoint = "https://relay.example.com/v1";
+    request.llmApiKeyEnv = "sk-raw-secret";
+    expect(() => assertCreateJobRequest(request)).toThrow(
+      /environment-variable name/u,
     );
   });
 });

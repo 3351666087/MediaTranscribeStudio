@@ -14,7 +14,14 @@
     "qwen3Asr": "D:/models/qwen/Qwen3-ASR-1.7B",
     "qwen3ForcedAligner": "D:/models/qwen/Qwen3-ForcedAligner-0.6B",
     "camPlus": "D:/models/funasr/campplus",
-    "eres2netV2": "D:/models/modelscope/eres2netv2",
+    "secondarySpeakerVerifier": {
+      "path": "D:/models/modelscope/eres2netv2w24s4ep4",
+      "deploymentSlot": "secondary-speaker-verification",
+      "registryModelId": "eres2netv2-w24s4ep4",
+      "manifestModelKey": "eres2netV2LargeCandidate",
+      "manifestSha256": "sha256:c635880504cbacbc95adbc96a4c1567585c4f229426054c64067cfbead2a0ed9",
+      "adapterId": "modelscope-eres2netv2"
+    },
     "pyannote": "D:/models/pyannote/speaker-diarization-community-1",
     "mossformer2Separation": null
   },
@@ -61,7 +68,13 @@
     "overlapRecoveryMaxIntervalMs": 12000,
     "overlapRecoveryAsrMaxNewTokens": 96,
     "localLlmMode": "suggestion-only",
-    "localLlmModel": "qwen3.5:9b"
+    "localLlmModel": "qwen3.5:27b-q4_K_M",
+    "localLlmModelDigest": "sha256:7653528ba5cba4dd8e19da24aaddc7f4d0b5ecd93571c0825dfd4137958ec06e",
+    "localLlmTimeoutSeconds": 600,
+    "localLlmContextTokens": 32768,
+    "localLlmOutputTokens": 4096,
+    "localLlmBatchSize": 8,
+    "localLlmMaxRounds": 3
   },
   "pdf": {
     "minimumScore": 85,

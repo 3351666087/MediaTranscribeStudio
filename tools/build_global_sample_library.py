@@ -6,6 +6,7 @@ import argparse
 import gc
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,12 @@ DEFAULT_MANIFEST = PROJECT_ROOT / "sample_library" / "global-manifest.v1.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / ".runtime_cache" / "sample-library" / "global"
 RESOLVED_NAME = "global-sample-library.resolved.v1.json"
 USER_AGENT = "MediaTranscribeStudio-global-sample-library/1.0"
+PARQUET_CACHE_ROOT = (
+    PROJECT_ROOT / ".runtime_cache" / "sample-library" / "fleurs-parquet"
+)
+_PARQUET_FILE_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _sha256(path: Path) -> str:
@@ -75,6 +82,55 @@ def _request_json(url: str, *, timeout: float = 120.0) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise GlobalSampleLibraryError(f"remote JSON is not an object: {url}")
     return value
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        return None
+
+
+def _request_redirect_headers(
+    url: str,
+    *,
+    timeout: float = 120.0,
+    attempts: int = 3,
+) -> dict[str, str]:
+    """Read Hub's immutable file headers without following the CDN redirect."""
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": USER_AGENT, "Range": "bytes=0-0"},
+    )
+    opener = urllib.request.build_opener(_NoRedirect())
+    last_error: OSError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                return {
+                    str(key).casefold(): str(value)
+                    for key, value in response.headers.items()
+                }
+        except urllib.error.HTTPError as exc:
+            if exc.code in {301, 302, 303, 307, 308}:
+                return {
+                    str(key).casefold(): str(value)
+                    for key, value in exc.headers.items()
+                }
+            last_error = exc
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+        if attempt < attempts:
+            time.sleep(float(attempt))
+    raise GlobalSampleLibraryError(
+        f"remote parquet headers failed after {attempts} attempts: {url}: {last_error}"
+    )
 
 
 def _dataset_metadata(source: GlobalSampleSource) -> dict[str, Any]:
@@ -171,6 +227,18 @@ def _case_row_metadata(
             "id": expected_id,
         }
 
+    source_row_id: dict[str, str] | None = None
+    row_id_field = acquisition.get("rowIdField")
+    expected_row_id = acquisition.get("rowId")
+    if isinstance(row_id_field, str) and isinstance(expected_row_id, str):
+        actual_row_id = row.get(row_id_field)
+        if str(actual_row_id) != expected_row_id:
+            raise GlobalSampleLibraryError(
+                f"{case.case_id} source row identity mismatch: "
+                f"expected {expected_row_id!r}, got {actual_row_id!r}"
+            )
+        source_row_id = {"field": row_id_field, "id": expected_row_id}
+
     return {
         "dataset": source.dataset,
         "revision": source.revision,
@@ -192,8 +260,244 @@ def _case_row_metadata(
             "path": path_field,
         },
         "verifiedSourceGroups": verified_groups,
+        "sourceRowId": source_row_id,
         "sourceAssetType": "audio/wav",
     }
+
+
+def _immutable_parquet_descriptor(
+    source: GlobalSampleSource,
+    *,
+    config: str,
+    split: str,
+) -> dict[str, Any]:
+    cache_key = (source.dataset, source.revision, config, split)
+    cached = _PARQUET_FILE_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    # Validate the source revision and license independently of the mutable
+    # parquet conversion ref before accepting any embedded audio bytes.
+    _dataset_metadata(source)
+    body = _request_json(
+        "https://datasets-server.huggingface.co/parquet?"
+        + urllib.parse.urlencode({"dataset": source.dataset}),
+        timeout=180.0,
+    )
+    if body.get("partial") is not False:
+        raise GlobalSampleLibraryError(f"{source.dataset} parquet listing is partial")
+    files = body.get("parquet_files")
+    if not isinstance(files, list) or not files:
+        raise GlobalSampleLibraryError(f"{source.dataset} parquet listing is invalid")
+    matches = [
+        item
+        for item in files
+        if isinstance(item, dict)
+        and item.get("dataset") == source.dataset
+        and item.get("config") == config
+        and item.get("split") == split
+    ]
+    if len(matches) != 1:
+        raise GlobalSampleLibraryError(
+            f"{source.dataset} parquet shard is not unique for {config}/{split}"
+        )
+    item = matches[0]
+    url = item.get("url")
+    filename = item.get("filename")
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise GlobalSampleLibraryError(f"{config}/{split} parquet URL must be HTTPS")
+    if not isinstance(filename, str) or not filename:
+        raise GlobalSampleLibraryError(f"{config}/{split} parquet filename is invalid")
+    headers = _request_redirect_headers(url, timeout=180.0)
+    parquet_revision = headers.get("x-repo-commit")
+    content_sha = headers.get("x-linked-etag", "").strip('"')
+    linked_size = headers.get("x-linked-size")
+    if not isinstance(parquet_revision, str) or not _HEX40.fullmatch(parquet_revision):
+        raise GlobalSampleLibraryError(
+            f"{config}/{split}/{filename} parquet revision is not immutable"
+        )
+    if not _HEX64.fullmatch(content_sha):
+        raise GlobalSampleLibraryError(
+            f"{config}/{split}/{filename} parquet content hash is missing"
+        )
+    try:
+        size = int(linked_size or item.get("size"))
+    except (TypeError, ValueError) as exc:
+        raise GlobalSampleLibraryError(
+            f"{config}/{split}/{filename} parquet size is invalid"
+        ) from exc
+    if size <= 0:
+        raise GlobalSampleLibraryError(
+            f"{config}/{split}/{filename} parquet size is invalid"
+        )
+    parsed = urllib.parse.urlsplit(url)
+    marker = "/resolve/"
+    if marker not in parsed.path:
+        raise GlobalSampleLibraryError(f"{config}/{split}/{filename} parquet URL is invalid")
+    prefix, resolved_tail = parsed.path.split(marker, 1)
+    _, separator, shard_tail = resolved_tail.partition("/")
+    if not separator or not shard_tail:
+        shard_tail = f"{config}/{split}/{filename.lstrip('/')}"
+    immutable_path = f"{prefix}{marker}{parquet_revision}/{shard_tail}"
+    descriptor = {
+        "url": urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, immutable_path, "", "")
+        ),
+        "revision": parquet_revision,
+        "filename": f"{config}/{split}/{filename}",
+        "contentSha256": content_sha,
+        "size": size,
+        "sourceRevision": source.revision,
+    }
+    _PARQUET_FILE_CACHE[cache_key] = descriptor
+    return dict(descriptor)
+
+
+def _parquet_audio_bytes(value: Any, field: str) -> bytes:
+    if isinstance(value, dict):
+        audio_bytes = value.get("bytes")
+    elif isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        audio_bytes = value[0].get("bytes")
+    else:
+        audio_bytes = None
+    if isinstance(audio_bytes, memoryview):
+        audio_bytes = audio_bytes.tobytes()
+    if isinstance(audio_bytes, bytearray):
+        audio_bytes = bytes(audio_bytes)
+    if not isinstance(audio_bytes, bytes) or not audio_bytes:
+        raise GlobalSampleLibraryError(
+            f"{field} must contain exactly one non-empty audio asset"
+        )
+    return audio_bytes
+
+
+def _validate_parquet_access(
+    access: Any,
+    *,
+    source: GlobalSampleSource,
+    case: GlobalSampleCase,
+    audio_bytes: bytes,
+) -> dict[str, Any]:
+    if not isinstance(access, dict):
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet provenance is invalid"
+        )
+    revision = access.get("revision")
+    content_sha = access.get("contentSha256")
+    audio_sha = access.get("audioSha256")
+    url = access.get("url")
+    if access.get("sourceRevision") != source.revision:
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet source revision is not pinned"
+        )
+    if not isinstance(revision, str) or not _HEX40.fullmatch(revision):
+        raise GlobalSampleLibraryError(f"{case.case_id} parquet revision is invalid")
+    if not isinstance(content_sha, str) or not _HEX64.fullmatch(content_sha):
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet content hash is invalid"
+        )
+    if not isinstance(audio_sha, str) or not _HEX64.fullmatch(audio_sha):
+        raise GlobalSampleLibraryError(f"{case.case_id} parquet audio hash is invalid")
+    if hashlib.sha256(audio_bytes).hexdigest() != audio_sha:
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet audio content hash mismatch"
+        )
+    if not isinstance(url, str) or not url.startswith(
+        f"https://huggingface.co/datasets/{source.dataset}/resolve/{revision}/"
+    ):
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet URL is not pinned to its revision"
+        )
+    if not isinstance(access.get("filename"), str) or not access["filename"]:
+        raise GlobalSampleLibraryError(f"{case.case_id} parquet filename is invalid")
+    if not isinstance(access.get("size"), int) or access["size"] <= 0:
+        raise GlobalSampleLibraryError(f"{case.case_id} parquet size is invalid")
+    if access.get("rowIndex") != case.acquisition["rowIndex"]:
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet row identity is invalid"
+        )
+    return access
+
+
+def _parquet_row(
+    source: GlobalSampleSource,
+    case: GlobalSampleCase,
+) -> tuple[bytes, dict[str, Any], dict[str, Any]]:
+    """Resolve one pinned row from an immutable Dataset Hub parquet shard."""
+    acquisition = case.acquisition
+    descriptor = _immutable_parquet_descriptor(
+        source,
+        config=acquisition["config"],
+        split=acquisition["split"],
+    )
+    if descriptor.get("sourceRevision") != source.revision:
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} parquet source revision is not pinned"
+        )
+    try:
+        import fsspec
+        import pyarrow.parquet as parquet
+    except ImportError as exc:
+        raise GlobalSampleLibraryError(
+            "pyarrow and fsspec are required for immutable parquet fallback"
+        ) from exc
+    cache_root = PARQUET_CACHE_ROOT
+    cache_root.mkdir(parents=True, exist_ok=True)
+    try:
+        filesystem = fsspec.filesystem(
+            "blockcache",
+            target_protocol="https",
+            cache_storage=str(cache_root),
+            block_size=8 * 1024 * 1024,
+            check_files=True,
+        )
+        with filesystem.open(descriptor["url"], "rb") as handle:
+            parquet_file = parquet.ParquetFile(handle)
+            target_index = acquisition["rowIndex"]
+            if target_index < 0 or target_index >= parquet_file.metadata.num_rows:
+                raise GlobalSampleLibraryError(
+                    f"{case.case_id} parquet rowIndex is out of bounds"
+                )
+            row_group = 0
+            row_offset = target_index
+            for index in range(parquet_file.num_row_groups):
+                group_rows = parquet_file.metadata.row_group(index).num_rows
+                if row_offset < group_rows:
+                    row_group = index
+                    break
+                row_offset -= group_rows
+            field_names = set(parquet_file.schema_arrow.names)
+            fields = {
+                "audio",
+                acquisition.get("transcriptField", "transcription"),
+                acquisition.get("rawTranscriptField", "raw_transcription"),
+                acquisition.get("pathField", "path"),
+                "english_transcription",
+                "gender",
+                acquisition.get("rowIdField"),
+                acquisition.get("speakerField"),
+                acquisition.get("recordingField"),
+            }
+            columns = sorted(field for field in fields if field in field_names)
+            row = parquet_file.read_row_group(row_group, columns=columns).slice(
+                row_offset,
+                1,
+            ).to_pylist()[0]
+    except GlobalSampleLibraryError:
+        raise
+    except Exception as exc:
+        raise GlobalSampleLibraryError(
+            f"{case.case_id} immutable parquet read failed: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(row, dict):
+        raise GlobalSampleLibraryError(f"{case.case_id} parquet row is invalid")
+    audio_bytes = _parquet_audio_bytes(row.get("audio"), f"{case.case_id}.audio")
+    access = {
+        **descriptor,
+        "rowIndex": acquisition["rowIndex"],
+        "audioSha256": hashlib.sha256(audio_bytes).hexdigest(),
+    }
+    _validate_parquet_access(access, source=source, case=case, audio_bytes=audio_bytes)
+    return audio_bytes, row, access
 
 
 def _viewer_row(
@@ -210,10 +514,43 @@ def _viewer_row(
             "length": 1,
         }
     )
-    value = _request_json(
-        f"https://datasets-server.huggingface.co/rows?{params}",
-        timeout=180.0,
-    )
+    try:
+        value = _request_json(
+            f"https://datasets-server.huggingface.co/rows?{params}",
+            timeout=180.0,
+        )
+    except GlobalSampleLibraryError as rows_error:
+        if acquisition["kind"] != "hf-viewer-search-row":
+            raise
+        try:
+            audio_bytes, row, parquet_access = _parquet_row(source, case)
+            _validate_parquet_access(
+                parquet_access,
+                source=source,
+                case=case,
+                audio_bytes=audio_bytes,
+            )
+            metadata = _case_row_metadata(row, source=source, case=case)
+            metadata["viewerAccess"] = {
+                "kind": acquisition["kind"],
+                "searchQuery": acquisition.get("searchQuery"),
+                "selectionEndpoint": "/search",
+                "fetchEndpoint": "/parquet",
+                "fetchRowIndex": acquisition["rowIndex"],
+                "fallbackFrom": "/rows",
+                "parquet": parquet_access,
+            }
+            return audio_bytes, metadata
+        except GlobalSampleLibraryError as parquet_error:
+            raise GlobalSampleLibraryError(
+                f"{case.case_id} pinned /rows failed ({rows_error}); immutable "
+                f"parquet fallback failed: {parquet_error}"
+            ) from parquet_error
+        except (OSError, ValueError, TypeError) as parquet_error:
+            raise GlobalSampleLibraryError(
+                f"{case.case_id} pinned /rows failed ({rows_error}); immutable "
+                f"parquet fallback failed: {type(parquet_error).__name__}"
+            ) from parquet_error
     rows = value.get("rows")
     if not isinstance(rows, list) or len(rows) != 1:
         raise GlobalSampleLibraryError(f"{case.case_id} did not resolve one row")
@@ -230,11 +567,21 @@ def _viewer_row(
         raise GlobalSampleLibraryError(
             f"{case.case_id} audio asset is not bound to the pinned dataset revision"
         )
-    return _request_bytes(audio_url, timeout=180.0), _case_row_metadata(
+    metadata = _case_row_metadata(
         row,
         source=source,
         case=case,
     )
+    viewer_access = {
+        "kind": acquisition["kind"],
+        "searchQuery": acquisition.get("searchQuery"),
+        "fetchEndpoint": "/rows",
+        "fetchRowIndex": acquisition["rowIndex"],
+    }
+    if acquisition["kind"] == "hf-viewer-search-row":
+        viewer_access["selectionEndpoint"] = "/search"
+    metadata["viewerAccess"] = viewer_access
+    return _request_bytes(audio_url, timeout=180.0), metadata
 
 
 def _streaming_row(
@@ -337,7 +684,10 @@ def _build_case(
     case: GlobalSampleCase,
     output_root: Path,
 ) -> dict[str, Any]:
-    if case.acquisition["kind"] == "hf-viewer-row":
+    if case.acquisition["kind"] in {
+        "hf-viewer-row",
+        "hf-viewer-search-row",
+    }:
         audio_bytes, row = _viewer_row(source, case)
     else:
         audio_bytes, row = _streaming_row(source, case)
@@ -508,6 +858,76 @@ def _cached_case_matches_acquisition(
             }
     if source_row.get("verifiedSourceGroups", {}) != expected_groups:
         return False
+    row_id_field = case.acquisition.get("rowIdField")
+    row_id = case.acquisition.get("rowId")
+    if isinstance(row_id_field, str) and isinstance(row_id, str):
+        if source_row.get("sourceRowId") != {
+            "field": row_id_field,
+            "id": row_id,
+        }:
+            return False
+    if case.acquisition["kind"] == "hf-viewer-search-row":
+        viewer_access = source_row.get("viewerAccess")
+        if not isinstance(viewer_access, dict) or viewer_access.get(
+            "kind"
+        ) != "hf-viewer-search-row" or viewer_access.get(
+            "searchQuery"
+        ) != case.acquisition["searchQuery"]:
+            return False
+        if viewer_access.get("selectionEndpoint") != "/search":
+            return False
+        if viewer_access.get("fetchRowIndex") != case.acquisition["rowIndex"]:
+            return False
+        if viewer_access.get("fetchEndpoint") == "/rows":
+            if set(viewer_access) != {
+                "kind",
+                "searchQuery",
+                "selectionEndpoint",
+                "fetchEndpoint",
+                "fetchRowIndex",
+            }:
+                return False
+        elif viewer_access.get("fetchEndpoint") == "/parquet":
+            parquet_access = viewer_access.get("parquet")
+            if not isinstance(parquet_access, dict):
+                return False
+            if parquet_access.get("sourceRevision") != source.revision:
+                return False
+            if not isinstance(parquet_access.get("revision"), str) or not _HEX40.fullmatch(
+                parquet_access["revision"]
+            ):
+                return False
+            if not isinstance(parquet_access.get("contentSha256"), str) or not _HEX64.fullmatch(
+                parquet_access["contentSha256"]
+            ):
+                return False
+            parquet_revision = parquet_access["revision"]
+            parquet_url = parquet_access.get("url")
+            if not isinstance(parquet_url, str) or not parquet_url.startswith(
+                f"https://huggingface.co/datasets/{source.dataset}/resolve/"
+                f"{parquet_revision}/"
+            ):
+                return False
+            if not isinstance(parquet_access.get("filename"), str) or not parquet_access[
+                "filename"
+            ].startswith(
+                f"{case.acquisition['config']}/{case.acquisition['split']}/"
+            ):
+                return False
+            if not isinstance(parquet_access.get("size"), int) or parquet_access[
+                "size"
+            ] <= 0:
+                return False
+            if parquet_access.get("rowIndex") != case.acquisition["rowIndex"]:
+                return False
+            if not isinstance(parquet_access.get("audioSha256"), str) or not _HEX64.fullmatch(
+                parquet_access["audioSha256"]
+            ):
+                return False
+            if viewer_access.get("fallbackFrom") != "/rows":
+                return False
+        else:
+            return False
     expected_mapping = {
         "transcript": case.acquisition.get("transcriptField", "transcription"),
         "rawTranscript": case.acquisition.get(

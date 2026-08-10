@@ -77,7 +77,9 @@ const REVIEW_REASONS = [
   "local_audio_review",
 ] as const;
 const STRATEGY_IDS = ["balanced", "quality", "memory-saver"] as const;
-const PRODUCTION_LOCAL_LLM_MODEL = "qwen3.5:9b";
+const PRODUCTION_LOCAL_LLM_MODEL = "qwen3.5:27b-q4_K_M";
+const LEGACY_LOCAL_LLM_MODELS = new Set(["qwen3.5:9b"]);
+const LLM_ENDPOINT_POLICIES = ["loopback-only", "remote-explicit"] as const;
 const STAGE_IDS = [
   "media",
   "vad",
@@ -404,28 +406,84 @@ function languageTag(
   return tag;
 }
 
-function loopbackEndpoint(value: unknown, path: string): string {
+function providerEndpoint(
+  value: unknown,
+  path: string,
+  policy: (typeof LLM_ENDPOINT_POLICIES)[number],
+): string {
   const endpoint = string(value, path, { min: 1, max: 2048 });
   ensureNoControlCharacters(endpoint, path);
   let parsed: URL;
   try {
     parsed = new URL(endpoint);
   } catch {
-    fail(path, "must be a valid absolute loopback URL.");
+    fail(path, "must be a valid absolute HTTP(S) URL.");
   }
-  const isLoopbackHost =
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    fail(path, "must use HTTP(S) without credentials, query, or fragment.");
+  }
+  const loopback =
     parsed.hostname === "localhost" ||
     parsed.hostname === "127.0.0.1" ||
     parsed.hostname === "[::1]";
-  if (
-    !isLoopbackHost ||
-    !["http:", "https:"].includes(parsed.protocol) ||
-    parsed.username.length > 0 ||
-    parsed.password.length > 0
-  ) {
-    fail(path, "must use HTTP(S) with localhost, 127.0.0.1, or [::1].");
+  if (policy === "loopback-only" && !loopback) {
+    fail(path, "must use localhost, 127.0.0.1, or [::1] for loopback-only mode.");
+  }
+  if (policy === "remote-explicit" && parsed.protocol !== "https:" && !loopback) {
+    fail(path, "remote endpoints must use HTTPS unless they are loopback.");
   }
   return endpoint;
+}
+
+function providerId(value: unknown, path: string): string {
+  const id = string(value, path, { min: 1, max: 96 });
+  ensureNoControlCharacters(id, path);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id)) {
+    fail(path, "must contain only letters, numbers, dots, underscores, or hyphens.");
+  }
+  return id;
+}
+
+function optionalEnvironmentName(value: unknown, path: string): string | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const name = string(value, path, { min: 1, max: 128 });
+  ensureNoControlCharacters(name, path);
+  if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) {
+    fail(path, "must be an environment-variable name, never a raw API key.");
+  }
+  return name;
+}
+
+function optionalProxyUrl(value: unknown, path: string): string | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+  const proxy = string(value, path, { min: 1, max: 2048 });
+  ensureNoControlCharacters(proxy, path);
+  let parsed: URL;
+  try {
+    parsed = new URL(proxy);
+  } catch {
+    fail(path, "must be an absolute HTTP(S) URL.");
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    fail(path, "must use HTTP(S) without credentials, query, or fragment.");
+  }
+  return proxy;
 }
 
 function nonBlankAuditText(value: unknown, path: string): string {
@@ -1440,7 +1498,10 @@ export function parseStudioSnapshot(value: unknown): StudioSnapshot {
       min: 1,
       max: 256,
     });
-    if (item.semanticModel !== PRODUCTION_LOCAL_LLM_MODEL) {
+    if (
+      item.semanticModel !== PRODUCTION_LOCAL_LLM_MODEL &&
+      !LEGACY_LOCAL_LLM_MODELS.has(String(item.semanticModel))
+    ) {
       fail(
         `snapshot.strategies[${index}].semanticModel`,
         `the production semantic model must remain fixed at ${PRODUCTION_LOCAL_LLM_MODEL}.`,
@@ -1825,6 +1886,9 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     "localLlmMode",
     "localLlmModel",
     "localLlmEndpoint",
+    "llmProvider",
+    "llmApiKeyEnv",
+    "llmProxyUrl",
     "localLlmEndpointPolicy",
     "localLlmAutoApply",
     "translationTargets",
@@ -1886,20 +1950,37 @@ export function assertCreateJobRequest(value: unknown): asserts value is CreateJ
     { min: 1, max: 256 },
   );
   ensureNoControlCharacters(localLlmModel, "createJobRequest.localLlmModel");
-  if (localLlmModel !== PRODUCTION_LOCAL_LLM_MODEL) {
-    fail(
-      "createJobRequest.localLlmModel",
-      `must be exactly "${PRODUCTION_LOCAL_LLM_MODEL}".`,
-    );
-  }
-  loopbackEndpoint(
+  const endpointPolicy = enumeration(
+    request.localLlmEndpointPolicy,
+    "createJobRequest.localLlmEndpointPolicy",
+    LLM_ENDPOINT_POLICIES,
+  );
+  providerEndpoint(
     request.localLlmEndpoint,
     "createJobRequest.localLlmEndpoint",
+    endpointPolicy,
   );
-  if (request.localLlmEndpointPolicy !== "loopback-only") {
+  providerId(
+    request.llmProvider ?? "ollama-loopback",
+    "createJobRequest.llmProvider",
+  );
+  optionalEnvironmentName(
+    request.llmApiKeyEnv,
+    "createJobRequest.llmApiKeyEnv",
+  );
+  optionalProxyUrl(request.llmProxyUrl, "createJobRequest.llmProxyUrl");
+  if (endpointPolicy === "loopback-only" && request.llmApiKeyEnv) {
+    // Local providers may still use a key for an authenticated loopback relay,
+    // but the value remains external and is never accepted in the payload.
+    optionalEnvironmentName(
+      request.llmApiKeyEnv,
+      "createJobRequest.llmApiKeyEnv",
+    );
+  }
+  if (request.localLlmEndpointPolicy !== endpointPolicy) {
     fail(
       "createJobRequest.localLlmEndpointPolicy",
-      'must be exactly "loopback-only".',
+      'must be "loopback-only" or "remote-explicit".',
     );
   }
   if (boolean(request.localLlmAutoApply, "createJobRequest.localLlmAutoApply")) {

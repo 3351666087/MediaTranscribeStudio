@@ -32,6 +32,7 @@ from backend.speaker_pipeline import (
     AsrHypothesis,
     EmbeddingRecord,
     InMemoryStageCache,
+    JsonStageCache,
     NoOverlapAdapter,
     OverlapDecision,
     PreparedAudio,
@@ -120,6 +121,35 @@ class FailingPreparationAdapter:
             "FUNASR_VAD_INFERENCE_FAILED",
             "synthetic VAD inference failure",
         )
+
+
+class OutputLocalPreparationAdapter(FakePreparationAdapter):
+    adapter_id = "output-local-normalize-vad-boundary-fixture"
+    version = "1"
+    audio_bytes = b"deterministic normalized audio fixture"
+
+    def __init__(self, window_count: int) -> None:
+        super().__init__(window_count)
+        self.audio_paths: list[Path] = []
+
+    def prepare(self, source_path, *, normalization_profile, context):
+        prepared = super().prepare(
+            source_path,
+            normalization_profile=normalization_profile,
+            context=context,
+        )
+        audio_path = (
+            context.output_directory
+            / ".pipeline"
+            / "audio"
+            / f"{prepared.source_fingerprint}.mono-16khz.wav"
+        )
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        if not audio_path.exists():
+            audio_path.write_bytes(self.audio_bytes)
+        resolved = audio_path.resolve(strict=True)
+        self.audio_paths.append(resolved)
+        return replace(prepared, audio_path=str(resolved))
 
 
 class FakeAsrAdapter:
@@ -700,6 +730,30 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
 
     def context(self, job_id: str = "pipeline-job") -> AdapterContext:
         return AdapterContext(job_id, self.output, threading.Event())
+
+    def output_local_cached_transcription(
+        self,
+        *,
+        cache_root: Path,
+        output_directory: Path,
+        job_id: str,
+    ):
+        output_directory.mkdir(parents=True, exist_ok=True)
+        preparation = OutputLocalPreparationAdapter(1)
+        pipeline, _, _, _, _ = self.pipeline(
+            1,
+            cache=JsonStageCache(cache_root),
+            preparation=preparation,
+        )
+        request = replace(
+            self.request(1, "manual", job_id=job_id),
+            output_directory=output_directory,
+        )
+        result = pipeline.transcribe(
+            request,
+            AdapterContext(job_id, output_directory, threading.Event()),
+        )
+        return result, preparation
 
     def transcript_segment(
         self,
@@ -3949,6 +4003,169 @@ class SpeakerPipelineProductionTests(unittest.TestCase):
         asr_cache = second.pipeline_metrics["cache"]["byStage"]["asr"]
         self.assertEqual(asr_cache["hits"], 4)
         self.assertEqual(asr_cache["recomputations"], 1)
+
+    def test_persistent_prepared_audio_cache_isolated_across_output_roots(
+        self,
+    ) -> None:
+        cache_root = self.root / "persistent-stage-cache"
+        first_output = self.root / "run-r5"
+        second_output = self.root / "run-r6"
+        first, first_preparation = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=first_output,
+            job_id="persistent-r5",
+        )
+        second, second_preparation = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=second_output,
+            job_id="persistent-r6",
+        )
+
+        first_audio = Path(
+            first.segments[0].evidence["preparation"]["audioPath"]
+        )
+        second_preparation_evidence = second.segments[0].evidence["preparation"]
+        second_audio = Path(second_preparation_evidence["audioPath"])
+        self.assertTrue(first_audio.is_relative_to(first_output))
+        self.assertTrue(second_audio.is_relative_to(second_output))
+        self.assertEqual(
+            Path(second_preparation_evidence["canonicalAudioPath"]),
+            second_audio,
+        )
+        self.assertNotEqual(first_audio, second_audio)
+        self.assertEqual(first_preparation.calls, 1)
+        self.assertEqual(second_preparation.calls, 1)
+
+        cache_by_stage = second.pipeline_metrics["cache"]["byStage"]
+        self.assertEqual(cache_by_stage["boundary"]["misses"], 1)
+        self.assertEqual(cache_by_stage["normalize"]["hits"], 1)
+        self.assertEqual(cache_by_stage["vad"]["hits"], 1)
+        self.assertEqual(cache_by_stage["asr"]["hits"], 1)
+        self.assertEqual(cache_by_stage["campp-embedding"]["hits"], 1)
+
+    def test_persistent_prepared_audio_cache_resumes_within_same_output(
+        self,
+    ) -> None:
+        cache_root = self.root / "same-output-cache"
+        output = self.root / "same-output"
+        first, first_preparation = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=output,
+            job_id="same-output-first",
+        )
+        second, second_preparation = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=output,
+            job_id="same-output-resume",
+        )
+
+        first_audio = first.segments[0].evidence["preparation"]["audioPath"]
+        second_audio = second.segments[0].evidence["preparation"]["audioPath"]
+        self.assertEqual(first_audio, second_audio)
+        self.assertEqual(first_preparation.calls, 1)
+        self.assertEqual(second_preparation.calls, 0)
+        self.assertEqual(
+            second.pipeline_metrics["cache"]["byStage"]["boundary"]["hits"],
+            1,
+        )
+
+    def test_cross_output_preparation_does_not_depend_on_old_audio_file(
+        self,
+    ) -> None:
+        for mutation in ("missing", "tampered"):
+            with self.subTest(mutation=mutation):
+                case_root = self.root / f"cross-output-{mutation}"
+                cache_root = case_root / "cache"
+                old_output = case_root / "old-output"
+                new_output = case_root / "new-output"
+                first, _ = self.output_local_cached_transcription(
+                    cache_root=cache_root,
+                    output_directory=old_output,
+                    job_id=f"old-output-{mutation}",
+                )
+                old_audio = Path(
+                    first.segments[0].evidence["preparation"]["audioPath"]
+                )
+                if mutation == "missing":
+                    old_audio.unlink()
+                else:
+                    old_audio.write_bytes(b"tampered old-run audio")
+
+                second, second_preparation = self.output_local_cached_transcription(
+                    cache_root=cache_root,
+                    output_directory=new_output,
+                    job_id=f"new-output-{mutation}",
+                )
+
+                new_audio = Path(
+                    second.segments[0].evidence["preparation"]["audioPath"]
+                )
+                self.assertTrue(new_audio.is_relative_to(new_output))
+                self.assertNotEqual(new_audio, old_audio)
+                self.assertEqual(second_preparation.calls, 1)
+                self.assertEqual(new_audio.read_bytes(), second_preparation.audio_bytes)
+
+    def test_persistent_prepared_audio_cache_repairs_missing_same_output_audio(
+        self,
+    ) -> None:
+        cache_root = self.root / "missing-audio-cache"
+        output = self.root / "missing-audio-output"
+        first, _ = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=output,
+            job_id="missing-audio-first",
+        )
+        audio_path = Path(
+            first.segments[0].evidence["preparation"]["audioPath"]
+        )
+        audio_path.unlink()
+
+        second, second_preparation = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=output,
+            job_id="missing-audio-resume",
+        )
+
+        self.assertEqual(second_preparation.calls, 1)
+        self.assertEqual(
+            Path(second.segments[0].evidence["preparation"]["audioPath"]),
+            audio_path,
+        )
+        self.assertEqual(audio_path.read_bytes(), second_preparation.audio_bytes)
+        self.assertEqual(
+            second.pipeline_metrics["cache"]["byStage"]["boundary"][
+                "recomputations"
+            ],
+            1,
+        )
+
+    def test_persistent_prepared_audio_cache_fails_closed_on_tampering(
+        self,
+    ) -> None:
+        cache_root = self.root / "tampered-audio-cache"
+        output = self.root / "tampered-audio-output"
+        first, _ = self.output_local_cached_transcription(
+            cache_root=cache_root,
+            output_directory=output,
+            job_id="tampered-audio-first",
+        )
+        audio_path = Path(
+            first.segments[0].evidence["preparation"]["audioPath"]
+        )
+        audio_path.write_bytes(b"tampered normalized audio")
+
+        with self.assertRaises(WorkerError) as captured:
+            self.output_local_cached_transcription(
+                cache_root=cache_root,
+                output_directory=output,
+                job_id="tampered-audio-resume",
+            )
+
+        self.assertEqual(
+            captured.exception.code,
+            "PREPARED_AUDIO_CACHE_INTEGRITY_FAILED",
+        )
+        self.assertEqual(captured.exception.details, {"stage": "boundary"})
 
     def test_malformed_v7_clustering_cache_recomputes_at_the_same_key(
         self,

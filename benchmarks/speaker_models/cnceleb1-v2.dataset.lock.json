@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetKey": "openslr-cnceleb1-v2",
+  "role": "speaker-verification-gate",
+  "promotionUse": "development-threshold-and-speaker-disjoint-held-out",
+  "source": {
+    "catalogUrl": "https://www.openslr.org/82/",
+    "archiveUrl": "https://openslr.trmal.net/resources/82/cn-celeb_v2.tar.gz",
+    "archiveName": "cn-celeb_v2.tar.gz",
+    "contentLengthBytes": 22264439915,
+    "etag": "\"52f10646b-5c426857e46c0\"",
+    "lastModified": "Mon, 07 Jun 2021 05:43:31 GMT"
+  },
+  "license": {
+    "spdx": "CC-BY-SA-4.0",
+    "catalogLabel": "Attribution-ShareAlike 4.0 International",
+    "redistributionRequiresAttributionAndShareAlike": true
+  },
+  "integrity": {
+    "publishedChecksumAvailableForV2": false,
+    "publishedChecksumLimitation": "The mirror checksum.md5 names only the retired cn-celeb.tgz archive, not cn-celeb_v2.tar.gz.",
+    "requiredLocalChecks": [
+      "exact-content-length",
+      "local-sha256",
+      "complete-gzip-and-tar-scan",
+      "safe-member-paths-and-types",
+      "official-eval-list-presence"
+    ]
+  },
+  "requiredArchiveSuffixes": [
+    "eval/lists/enroll.map",
+    "eval/lists/enroll.lst",
+    "eval/lists/trials.lst"
+  ],
+  "evaluationPolicy": {
+    "speakerDisjointSplits": true,
+    "recordingDisjointTrialSides": true,
+    "developmentThresholdFrozenBeforeHeldOut": true,
+    "heldOutThresholdFittingAllowed": false,
+    "minimumCandidates": [
+      "CAM++ Chinese common",
+      "ERes2NetV2 Chinese common",
+      "ReDimNet2-B6-LM"
+    ]
+  }
+}

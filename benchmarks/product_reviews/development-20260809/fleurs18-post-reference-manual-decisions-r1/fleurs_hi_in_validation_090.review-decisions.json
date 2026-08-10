@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_hi_in_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication sets the exact official FLEURS rawTranscript as the final source-language text.",
+      "evidence": ["fleurs-raw-transcript:fleurs_hi_in_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "semantic-input-transcript-file-sha256:7111c5c2df7ec2052bec19577cc1acd401e13281c8a98c04c0fe5ae3e57c7751"],
+      "confidence": 1.0,
+      "normalizedText": "जैसे ही आप धारा से निकल आते हैं, पीछे की ओर तैरने में कोई खास मुश्किल नहीं होती है.",
+      "displayText": "जैसे ही आप धारा से निकल आते हैं, पीछे की ओर तैरने में कोई खास मुश्किल नहीं होती है.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-090-postref-speaker-0002",
+      "reason": "The frozen semantic input proves one segment assigned to the configured sole speaker; the eventual queue shape must still be checked at review.required.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "semantic-input-transcript-file-sha256:7111c5c2df7ec2052bec19577cc1acd401e13281c8a98c04c0fe5ae3e57c7751"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

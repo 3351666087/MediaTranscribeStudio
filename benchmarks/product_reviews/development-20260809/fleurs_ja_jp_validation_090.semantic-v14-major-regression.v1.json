@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "semantic-major-regression-fixture",
+  "fixtureId": "fleurs-ja-jp-validation-090-asr-lexical-v1",
+  "visibilityPolicy": {
+    "caseIdIsAuditOnly": true,
+    "referenceTranscriptVisibleToArbitrator": false,
+    "expectedDecisionVisibleToArbitrator": false,
+    "modelIdentityVisibleToArbitrator": false
+  },
+  "auditBinding": {
+    "caseId": "fleurs_ja_jp_validation_090",
+    "caseAlias": "case-015",
+    "caseSha256": "f495fa38344d35c279d6ee798b985d0d17c520152408b300663f26090ee8c1c7",
+    "postRunAuditId": "multilingual22-qwen35-27b-v14-development-20260810-r2-batch32.codex-visible-review",
+    "postRunAuditFileSha256": "6c8b16a3c7989d461e314471e081a56ac080f29276ba12f7d66059d188c7b699",
+    "postRunAuditCanonicalSha256": "094e3d0cf94dd93c66250bc09607582baa9b60b80ab1383c4928f397b08f316b"
+  },
+  "inputBinding": {
+    "sourceMediaSha256": "369218d5ca0a677ee9b5cbd22e179d0e5a8356fd00fd47646e46cd0a89cee2b0",
+    "transcriptDocumentSha256": "a3ba8cf11f38c3e5b30f3c7aff4d0eb2110d20ad10110e8f483ebec544359c49",
+    "candidateLatticeSha256": "422dea9f5121cf1e788da86e77df7e0f4b096d6c1015898a5a0e253750ccedf6",
+    "sourceDurationMs": 10200
+  },
+  "visibleInput": {
+    "language": "ja-JP",
+    "speakerCount": 1,
+    "segments": [
+      {
+        "segmentId": "window-000001",
+        "startMs": 1270,
+        "endMs": 8200,
+        "speakerId": "speaker-1",
+        "language": "ja-JP",
+        "text": "警察によれば、写真カを跳ねた車の運転手が刑事告訴される可能性は低いとのことです。",
+        "asrSelectableCandidateCount": 1,
+        "asrDistinctSummaryCount": 1
+      }
+    ]
+  },
+  "blindReviewFinding": {
+    "severity": "major",
+    "category": "asr-lexical",
+    "observation": "The mixed-script token '写真カ' cannot fill the visible Japanese noun slot and has no supported code-switch or named-entity cue.",
+    "reason": "Publishing the singleton unchanged leaves a concrete lexical defect unresolved; the arbitrator must request evidence rather than invent a replacement.",
+    "expectedRequests": [
+      {
+        "domain": "asr-text",
+        "scopeId": "segment:window-000001",
+        "requestKind": "provider-native-nbest"
+      }
+    ]
+  },
+  "canonicalSha256": "d99d78f7f8d1f58c012b0a10f2aece895d85f0659772601ea91e3ee1f9176243"
+}

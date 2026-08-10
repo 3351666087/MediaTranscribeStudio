@@ -1,0 +1,102 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-minds_zh_cn_258",
+  "automaticScoring": false,
+  "preReviewCommands": [
+    {
+      "type": "speaker.merge",
+      "sourceSpeakerId": "speaker-3",
+      "targetSpeakerId": "speaker-1",
+      "decisionId": "minds-zh-cn-258-merge-0001",
+      "reason": "The final word is spoken by the same voice as the opening; the third cluster is a short-segment split error.",
+      "evidence": ["audio:620-2880ms", "review-queue-sha256:5ebb08d36ac44b289598fc434b557d4f1abe3ffbc49cb1183f6e286bb696b3ab"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "type": "speaker.merge",
+      "sourceSpeakerId": "speaker-2",
+      "targetSpeakerId": "speaker-1",
+      "decisionId": "minds-zh-cn-258-merge-0002",
+      "reason": "The middle phrase and surrounding words form one continuous request from the same speaker.",
+      "evidence": ["audio:620-2880ms", "context:full-utterance"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    }
+  ],
+  "decisions": [
+    {
+      "itemId": "speaker-count-confidence",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0001",
+      "reason": "The complete Chinese request is spoken by one continuous voice.",
+      "evidence": ["audio:full", "speaker-merge:minds-zh-cn-258-merge-0001", "speaker-merge:minds-zh-cn-258-merge-0002"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "speaker-count-range",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0002",
+      "reason": "Full-recording review rejects the two-to-three-speaker range and resolves the count to one.",
+      "evidence": ["audio:full"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-01:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0003",
+      "reason": "The opening greeting is clear and belongs to the sole speaker.",
+      "evidence": ["audio:620-1360ms", "context:full-utterance"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-01:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0004",
+      "reason": "Manual review confirms the merged sole-speaker assignment for the greeting.",
+      "evidence": ["audio:620-1360ms", "speaker:single-continuous-voice"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-02:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0005",
+      "reason": "The middle phrase is clear and continues the same card-freezing request.",
+      "evidence": ["audio:1360-2126ms", "context:full-utterance"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-02:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0006",
+      "reason": "Manual review confirms the merged sole-speaker assignment for the middle phrase.",
+      "evidence": ["audio:1360-2126ms", "speaker:single-continuous-voice"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-03:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0007",
+      "reason": "The final word completes the same request and is spoken by the same voice.",
+      "evidence": ["audio:2126-2880ms", "context:full-utterance"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    },
+    {
+      "itemId": "window-000001.cardinality-03:PROTECTED_SPEAKER_REVIEW_REQUIRED",
+      "action": "accept",
+      "decisionId": "minds-zh-cn-258-review-0008",
+      "reason": "Manual review confirms the merged sole-speaker assignment for the final word.",
+      "evidence": ["audio:2126-2880ms", "speaker:single-continuous-voice"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "human"}
+    }
+  ]
+}

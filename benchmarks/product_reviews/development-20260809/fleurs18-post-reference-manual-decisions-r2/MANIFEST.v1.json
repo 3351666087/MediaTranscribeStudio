@@ -1,0 +1,671 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "fleurs-post-reference-codex-review-decision-set",
+  "setId": "fleurs18-post-reference-manual-decisions-r2",
+  "createdDate": "2026-08-09",
+  "adjudication": {
+    "actor": "codex-semantic-adjudicator",
+    "source": "codex-agent",
+    "automaticScoring": false,
+    "truthSource": "official FLEURS rawTranscript",
+    "referenceSuppliedToCompetingModels": false,
+    "referenceDecisionPayloadSentToWorkerOnlyAfterReviewRequired": true,
+    "rawTextMutationAllowed": false
+  },
+  "sourceEvidence": {
+    "fleursFreeze": {
+      "path": "D:/MediaTranscribeStudio/.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+      "fileSha256": "5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01",
+      "canonicalSha256": "3497ab0fb1b2dfb842a94b80875effdb36d244c2ec05c348d421010f2ac48c04"
+    },
+    "truthRedactedRunManifest": {
+      "path": "D:/MediaTranscribeStudio/.runtime_cache/sample-library/global/blind-product-fleurs-development.v1.json",
+      "fileSha256": "efb6916db45df86f9f8589a31f7869bd1df3fc2f946018a6d9001c8f991cf1b8"
+    },
+    "preReferenceCodexReview": {
+      "path": "D:/MediaTranscribeStudio/benchmarks/product_reviews/development-20260809/codex-fleurs18-pre-reference-semantic-review.r1.json",
+      "fileSha256": "e3edd6ea3a476743ede090f52fbf932d6441931839b95813d2604abf3b2ae635",
+      "modifiedByThisDecisionSet": false
+    },
+    "sourceRoots": {
+      "baseline": {
+        "path": "D:/mts-eval/product-runs/pilot-fleurs18-semantic-baseline-20260809",
+        "caseCount": 16,
+        "caseIds": [
+          "fleurs_ar_eg_validation_030",
+          "fleurs_ar_eg_validation_060",
+          "fleurs_ar_eg_validation_090",
+          "fleurs_es_419_validation_009",
+          "fleurs_es_419_validation_080",
+          "fleurs_es_419_validation_232",
+          "fleurs_hi_in_validation_030",
+          "fleurs_hi_in_validation_060",
+          "fleurs_ja_jp_validation_030",
+          "fleurs_ja_jp_validation_060",
+          "fleurs_ja_jp_validation_090",
+          "fleurs_ko_kr_validation_030",
+          "fleurs_ko_kr_validation_060",
+          "fleurs_yue_hant_hk_validation_030",
+          "fleurs_yue_hant_hk_validation_060",
+          "fleurs_yue_hant_hk_validation_090"
+        ]
+      },
+      "recovery": {
+        "path": "D:/mts-eval/product-runs/pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809",
+        "caseCount": 2,
+        "caseIds": [
+          "fleurs_hi_in_validation_090",
+          "fleurs_ko_kr_validation_090"
+        ]
+      }
+    }
+  },
+  "contract": {
+    "schemaVersion": "1.0.0",
+    "artifactType": "production-review-decisions",
+    "auditSourceAllowlist": [
+      "human",
+      "codex-agent"
+    ],
+    "queueCoverage": "exact-open-item-set",
+    "completionRequirement": "openCount=0",
+    "textFields": [
+      "normalizedText",
+      "displayText"
+    ],
+    "immutableField": "rawText",
+    "strictDecisionLoader": "tools.run_production_smoke.load_review_decision_plan",
+    "replayApi": "backend.review.validate_review_state+resolve_review_item",
+    "referenceTextPolicy": "official reference text is excluded from model inputs and provider prompts"
+  },
+  "validation": {
+    "strictLoaderValidatedCount": 18,
+    "observedQueueCount": 18,
+    "observedQueuesOpenCount": 18,
+    "observedQueuesClosedInMemoryCount": 18,
+    "replayOpenCount": 0,
+    "replayedCaseCount": 18,
+    "rawTextMutationCount": 0,
+    "transcriptCoreRecoveryEquivalenceCount": 2,
+    "focusedTests": "strict decision loader + in-memory production review API replay (18 cases)",
+    "productionRunExecuted": false
+  },
+  "replay": {
+    "api": "backend.review.validate_review_state then backend.review.resolve_review_item",
+    "command": "review.submit",
+    "acceptedActionMapping": {
+      "accept": "accepted",
+      "reject": "rejected"
+    },
+    "highMarginThreshold": 0.18,
+    "allCaseOpenCountAfterReplay": 0,
+    "decisionIdsPersistedInMemory": true
+  },
+  "roots": {
+    "baselineCaseCount": 16,
+    "recoveryCaseCount": 2,
+    "baselineRunRoot": "D:/mts-eval/product-runs/pilot-fleurs18-semantic-baseline-20260809",
+    "recoveryRunRoot": "D:/mts-eval/product-runs/pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809"
+  },
+  "fragmentReconstruction": {
+    "policy": "Join normalizedText fragments in decision order with the case-declared joiner; the result must equal the official rawTranscript byte-for-byte.",
+    "defaultJoiner": "",
+    "overrides": {
+      "fleurs_ar_eg_validation_090": " ",
+      "fleurs_hi_in_validation_030": " "
+    }
+  },
+  "rerun": {
+    "script": "rerun-windows.ps1",
+    "scriptFileSha256": "6f2f3ce16cae93a769272ecd9757af59555a5126f53495a46595bfd4c1cc822f",
+    "defaultModelConfig": "D:/mts-eval/configs/product-semantic-candidates-20260807/ollama-qwen3.6-27b-q4-k-m.json",
+    "defaultOutputRoot": "D:/mts-eval/product-runs/pilot-fleurs18-codex-adjudicated-qwen36-27b-r3-20260809",
+    "decisionSet": "fleurs18-post-reference-manual-decisions-r2",
+    "noReplace": true
+  },
+  "sidecars": {
+    "manifestFileSha256": {
+      "path": "MANIFEST.v1.json.sha256",
+      "format": "<sha256>  MANIFEST.v1.json"
+    },
+    "manifestCanonicalSha256": {
+      "path": "MANIFEST.v1.canonical.sha256",
+      "format": "<canonical-json-sha256>  MANIFEST.v1.json canonical-json"
+    }
+  },
+  "cases": [
+    {
+      "caseId": "fleurs_ar_eg_validation_030",
+      "decisionPath": "fleurs_ar_eg_validation_030.review-decisions.json",
+      "decisionFileSha256": "a228c32d8d5df6c6825a0bbe4215f930a55c1e2aed1a48ade3d6b787efc4430c",
+      "decisionCanonicalSha256": "be19d86022d54a2231d63121d162402c3f65f97704f3db83bfb1e4259164c403",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_030-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_030-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_030-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "cebb12f3b6d9107955a6c3f24ef8d78113ea9f57a96eb090fbe61ce8c4e88d17",
+      "sourceInputCanonicalSha256": "a5a2e3b086f0619bcf5fb23a84870326ad6d8b28fe8d69b16388b3b75ae24ae2",
+      "sourceQueueFileSha256": "376d131d72155c9474ac397f81fcb963fc8b2f84e8df2317c21b75aa17c1bcdc",
+      "sourceQueueCanonicalSha256": "537b95342d899df8920f798ea0edfa810b8e227bdf1fac1ca60ebfe1d031f92e",
+      "sourceMediaSha256": "c080be47ea159229339fc9c514aff1b010a6fafef8e980792f0b2e27c6cf65d0",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ar-eg-030-postref-text-0001",
+        "fleurs-ar-eg-030-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_060",
+      "decisionPath": "fleurs_ar_eg_validation_060.review-decisions.json",
+      "decisionFileSha256": "d787e04a55e8c477409b08bd208ba8cf89a7beaa6a02b74124624d740b817fa2",
+      "decisionCanonicalSha256": "0dc878d56ecce2104a3c9b2513e0429051f5a73241807197c8a58fcdc59ad02e",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_060-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_060-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_060-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "7cb4d03257c668335a3f190c25b5ad12cbb368293696c25583c3a1585cf2a5f9",
+      "sourceInputCanonicalSha256": "51541a39a197c88d5d075a21cb54c263267ee4b4e05cff8ecc7f8449ed9aebb4",
+      "sourceQueueFileSha256": "c34ac4a89e344692a02a432b428422b0b2a4889c491ad5c6ec0545b2e355ea97",
+      "sourceQueueCanonicalSha256": "7880eff17c1c8902cf7139cf7153b138a2a1a22187aff5df47b544424f4890fa",
+      "sourceMediaSha256": "b2eee49815dc820fa95bca422a78fad8171c5d18e33b51247fd4efbe5d42cb8e",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ar-eg-060-postref-text-0001",
+        "fleurs-ar-eg-060-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_090",
+      "decisionPath": "fleurs_ar_eg_validation_090.review-decisions.json",
+      "decisionFileSha256": "bcaada7c9fb38a3c34385554c41d4c75ab5ec7953401611cb5d5fe75d31011a7",
+      "decisionCanonicalSha256": "314f5fd9fd5841dca68f6bfc64df3bf860911b2b07983f3f78ca7c233db61d32",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_090-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_090-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ar_eg_validation_090-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "b5e0a63fa01380e130ea97541b1ca7199e86942c0d71dc5f5e20703a6d836f2d",
+      "sourceInputCanonicalSha256": "6df6b06d7769094e7977fa046302324fb6ab27a9817d54e74b468a9c028fcd07",
+      "sourceQueueFileSha256": "26b9c57b1cbd75e474dd1f6d632adcc51a45984cc56b2e85fa9bf75e57823ccb",
+      "sourceQueueCanonicalSha256": "fed3c7994b36e59ff7f15df89695ae42a5364ca507473c45acf2cef320d9be4a",
+      "sourceMediaSha256": "803cf6d8910040c9181bb7215814638b512755bd1c6d903c1ce0fe497f75bad8",
+      "observedOpenItemIds": [
+        "window-000001.rf01:SEGMENT_LOW_CONFIDENCE",
+        "window-000001.rf01:SECONDARY_VERIFIER_UNRESOLVED",
+        "window-000001.rf02:SEGMENT_LOW_CONFIDENCE",
+        "window-000001.rf02:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 4,
+      "replayDecisionIds": [
+        "fleurs-ar-eg-090-postref-text-0001",
+        "fleurs-ar-eg-090-postref-speaker-0002",
+        "fleurs-ar-eg-090-postref-text-0003",
+        "fleurs-ar-eg-090-postref-speaker-0004"
+      ],
+      "replayDecisionCount": 4,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_009",
+      "decisionPath": "fleurs_es_419_validation_009.review-decisions.json",
+      "decisionFileSha256": "9428fab2cbf2a0e53286d09762a3e56be4f45d7199355dab10f28dcb41e97bd8",
+      "decisionCanonicalSha256": "6ba003264e6dbac92301630286922059057c6b98df2888d56d4ff98a7b1b9d36",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_009-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_009-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_009-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "e589dbcb1b659c4b283323f04d510a1a3dc9ea8a4e813fdff37748292f9f819c",
+      "sourceInputCanonicalSha256": "10e8c878a883c08a849ed9fd918d371631965d184b9c6fbc042fa47ca479f3c8",
+      "sourceQueueFileSha256": "301920d2451189d1b7aad60b662d669e28d2df968fb9d3a677db95522079ab93",
+      "sourceQueueCanonicalSha256": "cbf845297a1a482c228e3d6a017d89eb30b04b5283de4a17703619b111fe01a2",
+      "sourceMediaSha256": "e7e113fb6b52c9c91452506fe11f0e82793bf17fcfc1c20e8f422f40325761b2",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-es-419-009-postref-text-0001",
+        "fleurs-es-419-009-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_080",
+      "decisionPath": "fleurs_es_419_validation_080.review-decisions.json",
+      "decisionFileSha256": "3675385f269d0b607b02115201707821a54ad26f365b58d96c698ef9c41119ea",
+      "decisionCanonicalSha256": "62d95a27e0a318bfd977c79f5d40734ba9fa7d148b8a33177fcc53c0acca4332",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_080-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_080-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_080-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "b506d22f2d09ef1dce4bca07a23b9824693f2daa8042ca327800885b3c34e537",
+      "sourceInputCanonicalSha256": "82d1bc5cf6511ded5e3e6204fae0d246b624d3c62f0630ed1b495cb837d6a3dc",
+      "sourceQueueFileSha256": "45bac6e640fddac08e97fa092332f958bc61a1ddf6540c0ec7e3a628a46e7458",
+      "sourceQueueCanonicalSha256": "bc5acfd3e84f810ce42768391ffd20abd73bba6cf3ce5753f9396c5e169120a6",
+      "sourceMediaSha256": "2f27f2822b111177d044ab757408201b83ff761d76d5439f03a535f7b13d615e",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-es-419-080-postref-text-0001",
+        "fleurs-es-419-080-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_es_419_validation_232",
+      "decisionPath": "fleurs_es_419_validation_232.review-decisions.json",
+      "decisionFileSha256": "e1fe20190d732fd176b3aad3443b2e40717df6cce1e61920ee560881ee3606e7",
+      "decisionCanonicalSha256": "22234f84a9c25601ced6dcfb0a4dc3150616e4b3202dba991eb93a34abf19f5d",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_232-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_232-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_es_419_validation_232-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "df2f0fd784a2cdebd5bfdc6c1eab4caca10935019e78087fa2cc1fa6d45dda5f",
+      "sourceInputCanonicalSha256": "413b01c3973b9c9c42ec08398614d11951a3e6f0937b9afc3bf778844b2e287d",
+      "sourceQueueFileSha256": "55c763a9efb3b7d93f05405a47bfd7e66df5a87775b776c8f8935ff8229ca55e",
+      "sourceQueueCanonicalSha256": "776dcffa21e8ae41b92019e9e814de44a97b4345e5fb02c58d1b0b5ca2c42af0",
+      "sourceMediaSha256": "598303617d4e7b839ce02e6e905d5fd7fb9d0bc5a58101eba60cf4c8c56b7093",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-es-419-232-postref-text-0001",
+        "fleurs-es-419-232-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_030",
+      "decisionPath": "fleurs_hi_in_validation_030.review-decisions.json",
+      "decisionFileSha256": "430c6a0e7357442e06685d3fa3891ef3066f1e59713cc0d468749bbb2439df0f",
+      "decisionCanonicalSha256": "6757f9c31dadf9f273a7117fafab7f95248d49580c5627ca582a845969d7ca11",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_hi_in_validation_030-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_hi_in_validation_030-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_hi_in_validation_030-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "4825692b91129e89db47ead365451f12cc3cb038a686f8b340f9d52655fef645",
+      "sourceInputCanonicalSha256": "d255ac26540f7c22beff6237f5ba225d9218c0db1a1840bd6ca5377d501d1063",
+      "sourceQueueFileSha256": "e00f01d081e6ac193a971bb0b6a8a0b6ef66d6cfb82b81de2cff672114376705",
+      "sourceQueueCanonicalSha256": "5cdc295d062db2c6cfd786b687bf4c71eb84dae521426cf62763c43a4d6f4fa6",
+      "sourceMediaSha256": "4438eba8543b8d5f2acaf0b44660b5df981215613c641c27403fabafc1089cd1",
+      "observedOpenItemIds": [
+        "window-000001.rf01:SEGMENT_LOW_CONFIDENCE",
+        "window-000001.rf01:SECONDARY_VERIFIER_UNRESOLVED",
+        "window-000001.rf02:SEGMENT_LOW_CONFIDENCE",
+        "window-000001.rf02:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 4,
+      "replayDecisionIds": [
+        "fleurs-hi-in-030-postref-text-0001",
+        "fleurs-hi-in-030-postref-speaker-0002",
+        "fleurs-hi-in-030-postref-text-0003",
+        "fleurs-hi-in-030-postref-speaker-0004"
+      ],
+      "replayDecisionCount": 4,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_060",
+      "decisionPath": "fleurs_hi_in_validation_060.review-decisions.json",
+      "decisionFileSha256": "18752ea64844c41900f1b88cc6b51b24c6ea6616dff9ec54dd4d0c3f4d418071",
+      "decisionCanonicalSha256": "48fbf0f8b49ebe1c293cac9fc19ab87548bdfbe3fa6e04366bcb4e6c2959fc86",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_hi_in_validation_060-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_hi_in_validation_060-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_hi_in_validation_060-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "3d8e67ddea94c23a34bbcb4b86c145f5b8bbd94f4b4a4ca9796955f940056b0d",
+      "sourceInputCanonicalSha256": "0b40f9f75d55a7c84a1f9ae15a2f54e7c1ea6f258df82b9a998d1198aed55396",
+      "sourceQueueFileSha256": "a0c717258d4d590ff8cc7608f55e09ad7cacc8d5cffa6033093823d6391ed8ef",
+      "sourceQueueCanonicalSha256": "e1d53882fc6594cbd0ae04e45f63cfb6402a91b47e015098af01146d5cad8971",
+      "sourceMediaSha256": "9c6042c66e74879c0f9ca532ac8a9c07cf9b248707399e2cd485eb83124d8746",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-hi-in-060-postref-text-0001",
+        "fleurs-hi-in-060-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_090",
+      "decisionPath": "fleurs_hi_in_validation_090.review-decisions.json",
+      "decisionFileSha256": "ac29cf572a2e8b285b94e5aa6f6b599e319c305d922e0d97b7738f368bbb5b22",
+      "decisionCanonicalSha256": "79312e5a923b6a214714e83d5be6ac358550157a1d00617d976b82cdfbfdd2f4",
+      "sourceRootKind": "recovery",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_hi_in_validation_090-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_hi_in_validation_090-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_hi_in_validation_090-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "5c7056be9ff3c6834e18bc39bbeff18718ac7e8a31ded9441b1387faf88133e8",
+      "sourceInputCanonicalSha256": "4d81de894a5c1e31852c2e3a2e05d1263f693fcaa9be114db59a9d4153d3fe77",
+      "sourceQueueFileSha256": "7f7ede95a349b358bf1c3097d38b6c75abdf4c9f00fcad1d564ebd4c50cacb8a",
+      "sourceQueueCanonicalSha256": "adda819b0095c968a8cb76550085993360e7859e4b9b36caa319093fb0a94f0b",
+      "sourceMediaSha256": "514905d0805456218ea907848de7a556243fbb87475f1a6fcb5f24ce98db17a0",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-hi-in-090-postref-text-0001",
+        "fleurs-hi-in-090-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item",
+      "transcriptCoreEquivalence": {
+        "schema": "root-minus-generatedAt-and-provenance-v1",
+        "originalInputPath": "D:/mts-eval/product-runs/pilot-fleurs18-semantic-baseline-20260809/outputs/fleurs_hi_in_validation_090-manual/semantic/input-transcript.v2.json",
+        "recoveryInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_hi_in_validation_090-manual\\semantic\\input-transcript.v2.json",
+        "originalCanonicalSha256": "31144db00a5e3d2563ed21d8f60068e871bb591f9499b3b734e40515e078e69f",
+        "recoveryCanonicalSha256": "31144db00a5e3d2563ed21d8f60068e871bb591f9499b3b734e40515e078e69f",
+        "equivalent": true
+      }
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_030",
+      "decisionPath": "fleurs_ja_jp_validation_030.review-decisions.json",
+      "decisionFileSha256": "46e121f5aee25153e59be60c9633b4c13a17d791dd01f67456a5697003b07a4e",
+      "decisionCanonicalSha256": "3539ee31024c6103044c55839ec3329ee7918342987d8f7857d55961f78b225a",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_030-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_030-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_030-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "f1503dad5378c76f64c2448189849a083fdb2ed7df2771a9cafd62189213772c",
+      "sourceInputCanonicalSha256": "abc7571e337fea803564ab45fcffd6cb50d98b4e6a6e91c5f851045e3b40ab93",
+      "sourceQueueFileSha256": "00f08e8aed8de0205b974f0d0a25790ee698f4d8870268e2b435d68d58d410e7",
+      "sourceQueueCanonicalSha256": "3d48d6784e4e15f92829d67153ff2150f028617949109e93da58f77737f93a44",
+      "sourceMediaSha256": "79a19de4e5c5e92f662f233a3629263e80c6c4a330ba17e94e464f62b52a4a2d",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ja-jp-030-postref-text-0001",
+        "fleurs-ja-jp-030-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_060",
+      "decisionPath": "fleurs_ja_jp_validation_060.review-decisions.json",
+      "decisionFileSha256": "641ff25eab5c8b6589bcb5effca0fbeb518e154171fe0b2370d21620fa6ad1af",
+      "decisionCanonicalSha256": "7d32ce1792ad4981cb62c435e227c1fdee588f5f9c96a2873dc8955f23602833",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_060-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_060-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_060-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "0f0509a3c84ecebf42745b70d383eb568602f0f176a5e68e0d064e6ffa02a03b",
+      "sourceInputCanonicalSha256": "cc9355f5baa6f9bcfab28d85c58fe3fa74c7eaa0f50926d7f8c8d9ff107e675b",
+      "sourceQueueFileSha256": "a28b2d1f2bb40ef2e885bff97753ab703f8d0509286b82a4ee80723de9b7a8fb",
+      "sourceQueueCanonicalSha256": "8695e62df6a2d72afe3875e1dae5bf5b43525137beaf3726fb282c7961c15d2f",
+      "sourceMediaSha256": "82c59b3417563dabf50455f12e029664f43204689be8603e7b48b36e1e65412f",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ja-jp-060-postref-text-0001",
+        "fleurs-ja-jp-060-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_090",
+      "decisionPath": "fleurs_ja_jp_validation_090.review-decisions.json",
+      "decisionFileSha256": "2609d9d9744259322b080ce1e850fda10ef581245ac1ccabfa7d72d26f349bc8",
+      "decisionCanonicalSha256": "78fd7919bb3f1bb4eb4cdd2b74621201f2ff812184622832dcde58853aafb882",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_090-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_090-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ja_jp_validation_090-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "c3ce99696feab0cceb09e37771940f18f533be789c322abd663f17af450f3772",
+      "sourceInputCanonicalSha256": "a3ba8cf11f38c3e5b30f3c7aff4d0eb2110d20ad10110e8f483ebec544359c49",
+      "sourceQueueFileSha256": "350061676b7778ed2c3e6fce1c1c5e821a22e27e1b54cf0bb7c0ec5cb0257010",
+      "sourceQueueCanonicalSha256": "a7bf25d5d6a8462972051ee58783591769bc2a4c066d27fcb58de4c87d1c7f35",
+      "sourceMediaSha256": "369218d5ca0a677ee9b5cbd22e179d0e5a8356fd00fd47646e46cd0a89cee2b0",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ja-jp-090-postref-text-0001",
+        "fleurs-ja-jp-090-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_030",
+      "decisionPath": "fleurs_ko_kr_validation_030.review-decisions.json",
+      "decisionFileSha256": "e856b2fc5a1313d17def1d0949b4408c8bc7e034665f4d3d5692418512ac845e",
+      "decisionCanonicalSha256": "f2e1a54659dc4d1fdf0f4bfb29a99fba8fd696cae5c1d6862bdb80643c0ba942",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ko_kr_validation_030-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ko_kr_validation_030-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ko_kr_validation_030-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "a9a74767a12bb6dc8ae1687e5af110b2941bc2a041c5a0836fc0d80270beab06",
+      "sourceInputCanonicalSha256": "c57ce61981263bff703aeda28bbdab7d6c678d59a9a4b18033ccc9b46b01b23e",
+      "sourceQueueFileSha256": "2fde4f80d0ca634ec94cfed8fc18f581e167c3147b830a3ca5858d48f631a396",
+      "sourceQueueCanonicalSha256": "19adbd4c4ef393c069342ed3baa84f61b3ec0a432133781281060a78908014f9",
+      "sourceMediaSha256": "5b8d2ea4898b596e4d316fb5411606fdebac9a4b2d66131fad5133d354cedea4",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ko-kr-030-postref-text-0001",
+        "fleurs-ko-kr-030-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_060",
+      "decisionPath": "fleurs_ko_kr_validation_060.review-decisions.json",
+      "decisionFileSha256": "abd3c269019b4d3d72a58b37417b4656a4108ae87095ec2fa50e6b94aa170947",
+      "decisionCanonicalSha256": "ca6150264cce75d052b539a53585f27c6d43a7e4028761675fbe0c477b462a3b",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ko_kr_validation_060-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ko_kr_validation_060-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_ko_kr_validation_060-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "330b1e825e4e06fa011d0a2f49e7bfa0de5186ab9f7f8b1abaeedcd9637b78ad",
+      "sourceInputCanonicalSha256": "d8f97c69c7d24d3c4a39ac83f6081e8c699b40f408349597ab3ab8cc70f1d1f4",
+      "sourceQueueFileSha256": "c109d31aed98814cb74aff5a4c232eda897a62ec1432d5fe50d081c48f3925a9",
+      "sourceQueueCanonicalSha256": "5da4046043f2c43aa37a4272419d85e496959eee8c3644ac6363cadae74630b1",
+      "sourceMediaSha256": "9881aeb390b260d5064552ca209be417ba8e578e7f5642ca5dceb5cf0b700de6",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ko-kr-060-postref-text-0001",
+        "fleurs-ko-kr-060-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_090",
+      "decisionPath": "fleurs_ko_kr_validation_090.review-decisions.json",
+      "decisionFileSha256": "d32611292cb584acfd7b263c9acadee4e17973f2fc50936a0d692a5b91c68968",
+      "decisionCanonicalSha256": "1052fda1baa1e35918fff32fce89d6f3d898013b9a3237632a68c90dbe55e957",
+      "sourceRootKind": "recovery",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_ko_kr_validation_090-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_ko_kr_validation_090-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_ko_kr_validation_090-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "d97e345396d213fd8dedac6ec29480ee686d8ee5327c5ebcdc873f95afc2297c",
+      "sourceInputCanonicalSha256": "6be4016c49ae04e821f082aff98be61fa399aff97137fca345b4a06b0ad01e7e",
+      "sourceQueueFileSha256": "6d8151debe165de1e19068d02fa8739629305cc3a9c8b6ebd1a0f16c55ee0119",
+      "sourceQueueCanonicalSha256": "565fe3658322369301e452bbea94e8aa43102a723e4a132c50fd0fe52f428197",
+      "sourceMediaSha256": "8fac0c4b9c2dcb9b18751bf91c5b766a03396fc319359ec9c222e650a13a6507",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-ko-kr-090-postref-text-0001",
+        "fleurs-ko-kr-090-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item",
+      "transcriptCoreEquivalence": {
+        "schema": "root-minus-generatedAt-and-provenance-v1",
+        "originalInputPath": "D:/mts-eval/product-runs/pilot-fleurs18-semantic-baseline-20260809/outputs/fleurs_ko_kr_validation_090-manual/semantic/input-transcript.v2.json",
+        "recoveryInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_ko_kr_validation_090-manual\\semantic\\input-transcript.v2.json",
+        "originalCanonicalSha256": "f7d582b8d7761b7e9988ad803cb6312ee4f2c243e6b7e6cc65201781673b5d94",
+        "recoveryCanonicalSha256": "f7d582b8d7761b7e9988ad803cb6312ee4f2c243e6b7e6cc65201781673b5d94",
+        "equivalent": true
+      }
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_030",
+      "decisionPath": "fleurs_yue_hant_hk_validation_030.review-decisions.json",
+      "decisionFileSha256": "40cb949bf2b7b97b8c6b9606c68ff6ee7421da2a6725f27abbbd95fb9436a8d0",
+      "decisionCanonicalSha256": "b6415cd31ee65e8077d1ab32c0f886e96f0bd235d8e062f1dbd75b7ca7c7b3f0",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_030-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_030-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_030-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "8a6d6adcf50abc08aef6a54218b947f1bc9d5a40edc8ae80fb838e9c54cf9e14",
+      "sourceInputCanonicalSha256": "ec2699bac994a98a68647a6ea64f408aae0b2c5aa2a27236a1bb639bb87733de",
+      "sourceQueueFileSha256": "6be4a2511e09ec755523b4a1eb0049bdec61475575bea5c9c80e994699545b02",
+      "sourceQueueCanonicalSha256": "f7fa0e318dcd43001f1e158e2301d186f2a46a7e90804e1643ee4f6e10dba4d5",
+      "sourceMediaSha256": "277908047b12e7160aac230d8f7032d82a3a42046ee23ff190010b15cc65fcf8",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-yue-hant-hk-030-postref-text-0001",
+        "fleurs-yue-hant-hk-030-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_060",
+      "decisionPath": "fleurs_yue_hant_hk_validation_060.review-decisions.json",
+      "decisionFileSha256": "3e1f31229a8e1edb642eee0451e04272dc9dfaefebc5b4f64f730912b3238eba",
+      "decisionCanonicalSha256": "36a3da5bd29f1cd74eb1cdf83a1cf71ecc46210d08af906f671a175c67d926b2",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_060-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_060-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_060-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "43ef7a7ffe456f14a52c9cdfcb5a4fd1347188f8fa5ce35cd9e5a017ff35c267",
+      "sourceInputCanonicalSha256": "9a301c360a6b6c7e5d90672b6a28299e109c07ac27aa0880f5b7b79e8f49f9ba",
+      "sourceQueueFileSha256": "d8d8ea03c76499faa2aafe68607f8b108449037650026c092df9859080e885a2",
+      "sourceQueueCanonicalSha256": "c2645bf6e6e2bbfb192e733d6e5556dacbe7759b35e779bc183dd1f50ee481d9",
+      "sourceMediaSha256": "ab882ac92882c1e477c180166819d97a3ce3c3d5a9570de2d57bc986b610302f",
+      "observedOpenItemIds": [
+        "window-000001:SEGMENT_LOW_CONFIDENCE",
+        "window-000001:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 2,
+      "replayDecisionIds": [
+        "fleurs-yue-hant-hk-060-postref-text-0001",
+        "fleurs-yue-hant-hk-060-postref-speaker-0002"
+      ],
+      "replayDecisionCount": 2,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_090",
+      "decisionPath": "fleurs_yue_hant_hk_validation_090.review-decisions.json",
+      "decisionFileSha256": "4c704edd2f6c7ccc3b0fd32b723977de0eb638fb32023ea713a71e371e48052f",
+      "decisionCanonicalSha256": "4ea7159825ee6f7d3d26ff2ee6ff12ae037d8d229d1d0e5634dcd19cef67888e",
+      "sourceRootKind": "baseline",
+      "sourceRunRoot": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809",
+      "sourceOutputDirectory": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_090-manual",
+      "sourceInputPath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_090-manual\\semantic\\input-transcript.v2.json",
+      "sourceQueuePath": "D:/mts-eval\\product-runs\\pilot-fleurs18-semantic-baseline-20260809\\outputs\\fleurs_yue_hant_hk_validation_090-manual\\review\\review-queue.json",
+      "sourceInputFileSha256": "9cd356a0abd1a078cccf7ef81279116bc67af74773d5512f952a3a5f494525ea",
+      "sourceInputCanonicalSha256": "f4188ecde45e5596a96c84592d3e284152a2c2c1ae3cd54722a963ccd1fc4b55",
+      "sourceQueueFileSha256": "6aa16322d100cc471d41a41606d0f2855a5e2c77b993205bcff15defac73a07e",
+      "sourceQueueCanonicalSha256": "ec5c89573f76e7fea4305b9ed703cdcaf5a021869bd42b99c860571854d0a613",
+      "sourceMediaSha256": "b481fcb6f01943784e25a3e958f1bfc1412307acaa80caf8eb7df7bd95c86c10",
+      "observedOpenItemIds": [
+        "window-000001.rf01:SEGMENT_LOW_CONFIDENCE",
+        "window-000001.rf01:SECONDARY_VERIFIER_UNRESOLVED",
+        "window-000001.rf02:SEGMENT_LOW_CONFIDENCE",
+        "window-000001.rf02:SECONDARY_VERIFIER_UNRESOLVED"
+      ],
+      "observedQueueOpenCount": 4,
+      "replayDecisionIds": [
+        "fleurs-yue-hant-hk-090-postref-text-0001",
+        "fleurs-yue-hant-hk-090-postref-speaker-0002",
+        "fleurs-yue-hant-hk-090-postref-text-0003",
+        "fleurs-yue-hant-hk-090-postref-speaker-0004"
+      ],
+      "replayDecisionCount": 4,
+      "replayOpenCount": 0,
+      "replayApi": "backend.review.validate_review_state+resolve_review_item"
+    }
+  ],
+  "canonicalSha256": "bfc6308cca86ecf5751eb4867d4defe6bb13c6fee4a69fbc177268c15a9d395f"
+}

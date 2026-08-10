@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ja_jp_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ja-jp-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication corrects 写真カ to 写真家 and restores the exact official wording.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ja_jp_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "警察によれば、写真家をはねた車の運転手が刑事告訴される可能性は低いとのことです。",
+      "displayText": "警察によれば、写真家をはねた車の運転手が刑事告訴される可能性は低いとのことです。",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ja-jp-090-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:350061676b7778ed2c3e6fce1c1c5e821a22e27e1b54cf0bb7c0ec5cb0257010"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "schemaVersion": "1.0.0",
+  "matrixId": "mts-real-product-sample-matrix-v1",
+  "requiredEvaluationSplits": ["development", "held-out"],
+  "qualificationPolicy": {
+    "localMediaRequired": true,
+    "verifiedMediaDigestRequired": true,
+    "licenseEvidenceRequired": true,
+    "realRecordingRequired": true,
+    "syntheticMixturesQualify": false,
+    "regressionDoesNotSatisfyDevelopmentOrHeldOut": true
+  },
+  "sourceLanguageDefaults": {
+    "ami": ["en-GB"],
+    "alimeeting": ["zh-CN"],
+    "aishell4": ["zh-CN"],
+    "voxconverse": ["en"]
+  },
+  "sourceEvidenceOverrides": [
+    {
+      "sourceSha256": "f67e097905489641d2392651b3022cc150fb6dd2fc620b6e726b7f6d4ca0fec1",
+      "languageTags": ["en-US"],
+      "license": "public-domain-us-government",
+      "provider": "Wikimedia Commons",
+      "pageId": 5744345,
+      "pageRevisionId": 1141760595,
+      "sourceReference": "real-jfk-video-v1/jfk-development-video-reference.v1.json"
+    }
+  ],
+  "languageBuckets": [
+    {
+      "id": "mandarin",
+      "languageTags": ["zh-CN", "cmn-Hans-CN"]
+    },
+    {
+      "id": "cantonese",
+      "languageTags": ["yue-Hant-HK", "yue-HK"]
+    },
+    {
+      "id": "english",
+      "languagePrefixes": ["en-"]
+    },
+    {
+      "id": "spanish",
+      "languagePrefixes": ["es-"]
+    },
+    {
+      "id": "japanese",
+      "languagePrefixes": ["ja-"]
+    },
+    {
+      "id": "korean",
+      "languagePrefixes": ["ko-"]
+    },
+    {
+      "id": "arabic",
+      "languagePrefixes": ["ar-"]
+    },
+    {
+      "id": "hindi",
+      "languagePrefixes": ["hi-"]
+    },
+    {
+      "id": "code-switch",
+      "minimumLanguageCount": 2,
+      "scenarioTags": ["code-switch", "intra-utterance", "rapid-code-switching", "word-switch", "phrase-switch", "sentence-switch", "exact-switch-timing"]
+    }
+  ],
+  "speakerCountBuckets": [1, 2, 3, 5, 8, 13],
+  "scenarioBuckets": [
+    {
+      "id": "overlap",
+      "scenarioTags": ["overlap"]
+    },
+    {
+      "id": "far-field",
+      "scenarioTags": ["far-field", "far-field-meeting"]
+    },
+    {
+      "id": "telephone",
+      "scenarioTags": ["telephone", "telephone-band", "telephony-noise"]
+    },
+    {
+      "id": "noise",
+      "scenarioTags": ["noise", "background-noise", "background-crowd"],
+      "signalClasses": ["environment", "domestic", "human-nonlexical", "animal", "urban"]
+    },
+    {
+      "id": "silence",
+      "signalClasses": ["silence"]
+    },
+    {
+      "id": "music",
+      "scenarioTags": ["music", "instrumental-music"],
+      "signalClasses": ["instrumental-music"]
+    },
+    {
+      "id": "long-media",
+      "scenarioTags": ["long-media", "long-media-stratified"],
+      "minimumSourceDurationSeconds": 300
+    }
+  ]
+}

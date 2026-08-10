@@ -26,6 +26,7 @@ class ProductionWorkerCliTests(unittest.TestCase):
         self.config_path = self.root / "production.json"
         self.config_path.write_text("{}\n", encoding="utf-8")
         self.config = SimpleNamespace(
+            offline=True,
             runtime=SimpleNamespace(
                 strict_startup_preflight=True,
                 max_line_bytes=8192,
@@ -37,6 +38,34 @@ class ProductionWorkerCliTests(unittest.TestCase):
             config_fingerprint="a" * 64,
             checks=(),
         )
+
+    def test_remote_config_does_not_apply_offline_environment(self) -> None:
+        buffer = io.StringIO()
+        composition = SimpleNamespace(service=FakeService())
+        self.config.offline = False
+        with (
+            patch(
+                "backend.worker.ProductionConfig.load",
+                return_value=self.config,
+            ),
+            patch(
+                "backend.worker.run_production_preflight",
+                return_value=self.passed_report,
+            ),
+            patch(
+                "backend.worker.build_production_composition",
+                return_value=composition,
+            ),
+            patch("backend.worker.preload_production_runtime"),
+            patch("backend.worker.WorkerProtocol"),
+            patch("backend.worker.run_jsonl_loop"),
+            patch("backend.worker.apply_offline_environment") as apply_offline,
+            redirect_stdout(buffer),
+        ):
+            exit_code = main(["--config", str(self.config_path)])
+
+        self.assertEqual(exit_code, 0)
+        apply_offline.assert_not_called()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()

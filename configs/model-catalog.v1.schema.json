@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribestudio.local/contracts/model-catalog.v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "catalogId",
+    "sourceRegistryId",
+    "artifactPolicy",
+    "defaults",
+    "hardwareProfiles",
+    "models"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "catalogId": {"type": "string", "minLength": 1},
+    "sourceRegistryId": {"type": "string", "minLength": 1},
+    "artifactPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundledModelArtifacts", "absolutePathsIncluded"],
+      "properties": {
+        "bundledModelArtifacts": {"const": false},
+        "absolutePathsIncluded": {"const": false}
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semanticModelId", "speakerVerifierModelId"],
+      "properties": {
+        "semanticModelId": {"type": ["string", "null"]},
+        "speakerVerifierModelId": {"type": ["string", "null"]}
+      }
+    },
+    "hardwareProfiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "platform"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "platform": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "displayName",
+          "source",
+          "license",
+          "usage",
+          "runtime",
+          "quantization",
+          "hardwareProfileIds",
+          "download"
+        ],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "displayName": {"type": "string", "minLength": 1},
+          "source": {"type": "object"},
+          "license": {"type": "object"},
+          "usage": {"type": "object"},
+          "runtime": {"type": "object"},
+          "quantization": {"type": "object"},
+          "hardwareProfileIds": {"type": "array", "items": {"type": "string"}},
+          "deploymentSlots": {"type": "array"},
+          "download": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["destinationRelative", "requiresModelManager"],
+            "properties": {
+              "destinationRelative": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))(?!.*\\\\).+$"
+              },
+              "requiresModelManager": {"const": true}
+            }
+          }
+        }
+      }
+    }
+  }
+}

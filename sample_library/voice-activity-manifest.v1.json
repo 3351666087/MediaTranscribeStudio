@@ -35,6 +35,30 @@
       "attribution": "Instrumental composition by P.S. Mukherjee; digitised by Moloy Ghosh; credits Debamitro Chakraborti."
     },
     {
+      "id": "commons-amar-sonar-bangla-instrumental",
+      "kind": "wikimedia-commons",
+      "pageId": 2589036,
+      "revisionId": 910318431,
+      "revisionTimestamp": "2024-08-16T17:21:21Z",
+      "title": "File:Amar Sonar Bangla instrumental by US Navy Band.oga",
+      "homepage": "https://commons.wikimedia.org/wiki/File:Amar_Sonar_Bangla_instrumental_by_US_Navy_Band.oga",
+      "license": "public-domain",
+      "recordingType": "real-recording",
+      "attribution": "Amar Sonar Bangla, performed instrumentally by the United States Navy Band."
+    },
+    {
+      "id": "commons-tudelft-quiet-study-room",
+      "kind": "wikimedia-commons",
+      "pageId": 25624038,
+      "revisionId": 751123960,
+      "revisionTimestamp": "2023-04-16T23:21:31Z",
+      "title": "File:20121112 TU Delft Library, quiet study room - general ambience - SoundCloud - el mar.ogg",
+      "homepage": "https://commons.wikimedia.org/wiki/File:20121112_TU_Delft_Library,_quiet_study_room_-_general_ambience_-_SoundCloud_-_el_mar.ogg",
+      "license": "cc-by-3.0",
+      "recordingType": "real-recording",
+      "attribution": "TU Delft Library quiet study room field recording by el_mar."
+    },
+    {
       "id": "generated-silence",
       "kind": "generated",
       "license": "generated-test-fixture",
@@ -203,6 +227,57 @@
       },
       "selection": {"startSeconds": 10, "durationSeconds": 15},
       "attribution": "P.S. Mukherjee; digitised by Moloy Ghosh; credits Debamitro Chakraborti (public domain)."
+    },
+    {
+      "id": "commons-amar-sonar-bangla-instrumental",
+      "sourceId": "commons-amar-sonar-bangla-instrumental",
+      "evaluationSplit": "development",
+      "signalClass": "instrumental-music",
+      "category": "south-asian-military-band",
+      "humanVocalization": false,
+      "expectedLexicalSpeech": false,
+      "asset": {
+        "filename": "Amar_Sonar_Bangla_instrumental_US_Navy_Band.oga",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/7/7d/Amar_Sonar_Bangla_instrumental_by_US_Navy_Band.oga",
+        "sha256": "44c9f87c60d07db92ad31e5e40c972012e041caf0ad2d886d2a94f55c539c6b5",
+        "commonsSha1": "98828043fdb36e73da10ac48b45cb1f57b41f8b6"
+      },
+      "selection": {"startSeconds": 30, "durationSeconds": 15},
+      "attribution": "Amar Sonar Bangla, performed instrumentally by the United States Navy Band (public domain)."
+    },
+    {
+      "id": "commons-tudelft-quiet-study-room-development",
+      "sourceId": "commons-tudelft-quiet-study-room",
+      "evaluationSplit": "development",
+      "signalClass": "silence",
+      "category": "quiet-room-tone",
+      "humanVocalization": false,
+      "expectedLexicalSpeech": false,
+      "asset": {
+        "filename": "TU_Delft_quiet_study_room_ambience.ogg",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/f/fb/20121112_TU_Delft_Library%2C_quiet_study_room_-_general_ambience_-_SoundCloud_-_el_mar.ogg",
+        "sha256": "047c704947a9a9d96486b0d32b13665edf8e781b9d12c886df042daf3f0cff91",
+        "commonsSha1": "76039a0678ffa4dd06f99a56797f298bbbfee306"
+      },
+      "selection": {"startSeconds": 125, "durationSeconds": 15},
+      "attribution": "TU Delft Library quiet study room field recording by el_mar (CC BY 3.0)."
+    },
+    {
+      "id": "commons-tudelft-quiet-study-room-held-out",
+      "sourceId": "commons-tudelft-quiet-study-room",
+      "evaluationSplit": "held-out",
+      "signalClass": "silence",
+      "category": "quiet-room-tone",
+      "humanVocalization": false,
+      "expectedLexicalSpeech": false,
+      "asset": {
+        "filename": "TU_Delft_quiet_study_room_ambience.ogg",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/f/fb/20121112_TU_Delft_Library%2C_quiet_study_room_-_general_ambience_-_SoundCloud_-_el_mar.ogg",
+        "sha256": "047c704947a9a9d96486b0d32b13665edf8e781b9d12c886df042daf3f0cff91",
+        "commonsSha1": "76039a0678ffa4dd06f99a56797f298bbbfee306"
+      },
+      "selection": {"startSeconds": 195, "durationSeconds": 15},
+      "attribution": "TU Delft Library quiet study room field recording by el_mar (CC BY 3.0)."
     },
     {
       "id": "generated-digital-silence",

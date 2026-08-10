@@ -1,0 +1,343 @@
+name: Tauri macOS release candidate
+
+"on":
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Apple target triple
+        required: true
+        default: universal-apple-darwin
+        type: choice
+        options:
+          - universal-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+      bundles:
+        description: Comma-separated app, dmg, and/or zip outputs
+        required: true
+        default: app,dmg
+        type: string
+      channel:
+        description: Release channel recorded in the manifest
+        required: true
+        default: development
+        type: string
+      release_mode:
+        description: Signed modes require repository Apple credentials; unsigned is development-only
+        required: true
+        default: unsigned-development
+        type: choice
+        options:
+          - unsigned-development
+          - signed
+          - signed-notarized
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mts-macos-${{ github.ref }}-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }}
+    runs-on: ${{ inputs.target == 'x86_64-apple-darwin' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 180
+    env:
+      MTS_TARGET: ${{ inputs.target }}
+      MTS_BUNDLES: ${{ inputs.bundles }}
+      MTS_CHANNEL: ${{ inputs.channel }}
+      MTS_EXPECTED_RUNNER_ARCH: ${{ inputs.target == 'x86_64-apple-darwin' && 'x86_64' || 'arm64' }}
+
+    steps:
+      - name: Check out locked source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-macos.txt
+
+      - name: Set up Java 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Assert target-native runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_architecture="$(uname -m)"
+          test "$actual_architecture" = "$MTS_EXPECTED_RUNNER_ARCH"
+
+      - name: Install Apple Rust targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build the locked OpenHTMLtoPDF sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          mvn -B -ntp -f pdf-renderer/pom.xml package
+          test -f pdf-renderer/target/pdf-renderer.jar
+
+      - name: Install macOS packaging verifier dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check "jsonschema==4.25.1" "pytest==8.4.1"
+          python3 -m pytest -q tests/test_tauri_macos_packaging.py
+
+      - name: Validate the cross-host release plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          arguments=(
+            --target-triple "$MTS_TARGET"
+            --bundles "$MTS_BUNDLES"
+            --channel "$MTS_CHANNEL"
+            --dry-run
+          )
+          if [[ "${{ inputs.release_mode }}" == "unsigned-development" ]]; then
+            arguments+=(--allow-unsigned-development)
+          elif [[ "${{ inputs.release_mode }}" == "signed-notarized" ]]; then
+            arguments+=(--require-notarization)
+          fi
+          python3 packaging/tauri/build_tauri_macos_release.py "${arguments[@]}"
+
+      - name: Import Developer ID certificate
+        if: inputs.release_mode != 'unsigned-development'
+        shell: bash
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$MACOS_CODESIGN_IDENTITY"
+          test -n "$MACOS_CERTIFICATE_P12_BASE64"
+          test -n "$MACOS_CERTIFICATE_PASSWORD"
+          test -n "$MACOS_KEYCHAIN_PASSWORD"
+          certificate_path="$RUNNER_TEMP/mts-certificate.p12"
+          keychain_path="$RUNNER_TEMP/mts-signing.keychain-db"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | /usr/bin/base64 -D > "$certificate_path"
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -T /usr/bin/codesign -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PASSWORD" "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F -- "\"$MACOS_CODESIGN_IDENTITY\""
+
+      - name: Configure App Store Connect notarization
+        if: inputs.release_mode == 'signed-notarized'
+        shell: bash
+        env:
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.MACOS_NOTARY_PRIVATE_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          test -n "$MACOS_NOTARY_KEY_ID"
+          test -n "$MACOS_NOTARY_ISSUER_ID"
+          test -n "$MACOS_NOTARY_PRIVATE_KEY_BASE64"
+          private_key="$RUNNER_TEMP/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+          printf '%s' "$MACOS_NOTARY_PRIVATE_KEY_BASE64" | /usr/bin/base64 -D > "$private_key"
+          chmod 600 "$private_key"
+          {
+            printf 'APPLE_API_KEY=%s\n' "$MACOS_NOTARY_KEY_ID"
+            printf 'APPLE_API_ISSUER=%s\n' "$MACOS_NOTARY_ISSUER_ID"
+            printf 'APPLE_API_KEY_PATH=%s\n' "$private_key"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and collect the native candidate
+        shell: bash
+        env:
+          MTS_CODESIGN_IDENTITY_SECRET: ${{ inputs.release_mode != 'unsigned-development' && secrets.MACOS_CODESIGN_IDENTITY || '' }}
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          case "$MTS_TARGET" in
+            x86_64-apple-darwin) architecture="x64" ;;
+            aarch64-apple-darwin) architecture="arm64" ;;
+            universal-apple-darwin) architecture="universal2" ;;
+            *) exit 64 ;;
+          esac
+          output="$RUNNER_TEMP/mts-release/macos-$architecture"
+          arguments=(
+            --target-triple "$MTS_TARGET"
+            --bundles "$MTS_BUNDLES"
+            --channel "$MTS_CHANNEL"
+            --source-date-epoch "$source_date_epoch"
+            --output-directory "$output"
+          )
+          if [[ "${{ inputs.release_mode }}" == "unsigned-development" ]]; then
+            unset APPLE_SIGNING_IDENTITY MAC_CODESIGN_IDENTITY CODESIGN_IDENTITY
+            arguments+=(--allow-unsigned-development)
+          else
+            test -n "$MTS_CODESIGN_IDENTITY_SECRET"
+            arguments+=(--codesign-identity "$MTS_CODESIGN_IDENTITY_SECRET")
+          fi
+          if [[ "${{ inputs.release_mode }}" == "signed-notarized" ]]; then
+            arguments+=(--require-notarization)
+          fi
+          python3 packaging/tauri/build_tauri_macos_release.py "${arguments[@]}"
+          printf 'MTS_RELEASE_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
+
+      - name: Verify native app, DMG, ZIP, runtime, and launch
+        shell: bash
+        env:
+          MTS_EXPECTED_SIGNING_IDENTITY: ${{ inputs.release_mode != 'unsigned-development' && secrets.MACOS_CODESIGN_IDENTITY || '' }}
+        run: |
+          set -euo pipefail
+          arguments=(
+            --release-directory "$MTS_RELEASE_OUTPUT"
+            --expected-target "$MTS_TARGET"
+            --require-native
+            --run-bootstrap
+            --launch-smoke-seconds 8
+            --launch-via-open
+          )
+          if [[ "${{ inputs.release_mode }}" != "unsigned-development" ]]; then
+            test -n "$MTS_EXPECTED_SIGNING_IDENTITY"
+            arguments+=(--expected-signing-identity "$MTS_EXPECTED_SIGNING_IDENTITY")
+          fi
+          python3 packaging/tauri/verify_tauri_macos_release.py "${arguments[@]}"
+
+      - name: Archive and reverify macOS candidate transport
+        shell: bash
+        env:
+          MTS_EXPECTED_SIGNING_IDENTITY: ${{ inputs.release_mode != 'unsigned-development' && secrets.MACOS_CODESIGN_IDENTITY || '' }}
+        run: |
+          set -euo pipefail
+          archive_root="$RUNNER_TEMP/mts-release-transport"
+          release_name="$(basename "$MTS_RELEASE_OUTPUT")"
+          archive="$archive_root/${release_name}.tar.gz"
+          mkdir -p "$archive_root"
+          tar -czf "$archive" -C "$(dirname "$MTS_RELEASE_OUTPUT")" "$release_name"
+          (
+            cd "$archive_root"
+            shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256"
+          )
+          arguments=(
+            --release-archive "$archive"
+            --archive-checksum "$archive.sha256"
+            --expected-release-root "$release_name"
+            --expected-target "$MTS_TARGET"
+            --require-native
+            --run-bootstrap
+          )
+          if [[ "${{ inputs.release_mode }}" != "unsigned-development" ]]; then
+            test -n "$MTS_EXPECTED_SIGNING_IDENTITY"
+            arguments+=(--expected-signing-identity "$MTS_EXPECTED_SIGNING_IDENTITY")
+          fi
+          python3 packaging/tauri/verify_tauri_macos_release.py "${arguments[@]}"
+
+      - name: Upload mode-preserving macOS candidate archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mts-macos-${{ inputs.target }}-${{ inputs.release_mode }}
+          path: ${{ runner.temp }}/mts-release-transport/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary Apple credentials
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ inputs.release_mode }}" != "unsigned-development" ]]; then
+            security delete-keychain "$RUNNER_TEMP/mts-signing.keychain-db" || true
+          fi
+          rm -f "$RUNNER_TEMP/mts-certificate.p12"
+          for private_key in "$RUNNER_TEMP"/AuthKey_*.p8; do
+            if [[ -e "$private_key" ]]; then
+              rm -f "$private_key"
+            fi
+          done
+
+  transport-verify:
+    name: Reverify downloaded ${{ inputs.target }} transport
+    needs: build
+    runs-on: ${{ inputs.target == 'x86_64-apple-darwin' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 45
+    env:
+      MTS_TARGET: ${{ inputs.target }}
+      MTS_EXPECTED_RUNNER_ARCH: ${{ inputs.target == 'x86_64-apple-darwin' && 'x86_64' || 'arm64' }}
+
+    steps:
+      - name: Check out locked verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install manifest verifier dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check "jsonschema==4.25.1"
+
+      - name: Assert target-native runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_architecture="$(uname -m)"
+          test "$actual_architecture" = "$MTS_EXPECTED_RUNNER_ARCH"
+
+      - name: Download mode-preserving macOS candidate archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mts-macos-${{ inputs.target }}-${{ inputs.release_mode }}
+          path: ${{ runner.temp }}/mts-release-download
+
+      - name: Verify downloaded checksum, archive, native trust, runtime, and launch
+        shell: bash
+        env:
+          MTS_EXPECTED_SIGNING_IDENTITY: ${{ inputs.release_mode != 'unsigned-development' && secrets.MACOS_CODESIGN_IDENTITY || '' }}
+        run: |
+          set -euo pipefail
+          case "$MTS_TARGET" in
+            x86_64-apple-darwin) architecture="x64" ;;
+            aarch64-apple-darwin) architecture="arm64" ;;
+            universal-apple-darwin) architecture="universal2" ;;
+            *) exit 64 ;;
+          esac
+          release_name="macos-$architecture"
+          archive="$RUNNER_TEMP/mts-release-download/${release_name}.tar.gz"
+          checksum="$archive.sha256"
+          test -f "$archive"
+          test ! -L "$archive"
+          test -f "$checksum"
+          test ! -L "$checksum"
+          arguments=(
+            --release-archive "$archive"
+            --archive-checksum "$checksum"
+            --expected-release-root "$release_name"
+            --expected-target "$MTS_TARGET"
+            --require-native
+            --run-bootstrap
+            --launch-smoke-seconds 8
+            --launch-via-open
+          )
+          if [[ "${{ inputs.release_mode }}" != "unsigned-development" ]]; then
+            test -n "$MTS_EXPECTED_SIGNING_IDENTITY"
+            arguments+=(--expected-signing-identity "$MTS_EXPECTED_SIGNING_IDENTITY")
+          fi
+          python3 packaging/tauri/verify_tauri_macos_release.py "${arguments[@]}"

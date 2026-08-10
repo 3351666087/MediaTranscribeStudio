@@ -61,6 +61,39 @@ def test_residency_benchmark_hashes_inputs_and_reuses_pipeline(
 ) -> None:
     model, audio = _fixture_paths(tmp_path)
     _FakeVerifier.instances.clear()
+    snapshots = iter(
+        [
+            {
+                "processRssMb": 100.0,
+                "cudaAllocatedMb": 0.0,
+                "cudaReservedMb": 0.0,
+                "cudaPeakAllocatedMb": 0.0,
+                "cudaPeakReservedMb": 0.0,
+            },
+            {
+                "processRssMb": 220.0,
+                "cudaAllocatedMb": 180.0,
+                "cudaReservedMb": 200.0,
+                "cudaPeakAllocatedMb": 190.0,
+                "cudaPeakReservedMb": 210.0,
+            },
+            {
+                "processRssMb": 225.0,
+                "cudaAllocatedMb": 185.0,
+                "cudaReservedMb": 205.0,
+                "cudaPeakAllocatedMb": 195.0,
+                "cudaPeakReservedMb": 215.0,
+            },
+            {
+                "processRssMb": 140.0,
+                "cudaAllocatedMb": 5.0,
+                "cudaReservedMb": 10.0,
+                "cudaPeakAllocatedMb": 195.0,
+                "cudaPeakReservedMb": 215.0,
+            },
+        ]
+    )
+    reset_calls: list[bool] = []
 
     report = run_benchmark(
         model_path=model,
@@ -70,6 +103,8 @@ def test_residency_benchmark_hashes_inputs_and_reuses_pipeline(
         clip_duration_ms=250,
         warm_runs=2,
         verifier_factory=_FakeVerifier,
+        resource_probe=lambda: next(snapshots),
+        reset_resource_peaks=lambda: reset_calls.append(True),
     )
 
     assert report["model"]["manifestFileSha256"] == sha256_file(
@@ -84,6 +119,14 @@ def test_residency_benchmark_hashes_inputs_and_reuses_pipeline(
     assert report["historicalComparison"][
         "medianWarmPerClipBelowHistorical"
     ] is True
+    assert report["schemaVersion"] == "1.1.0"
+    assert report["resources"]["peakProcessRssMb"] == 225.0
+    assert report["resources"]["peakCudaAllocatedMb"] == 195.0
+    assert report["resources"]["peakCudaReservedMb"] == 215.0
+    assert report["resources"]["snapshots"]["afterRelease"][
+        "cudaAllocatedMb"
+    ] == 5.0
+    assert reset_calls == [True]
     canonical = dict(report)
     declared = canonical.pop("canonicalSha256")
     assert declared == canonical_json_sha256(canonical)

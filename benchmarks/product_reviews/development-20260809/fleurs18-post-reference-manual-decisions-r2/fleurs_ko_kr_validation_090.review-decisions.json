@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ko_kr_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication confirms the semantic input exactly matches the official FLEURS rawTranscript.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ko_kr_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "original-semantic-input-file-sha256:b4c743ddac1b5e5c6a6f602309f19bcc6b8fc626362cf275d52648ec80361c31", "original-semantic-input-canonical-sha256:165af1a0d80a4ece1525ce50ae3a242c8fc168348180317c189e289819db609d", "recovery-semantic-input-file-sha256:d97e345396d213fd8dedac6ec29480ee686d8ee5327c5ebcdc873f95afc2297c", "recovery-semantic-input-canonical-sha256:6be4016c49ae04e821f082aff98be61fa399aff97137fca345b4a06b0ad01e7e", "recovery-review-queue-file-sha256:6d8151debe165de1e19068d02fa8739629305cc3a9c8b6ebd1a0f16c55ee0119", "recovery-review-queue-canonical-sha256:565fe3658322369301e452bbea94e8aa43102a723e4a132c50fd0fe52f428197", "structured-transcript-core-schema:root-minus-generatedAt-and-provenance-v1", "structured-transcript-core-original-canonical-sha256:f7d582b8d7761b7e9988ad803cb6312ee4f2c243e6b7e6cc65201781673b5d94", "structured-transcript-core-recovery-canonical-sha256:f7d582b8d7761b7e9988ad803cb6312ee4f2c243e6b7e6cc65201781673b5d94", "structured-transcript-core-equivalent:true", "recovery-root:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809", "recovery-output-directory:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_ko_kr_validation_090-manual"],
+      "confidence": 1.0,
+      "normalizedText": "우주에 있는 위성은 신호를 받고 나서 거의 즉각적으로 반사해 내려보낸다.",
+      "displayText": "우주에 있는 위성은 신호를 받고 나서 거의 즉각적으로 반사해 내려보낸다.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-090-postref-speaker-0002",
+      "reason": "The frozen semantic input proves one segment assigned to the configured sole speaker; the eventual queue shape must still be checked at review.required.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "original-semantic-input-file-sha256:b4c743ddac1b5e5c6a6f602309f19bcc6b8fc626362cf275d52648ec80361c31", "original-semantic-input-canonical-sha256:165af1a0d80a4ece1525ce50ae3a242c8fc168348180317c189e289819db609d", "recovery-semantic-input-file-sha256:d97e345396d213fd8dedac6ec29480ee686d8ee5327c5ebcdc873f95afc2297c", "recovery-semantic-input-canonical-sha256:6be4016c49ae04e821f082aff98be61fa399aff97137fca345b4a06b0ad01e7e", "recovery-review-queue-file-sha256:6d8151debe165de1e19068d02fa8739629305cc3a9c8b6ebd1a0f16c55ee0119", "recovery-review-queue-canonical-sha256:565fe3658322369301e452bbea94e8aa43102a723e4a132c50fd0fe52f428197", "structured-transcript-core-schema:root-minus-generatedAt-and-provenance-v1", "structured-transcript-core-original-canonical-sha256:f7d582b8d7761b7e9988ad803cb6312ee4f2c243e6b7e6cc65201781673b5d94", "structured-transcript-core-recovery-canonical-sha256:f7d582b8d7761b7e9988ad803cb6312ee4f2c243e6b7e6cc65201781673b5d94", "structured-transcript-core-equivalent:true", "recovery-root:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809", "recovery-output-directory:D:\\mts-eval\\product-runs\\pilot-fleurs2-qwen36-27b-semantic-recovery-v2-20260809\\outputs\\fleurs_ko_kr_validation_090-manual"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

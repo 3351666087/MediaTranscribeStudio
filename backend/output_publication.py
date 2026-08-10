@@ -369,6 +369,7 @@ def publish_output_plans(
                     rendered_path=Path(item.staged.quarantine_path),
                     arrangement=item.candidate.prepared.arrangement,
                     delivery_receipt=item.staged.receipt,
+                    execution_plan=item.candidate.plan,
                 )
                 item.visual_qa = _passing_visual_qa(evidence)
                 item.visual_qa_sha256 = canonical_json_sha256(item.visual_qa)
@@ -389,7 +390,11 @@ def publish_output_plans(
                 _check_cancelled(cancellation_check)
 
         for candidate in preflight.public_sidecars:
-            if candidate.subtitle_format is SubtitleFormat.ASS and public_ass:
+            if (
+                preflight.media_outputs
+                and candidate.subtitle_format is SubtitleFormat.ASS
+                and public_ass
+            ):
                 continue
             _check_cancelled(cancellation_check)
             published = _publish_public_sidecar(
@@ -752,13 +757,22 @@ def _derive_public_sidecars(
                 "an explicitly requested subtitle format has no prepared payload",
                 details={"format": subtitle_format.value},
             )
+        sidecar_variants = tuple(
+            item
+            for item in variants
+            if item[0] is SubtitleOutputMode.SIDECAR
+        )
+        # Media plans may bind the same payload to plan-private carrier names
+        # because ASS is primary there. An explicit sidecar plan is the sole
+        # authority for customer-visible subtitle paths.
+        target_variants = sidecar_variants or variants
         targets = {
             _canonical_customer_output(
                 artifact.output_path,
                 output_root=output_root,
                 source=source,
             )
-            for _, artifact in variants
+            for _, artifact in target_variants
         }
         if len(targets) != 1:
             raise OutputPublicationError(
@@ -767,7 +781,7 @@ def _derive_public_sidecars(
                 details={"format": subtitle_format.value},
             )
         selected = min(
-            variants,
+            target_variants,
             key=lambda item: _mode_sort_key(item[0]),
         )[1]
         result.append(

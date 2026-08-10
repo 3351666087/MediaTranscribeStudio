@@ -114,7 +114,10 @@
           "maxLength": 120
         },
         "networkPolicy": {
-          "const": "loopback-only"
+          "enum": [
+            "loopback-only",
+            "remote-explicit"
+          ]
         }
       }
     },

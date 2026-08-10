@@ -10,7 +10,13 @@ from typing import Any
 from reporting import JavaPdfClient, ReportDocumentAssembler
 
 from .adapters import JavaPdfRendererAdapter
-from .local_llm import LocalLLMConfig, OllamaLocalProvider
+from .local_llm import (
+    LLMProviderConfig,
+    LocalLLMConfig,
+    LocalLLMProvider,
+    OllamaLocalProvider,
+    create_llm_provider,
+)
 from .media_probe import MediaProbe
 from .paths import PathPolicy
 from .production_config import (
@@ -28,6 +34,7 @@ from .production_runners import (
     LocalPyannoteAuditAdapter,
     LocalQwen3AsrAdapter,
 )
+from .production_subtitle_visual_qa import ProductionSubtitleVisualQAHook
 from .production_semantic import ProductionSemanticCandidateRegistry
 from .semantic_composition import SemanticJobArbitrationRunner
 from .semantic_orchestration import SemanticCompositionOrchestrator
@@ -37,6 +44,7 @@ from .speaker_pipeline import (
     SpeakerPipeline,
     SpeakerPipelineConfig,
 )
+from .subtitle_delivery import SubtitleDeliveryExecutor
 
 EventSink = Callable[[Mapping[str, Any]], None]
 
@@ -57,6 +65,8 @@ class ProductionFactories:
     java_client_from_jar: Callable[..., Any] = JavaPdfClient.from_jar
     renderer: Callable[..., Any] = JavaPdfRendererAdapter
     media_probe: Callable[..., Any] = MediaProbe
+    subtitle_delivery_executor: Callable[..., Any] = SubtitleDeliveryExecutor
+    subtitle_visual_qa: Callable[..., Any] = ProductionSubtitleVisualQAHook
     service: Callable[..., Any] = WorkerService
 
 
@@ -77,7 +87,8 @@ def build_production_composition(
     """Build every production adapter explicitly; no unavailable fallback exists."""
 
     factories = factories or ProductionFactories()
-    apply_offline_environment()
+    if config.offline:
+        apply_offline_environment()
     preflight = preflight_report or run_production_preflight(
         config,
         probe_runtime_imports=probe_runtime_imports,
@@ -101,10 +112,26 @@ def build_production_composition(
         max_language_window_ms=config.speaker.max_language_window_ms,
         language_split_search_ms=config.speaker.language_split_search_ms,
     )
-    secondary = factories.secondary(
-        model_path=config.models.eres2net_v2,
+    secondary_binding = config.models.secondary_speaker_verifier
+    secondary_factories = {
+        "modelscope-eres2netv2": factories.secondary,
+    }
+    try:
+        secondary_factory = secondary_factories[secondary_binding.adapter_id]
+    except KeyError as exc:
+        raise ValueError(
+            "unsupported secondary speaker verifier adapter: "
+            f"{secondary_binding.adapter_id}"
+        ) from exc
+    secondary = secondary_factory(
+        model_path=secondary_binding.path,
         device=config.runtime.eres2net_device,
         decision_margin=config.speaker.eres2net_decision_margin,
+        deployment_slot=secondary_binding.deployment_slot,
+        registry_model_id=secondary_binding.registry_model_id,
+        manifest_model_key=secondary_binding.manifest_model_key,
+        manifest_sha256=secondary_binding.manifest_sha256,
+        adapter_id=secondary_binding.adapter_id,
     )
     pyannote = None
     if config.speaker.pyannote_mode != "disabled":
@@ -217,8 +244,102 @@ def build_production_composition(
         ffprobe_command=(ffprobe_command,),
         ffmpeg_command=(config.executables.ffmpeg,),
     )
+    subtitle_delivery_executor = factories.subtitle_delivery_executor(
+        probe=media_probe,
+        ffmpeg_command=(str(config.executables.ffmpeg),),
+    )
+    subtitle_visual_qa_hook = factories.subtitle_visual_qa(
+        ffmpeg_path=str(config.executables.ffmpeg),
+        ffprobe_path=ffprobe_command,
+        probe=media_probe,
+    )
     local_llm_stage_residency = config.runtime.model_residency == "stage"
     local_llm_keep_alive = "5m" if local_llm_stage_residency else "10m"
+
+    def local_llm_config(
+        *,
+        model: str,
+        endpoint: str,
+        expected_model_digest: str | None,
+    ) -> LocalLLMConfig:
+        return LocalLLMConfig(
+            model=model,
+            endpoint=endpoint,
+            timeout_seconds=config.speaker.local_llm_timeout_seconds,
+            context_tokens=config.speaker.local_llm_context_tokens,
+            output_tokens=config.speaker.local_llm_output_tokens,
+            keep_alive=local_llm_keep_alive,
+            release_on_close=local_llm_stage_residency,
+            expected_model_digest=expected_model_digest,
+        )
+
+    def request_provider_config(request: Any) -> LLMProviderConfig | LocalLLMConfig:
+        configured = getattr(request, "llm_provider_config", None)
+        if isinstance(configured, (LLMProviderConfig, LocalLLMConfig)):
+            return configured
+        return config.llm
+
+    def provider_for_request(
+        request: Any,
+        *,
+        model: str,
+    ) -> LocalLLMProvider:
+        configured = request_provider_config(request)
+        configured_model = configured.model
+        allow_override = bool(
+            getattr(configured, "allow_model_override", False)
+        )
+        if model != configured_model and not allow_override:
+            raise ValueError(
+                "production business model must match the digest-pinned local "
+                "LLM model or configured remote LLM model"
+            )
+        provider_id = getattr(configured, "provider", "ollama-loopback")
+        if isinstance(configured, LocalLLMConfig) or provider_id in {
+            "ollama",
+            "ollama-local",
+            "ollama-loopback",
+        }:
+            endpoint = str(
+                getattr(request, "local_llm_endpoint", configured.endpoint)
+            ).strip()
+            expected_digest = getattr(
+                configured,
+                "expected_model_digest",
+                None,
+            )
+            if expected_digest is None:
+                expected_digest = config.llm.expected_model_digest
+            return OllamaLocalProvider(
+                local_llm_config(
+                    model=model,
+                    endpoint=endpoint,
+                    expected_model_digest=expected_digest,
+                )
+            )
+        return create_llm_provider(configured)
+
+    def business_provider_factory(request: Any) -> LocalLLMProvider:
+        model = str(request.business_config.model).strip()
+        return provider_for_request(
+            request,
+            model=model,
+        )
+
+    def semantic_provider_factory(request: Any) -> LocalLLMProvider:
+        model = str(
+            getattr(request, "local_llm_model", config.llm.model)
+        ).strip()
+        return provider_for_request(
+            request,
+            model=model,
+        )
+
+    def semantic_model_for_request(request: Any) -> str:
+        configured = request_provider_config(request)
+        return str(
+            getattr(request, "local_llm_model", configured.model)
+        ).strip()
 
     def semantic_orchestrator_factory(
         request: Any,
@@ -228,20 +349,17 @@ def build_production_composition(
             raise RuntimeError(
                 "semantic composition requires a configured pyannote challenger"
             )
-        provider = OllamaLocalProvider(
-            LocalLLMConfig(
-                model=config.speaker.local_llm_model,
-                endpoint=request.local_llm_endpoint,
-                keep_alive=local_llm_keep_alive,
-                release_on_close=local_llm_stage_residency,
-            )
+        semantic_model = semantic_model_for_request(request)
+        provider = provider_for_request(
+            request,
+            model=semantic_model,
         )
         return SemanticCompositionOrchestrator(
             arbitrator=SemanticJobArbitrationRunner(
                 provider=provider,
-                model=config.speaker.local_llm_model,
+                model=semantic_model,
                 cancellation_check=context.raise_if_cancelled,
-                batch_size=8,
+                batch_size=config.speaker.local_llm_batch_size,
                 translation_targets=(
                     request.business_config.translation_targets
                 ),
@@ -251,7 +369,7 @@ def build_production_composition(
                 pyannote_adapter=pyannote,
                 context=context,
             ),
-            max_rounds=3,
+            max_rounds=config.speaker.local_llm_max_rounds,
         )
 
     service = factories.service(
@@ -262,6 +380,8 @@ def build_production_composition(
         transcription_adapter=transcription,
         renderer_adapter=renderer,
         media_probe=media_probe,
+        subtitle_delivery_executor=subtitle_delivery_executor,
+        subtitle_visual_qa_hook=subtitle_visual_qa_hook,
         event_sink=event_sink,
         max_workers=config.runtime.max_workers,
         max_pending_jobs=config.runtime.max_pending_jobs,
@@ -276,24 +396,11 @@ def build_production_composition(
         ),
         low_speaker_margin_threshold=config.speaker.low_margin_threshold,
         high_speaker_margin_threshold=config.speaker.high_margin_threshold,
-        business_provider_factory=lambda request: OllamaLocalProvider(
-            LocalLLMConfig(
-                model=request.business_config.model,
-                endpoint=request.local_llm_endpoint,
-                keep_alive=local_llm_keep_alive,
-                release_on_close=local_llm_stage_residency,
-            )
-        ),
-        semantic_provider_factory=lambda request: OllamaLocalProvider(
-            LocalLLMConfig(
-                model=config.speaker.local_llm_model,
-                endpoint=request.local_llm_endpoint,
-                keep_alive=local_llm_keep_alive,
-                release_on_close=local_llm_stage_residency,
-            )
-        ),
+        business_provider_factory=business_provider_factory,
+        semantic_provider_factory=semantic_provider_factory,
         semantic_required=True,
-        semantic_model=config.speaker.local_llm_model,
+        semantic_model=config.llm.model,
+        llm_provider_config=config.llm,
         semantic_orchestrator_factory=(
             semantic_orchestrator_factory
             if pyannote is not None

@@ -96,7 +96,10 @@
           "maxLength": 160
         },
         "networkPolicy": {
-          "const": "loopback-only"
+          "enum": [
+            "loopback-only",
+            "remote-explicit"
+          ]
         }
       }
     },
@@ -109,7 +112,16 @@
         "semantic-job-candidate-arbitration-v5",
         "semantic-job-candidate-arbitration-v6",
         "semantic-job-candidate-arbitration-v7",
-        "semantic-job-candidate-arbitration-v8"
+        "semantic-job-candidate-arbitration-v8",
+        "semantic-job-candidate-arbitration-v9",
+        "semantic-job-candidate-arbitration-v10",
+        "semantic-job-candidate-arbitration-v11",
+        "semantic-job-candidate-arbitration-v12",
+        "semantic-job-candidate-arbitration-v13",
+        "semantic-job-candidate-arbitration-v14",
+        "semantic-job-candidate-arbitration-v15",
+        "semantic-job-candidate-arbitration-v16",
+        "semantic-job-candidate-arbitration-v17"
       ]
     },
     "status": {

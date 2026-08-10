@@ -30,8 +30,10 @@ use worker_supervisor::{
 
 const CONTRACT_VERSION: &str = "1.6.0";
 const JS_MAX_SAFE_INTEGER: usize = 9_007_199_254_740_991usize;
-const LOCAL_LLM_ENDPOINT_POLICY: &str = "loopback-only";
-const PRODUCTION_LOCAL_LLM_MODEL: &str = "qwen3.5:9b";
+const LOCAL_LLM_LOOPBACK_POLICY: &str = "loopback-only";
+const LOCAL_LLM_REMOTE_POLICY: &str = "remote-explicit";
+const DEFAULT_LLM_PROVIDER: &str = "ollama-loopback";
+const PRODUCTION_LOCAL_LLM_MODEL: &str = "qwen3.5:27b-q4_K_M";
 const BUSINESS_PROMPT_VERSION: &str = "business-v1";
 const MAX_OUTPUT_CUSTOMIZATION_BYTES: usize = 256 * 1024;
 static NEXT_JOB_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -610,6 +612,12 @@ struct CreateJobRequest {
     local_llm_model: String,
     local_llm_endpoint: String,
     local_llm_endpoint_policy: String,
+    #[serde(default)]
+    llm_provider: Option<String>,
+    #[serde(default)]
+    llm_api_key_env: Option<String>,
+    #[serde(default)]
+    llm_proxy_url: Option<String>,
     local_llm_auto_apply: bool,
     translation_targets: Vec<String>,
     summary: bool,
@@ -769,6 +777,9 @@ struct PreparedJob {
     local_llm_model: String,
     local_llm_endpoint: String,
     local_llm_endpoint_policy: String,
+    llm_provider: String,
+    llm_api_key_env: Option<String>,
+    llm_proxy_url: Option<String>,
     local_llm_auto_apply: bool,
     translation_targets: Vec<String>,
     summary: bool,
@@ -982,18 +993,32 @@ fn validate_language_tag(value: &str, field: &str, allow_auto: bool) -> IpcResul
     Ok(())
 }
 
-fn validate_loopback_endpoint(value: &str, field: &str) -> IpcResult<()> {
+fn validate_llm_endpoint(value: &str, field: &str, policy: &str) -> IpcResult<()> {
     validate_text(value, field, 2_048, false)?;
+    if policy != LOCAL_LLM_LOOPBACK_POLICY && policy != LOCAL_LLM_REMOTE_POLICY {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            format!(
+                "{field} policy must be {LOCAL_LLM_LOOPBACK_POLICY} or {LOCAL_LLM_REMOTE_POLICY}."
+            ),
+        ));
+    }
     let (scheme, remainder) = value.split_once("://").ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::InvalidRequest,
-            format!("{field} must be an absolute HTTP(S) loopback URL."),
+            format!("{field} must be an absolute HTTP(S) URL."),
         )
     })?;
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return Err(IpcError::new(
             IpcErrorCode::InvalidRequest,
             format!("{field} must use HTTP or HTTPS."),
+        ));
+    }
+    if remainder.contains('?') || remainder.contains('#') {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            format!("{field} must not contain a query or fragment."),
         ));
     }
     let authority = remainder
@@ -1039,10 +1064,17 @@ fn validate_loopback_endpoint(value: &str, field: &str) -> IpcResult<()> {
         (authority, None)
     };
 
-    if !(host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1") {
+    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    if policy == LOCAL_LLM_LOOPBACK_POLICY && !loopback {
         return Err(IpcError::new(
             IpcErrorCode::InvalidRequest,
             format!("{field} must use localhost, 127.0.0.1, or [::1]."),
+        ));
+    }
+    if policy == LOCAL_LLM_REMOTE_POLICY && !scheme.eq_ignore_ascii_case("https") && !loopback {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            format!("{field} remote endpoints must use HTTPS."),
         ));
     }
     if let Some(port) = port {
@@ -1059,21 +1091,65 @@ fn validate_loopback_endpoint(value: &str, field: &str) -> IpcResult<()> {
     Ok(())
 }
 
-fn validate_business_processing(request: &CreateJobRequest) -> IpcResult<()> {
-    validate_language_tag(&request.language, "language", true)?;
-    validate_text(&request.local_llm_model, "localLlmModel", 160, false)?;
-    if request.local_llm_model.trim() != PRODUCTION_LOCAL_LLM_MODEL {
+fn validate_provider_id(value: &str, field: &str) -> IpcResult<()> {
+    validate_text(value, field, 96, false)?;
+    let mut bytes = value.trim().bytes();
+    let valid_first = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+    let valid_rest =
+        bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !valid_first || !valid_rest {
         return Err(IpcError::new(
             IpcErrorCode::InvalidRequest,
-            format!("localLlmModel must be {PRODUCTION_LOCAL_LLM_MODEL}."),
+            format!("{field} contains an invalid provider identifier."),
         ));
     }
-    validate_loopback_endpoint(&request.local_llm_endpoint, "localLlmEndpoint")?;
-    if request.local_llm_endpoint_policy != LOCAL_LLM_ENDPOINT_POLICY {
+    Ok(())
+}
+
+fn validate_environment_name(value: &str, field: &str) -> IpcResult<()> {
+    validate_text(value, field, 128, false)?;
+    let mut bytes = value.trim().bytes();
+    let valid_first = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_');
+    let valid_rest =
+        bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    if !valid_first || !valid_rest {
         return Err(IpcError::new(
             IpcErrorCode::InvalidRequest,
-            format!("localLlmEndpointPolicy must be {LOCAL_LLM_ENDPOINT_POLICY}."),
+            format!("{field} must be an environment-variable name, never a raw API key."),
         ));
+    }
+    Ok(())
+}
+
+fn validate_business_processing(request: &CreateJobRequest) -> IpcResult<()> {
+    validate_language_tag(&request.language, "language", true)?;
+    validate_text(&request.local_llm_model, "localLlmModel", 256, false)?;
+    let endpoint_policy = request.local_llm_endpoint_policy.trim();
+    validate_llm_endpoint(
+        &request.local_llm_endpoint,
+        "localLlmEndpoint",
+        endpoint_policy,
+    )?;
+    let provider = request
+        .llm_provider
+        .as_deref()
+        .unwrap_or(DEFAULT_LLM_PROVIDER);
+    validate_provider_id(provider, "llmProvider")?;
+    if provider == DEFAULT_LLM_PROVIDER && endpoint_policy != LOCAL_LLM_LOOPBACK_POLICY {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidRequest,
+            "Ollama must use the loopback-only endpoint policy.",
+        ));
+    }
+    if let Some(api_key_env) = request.llm_api_key_env.as_deref() {
+        validate_environment_name(api_key_env, "llmApiKeyEnv")?;
+    }
+    if let Some(proxy_url) = request.llm_proxy_url.as_deref() {
+        validate_llm_endpoint(proxy_url, "llmProxyUrl", LOCAL_LLM_REMOTE_POLICY)?;
     }
     if request.local_llm_auto_apply {
         return Err(IpcError::new(
@@ -1285,8 +1361,14 @@ fn prepare_job(request: CreateJobRequest) -> IpcResult<PreparedJob> {
         language: request.language,
         local_llm_mode: request.local_llm_mode,
         local_llm_model: request.local_llm_model.trim().to_owned(),
-        local_llm_endpoint: request.local_llm_endpoint,
-        local_llm_endpoint_policy: request.local_llm_endpoint_policy,
+        local_llm_endpoint: request.local_llm_endpoint.trim().to_owned(),
+        local_llm_endpoint_policy: request.local_llm_endpoint_policy.trim().to_owned(),
+        llm_provider: request
+            .llm_provider
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| DEFAULT_LLM_PROVIDER.to_owned()),
+        llm_api_key_env: request.llm_api_key_env.map(|value| value.trim().to_owned()),
+        llm_proxy_url: request.llm_proxy_url.map(|value| value.trim().to_owned()),
         local_llm_auto_apply: request.local_llm_auto_apply,
         translation_targets: request.translation_targets,
         summary: request.summary,
@@ -1299,10 +1381,18 @@ fn prepare_job(request: CreateJobRequest) -> IpcResult<PreparedJob> {
 fn safe_relative_path(relative_path: &str) -> IpcResult<PathBuf> {
     validate_text(relative_path, "relativePath", 1024, false)?;
     let relative = Path::new(relative_path);
+    // Worker artifact paths are serialized with forward slashes.  Reject
+    // Windows separators and drive prefixes even on Unix, where Rust would
+    // otherwise treat `C:\\...` as an ordinary relative filename.
+    let has_windows_drive_prefix = relative_path.len() >= 2
+        && relative_path.as_bytes()[0].is_ascii_alphabetic()
+        && relative_path.as_bytes()[1] == b':';
     let has_unsafe_text_component = relative_path
         .split(['/', '\\'])
         .any(|component| component.is_empty() || component == "." || component == "..");
     if relative.is_absolute()
+        || has_windows_drive_prefix
+        || relative_path.contains('\\')
         || has_unsafe_text_component
         || relative
             .components()
@@ -1444,6 +1534,19 @@ fn build_job_start_payload(
         "localLlmEndpointPolicy".to_owned(),
         Value::String(prepared.local_llm_endpoint_policy.clone()),
     );
+    payload.insert(
+        "llmProvider".to_owned(),
+        Value::String(prepared.llm_provider.clone()),
+    );
+    if let Some(api_key_env) = &prepared.llm_api_key_env {
+        payload.insert(
+            "llmApiKeyEnv".to_owned(),
+            Value::String(api_key_env.clone()),
+        );
+    }
+    if let Some(proxy_url) = &prepared.llm_proxy_url {
+        payload.insert("llmProxyUrl".to_owned(), Value::String(proxy_url.clone()));
+    }
     payload.insert(
         "localLlmAutoApply".to_owned(),
         Value::Bool(prepared.local_llm_auto_apply),
@@ -7009,7 +7112,7 @@ fn default_strategies() -> Vec<ModelStrategy> {
             diarization_model: "CAM++ · dynamic clustering".to_owned(),
             semantic_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
             semantic_model_status: "suggestion_only".to_owned(),
-            semantic_model_evaluation: "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_model_evaluation: "Production evaluation: qwen3.5:27b-q4_K_M won the current multilingual semantic challenge; every decision remains evidence-bound and fail-closed.".to_owned(),
             estimated_vram_gb: 7.2,
             semantic_guardrail: "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.".to_owned(),
             recommended: Some(true),
@@ -7022,7 +7125,7 @@ fn default_strategies() -> Vec<ModelStrategy> {
             diarization_model: "CAM++ · second overlap pass".to_owned(),
             semantic_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
             semantic_model_status: "suggestion_only".to_owned(),
-            semantic_model_evaluation: "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_model_evaluation: "Production evaluation: qwen3.5:27b-q4_K_M won the current multilingual semantic challenge; every decision remains evidence-bound and fail-closed.".to_owned(),
             estimated_vram_gb: 8.0,
             semantic_guardrail: "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.".to_owned(),
             recommended: None,
@@ -7035,7 +7138,7 @@ fn default_strategies() -> Vec<ModelStrategy> {
             diarization_model: "CAM++ · CPU clustering".to_owned(),
             semantic_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
             semantic_model_status: "suggestion_only".to_owned(),
-            semantic_model_evaluation: "Production evaluation: qwen3.5:9b is required for fail-closed semantic arbitration; it remains suggestion-only and cannot auto-edit transcript text or speakers.".to_owned(),
+            semantic_model_evaluation: "Production evaluation: qwen3.5:27b-q4_K_M won the current multilingual semantic challenge; every decision remains evidence-bound and fail-closed.".to_owned(),
             estimated_vram_gb: 4.4,
             semantic_guardrail: "The model may only choose an acoustically backed candidate or abstain; it cannot create speakers, move boundaries, or overwrite raw text.".to_owned(),
             recommended: None,
@@ -7253,9 +7356,12 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(StudioStore::new())
-        .manage(WorkerSupervisor::new())
         .manage(JobCommandGate::default())
         .setup(|app| {
+            let runtime_resource_directory = app.path().resource_dir().ok();
+            app.manage(WorkerSupervisor::new_with_resource_directory(
+                runtime_resource_directory,
+            ));
             let supervisor = app.state::<WorkerSupervisor>().inner().clone();
             let projection_supervisor = supervisor.clone();
             let mut worker_events = supervisor.subscribe_events();
@@ -7522,7 +7628,10 @@ mod tests {
             local_llm_mode: LocalLlmMode::Disabled,
             local_llm_model: PRODUCTION_LOCAL_LLM_MODEL.to_owned(),
             local_llm_endpoint: "http://127.0.0.1:11434".to_owned(),
-            local_llm_endpoint_policy: LOCAL_LLM_ENDPOINT_POLICY.to_owned(),
+            local_llm_endpoint_policy: LOCAL_LLM_LOOPBACK_POLICY.to_owned(),
+            llm_provider: Some(DEFAULT_LLM_PROVIDER.to_owned()),
+            llm_api_key_env: None,
+            llm_proxy_url: None,
             local_llm_auto_apply: false,
             translation_targets: Vec::new(),
             summary: false,
@@ -7537,16 +7646,47 @@ mod tests {
     }
 
     #[test]
-    fn rejects_retired_local_model() {
-        let root = temp_workspace("retired-local-model");
+    fn accepts_model_override_and_rejects_empty_model() {
+        let root = temp_workspace("model-override");
         let mut request = valid_manual_request(&root, 1);
-        request.local_llm_model = "qwen3.5:4b".to_owned();
+        request.local_llm_model = "vendor/custom-semantic-model".to_owned();
+
+        let prepared = prepare_job(request.clone()).expect("custom model must be accepted");
+        assert_eq!(prepared.local_llm_model, "vendor/custom-semantic-model");
+
+        request.local_llm_model.clear();
 
         let error = match prepare_job(request) {
-            Ok(_) => panic!("retired local model must fail closed"),
+            Ok(_) => panic!("empty model must fail closed"),
             Err(error) => error,
         };
-        assert!(error.message.contains(PRODUCTION_LOCAL_LLM_MODEL));
+        assert!(error.message.contains("localLlmModel"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn validates_remote_provider_transport_without_accepting_raw_keys() {
+        let root = temp_workspace("remote-provider");
+        let mut request = valid_manual_request(&root, 1);
+        request.local_llm_model = "gpt-5".to_owned();
+        request.local_llm_endpoint = "https://relay.example.com/v1".to_owned();
+        request.local_llm_endpoint_policy = LOCAL_LLM_REMOTE_POLICY.to_owned();
+        request.llm_provider = Some("openai-compatible".to_owned());
+        request.llm_api_key_env = Some("RELAY_API_KEY".to_owned());
+        request.llm_proxy_url = Some("http://127.0.0.1:7890".to_owned());
+
+        let prepared = prepare_job(request.clone()).expect("remote provider must be accepted");
+        assert_eq!(prepared.llm_provider, "openai-compatible");
+        assert_eq!(prepared.llm_api_key_env.as_deref(), Some("RELAY_API_KEY"));
+
+        request.local_llm_endpoint = "http://relay.example.com/v1".to_owned();
+        let error = prepare_job(request.clone()).expect_err("remote HTTP must fail closed");
+        assert!(error.message.contains("HTTPS"));
+
+        request.local_llm_endpoint = "https://relay.example.com/v1".to_owned();
+        request.llm_api_key_env = Some("sk-raw-secret".to_owned());
+        let error = prepare_job(request).expect_err("raw key must fail closed");
+        assert!(error.message.contains("environment-variable name"));
         fs::remove_dir_all(root).expect("cleanup");
     }
 

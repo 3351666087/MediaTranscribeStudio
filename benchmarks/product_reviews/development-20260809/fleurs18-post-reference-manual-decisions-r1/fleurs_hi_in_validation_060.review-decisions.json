@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_hi_in_validation_060-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-060-postref-text-0001",
+      "reason": "Post-reference Codex adjudication restores the exact official FLEURS word spacing, numeral, agreement, and punctuation.",
+      "evidence": ["fleurs-raw-transcript:fleurs_hi_in_validation_060", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "कुछ रिपोर्ट आधिकारिक मृत्यु दर आठ बताती हैं, और आधिकारिक रिपोर्टों से पुष्टि होती है कि 30 तक घायल हुए हैं; लेकिन अंतिम संख्या अभी तक ज्ञात नहीं हैं।",
+      "displayText": "कुछ रिपोर्ट आधिकारिक मृत्यु दर आठ बताती हैं, और आधिकारिक रिपोर्टों से पुष्टि होती है कि 30 तक घायल हुए हैं; लेकिन अंतिम संख्या अभी तक ज्ञात नहीं हैं।",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-hi-in-060-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:a0c717258d4d590ff8cc7608f55e09ad7cacc8d5cffa6033093823d6391ed8ef"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

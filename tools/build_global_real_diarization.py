@@ -5,15 +5,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 
@@ -22,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from tools.build_global_derived_matrix import overlap_intervals  # noqa: E402
+from backend.persistence import canonical_json_sha256  # noqa: E402
 from tools.global_sample_library import (  # noqa: E402
     GlobalSampleLibraryError,
     load_global_manifest,
@@ -35,8 +38,12 @@ DEFAULT_OUTPUT_ROOT = (
 RESOLVED_NAME = "global-real-diarization.resolved.v1.json"
 USER_AGENT = "MediaTranscribeStudio-real-diarization-library/1.0"
 WINDOW_DURATIONS = (10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0)
+MAX_WINDOW_DURATION_SECONDS = 300.0
 MIN_SPEAKER_SECONDS = 0.5
 AISHELL4_MAX_DURATION = 30.0
+EVALUATION_SPLITS = frozenset({"development", "regression", "held-out"})
+ALIMEETING_SESSION_ID = re.compile(r"^R[0-9]{4}_M[0-9]{4}$")
+ALIMEETING_SPEAKER_ID = re.compile(r"^N_SPK[0-9]{4}$")
 
 
 def _sha256(path: Path) -> str:
@@ -193,6 +200,789 @@ def _turns(row: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return turns
+
+
+def _praat_quoted_value(line: str, prefix: str) -> str:
+    raw = line.removeprefix(prefix).strip()
+    if len(raw) < 2 or not raw.startswith('"') or not raw.endswith('"'):
+        raise GlobalSampleLibraryError("AliMeeting TextGrid string is invalid")
+    return raw[1:-1].replace('""', '"')
+
+
+def parse_alimeeting_textgrid(value: str) -> dict[str, Any]:
+    """Parse the deterministic long TextGrid form shipped in AliMeeting."""
+
+    grid: dict[str, Any] = {"tiers": []}
+    expected_tier_count: int | None = None
+    current_tier: dict[str, Any] | None = None
+    current_interval: dict[str, Any] | None = None
+
+    def finish_interval() -> None:
+        nonlocal current_interval
+        if current_interval is None:
+            return
+        if current_tier is None:
+            raise GlobalSampleLibraryError(
+                "AliMeeting TextGrid interval has no tier"
+            )
+        current_tier["intervals"].append(current_interval)
+        current_interval = None
+
+    def finish_tier() -> None:
+        nonlocal current_tier
+        finish_interval()
+        if current_tier is not None:
+            grid["tiers"].append(current_tier)
+            current_tier = None
+
+    for line_number, raw_line in enumerate(value.splitlines(), start=1):
+        line = raw_line.strip()
+        item_match = re.fullmatch(r"item \[([0-9]+)\]:", line)
+        if item_match:
+            finish_tier()
+            current_tier = {
+                "index": int(item_match.group(1)),
+                "intervals": [],
+            }
+            continue
+        interval_match = re.fullmatch(r"intervals \[([0-9]+)\]:", line)
+        if interval_match:
+            if current_tier is None:
+                raise GlobalSampleLibraryError(
+                    "AliMeeting TextGrid interval precedes its tier"
+                )
+            finish_interval()
+            current_interval = {"index": int(interval_match.group(1))}
+            continue
+        try:
+            if current_tier is None:
+                if line.startswith("xmin = "):
+                    grid["startSeconds"] = float(line.rsplit("=", 1)[1])
+                elif line.startswith("xmax = "):
+                    grid["endSeconds"] = float(line.rsplit("=", 1)[1])
+                elif line.startswith("size = "):
+                    expected_tier_count = int(line.rsplit("=", 1)[1])
+                continue
+            if current_interval is not None:
+                if line.startswith("xmin = "):
+                    current_interval["startSeconds"] = float(
+                        line.rsplit("=", 1)[1]
+                    )
+                elif line.startswith("xmax = "):
+                    current_interval["endSeconds"] = float(
+                        line.rsplit("=", 1)[1]
+                    )
+                elif line.startswith("text = "):
+                    current_interval["text"] = _praat_quoted_value(
+                        line,
+                        "text = ",
+                    )
+                continue
+            if line.startswith("class = "):
+                current_tier["class"] = _praat_quoted_value(line, "class = ")
+            elif line.startswith("name = "):
+                current_tier["name"] = _praat_quoted_value(line, "name = ")
+            elif line.startswith("xmin = "):
+                current_tier["startSeconds"] = float(line.rsplit("=", 1)[1])
+            elif line.startswith("xmax = "):
+                current_tier["endSeconds"] = float(line.rsplit("=", 1)[1])
+            elif line.startswith("intervals: size = "):
+                current_tier["expectedIntervalCount"] = int(
+                    line.rsplit("=", 1)[1]
+                )
+        except ValueError as exc:
+            raise GlobalSampleLibraryError(
+                f"AliMeeting TextGrid line {line_number} has invalid numeric data"
+            ) from exc
+    finish_tier()
+
+    tiers = grid["tiers"]
+    if (
+        set(grid) != {"startSeconds", "endSeconds", "tiers"}
+        or expected_tier_count is None
+        or expected_tier_count < 1
+        or len(tiers) != expected_tier_count
+        or float(grid["startSeconds"]) != 0.0
+        or float(grid["endSeconds"]) <= 0.0
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid header or tier count is invalid"
+        )
+    for expected_tier_index, tier in enumerate(tiers, start=1):
+        required_tier_fields = {
+            "index",
+            "class",
+            "name",
+            "startSeconds",
+            "endSeconds",
+            "expectedIntervalCount",
+            "intervals",
+        }
+        if (
+            set(tier) != required_tier_fields
+            or tier["index"] != expected_tier_index
+            or tier["class"] != "IntervalTier"
+            or not isinstance(tier["name"], str)
+            or not tier["name"]
+            or float(tier["startSeconds"]) != 0.0
+            or float(tier["endSeconds"]) != float(grid["endSeconds"])
+            or tier["expectedIntervalCount"] != len(tier["intervals"])
+            or not tier["intervals"]
+        ):
+            raise GlobalSampleLibraryError(
+                "AliMeeting TextGrid tier is invalid"
+            )
+        previous_end = 0.0
+        for expected_interval_index, interval in enumerate(
+            tier["intervals"],
+            start=1,
+        ):
+            if set(interval) != {
+                "index",
+                "startSeconds",
+                "endSeconds",
+                "text",
+            }:
+                raise GlobalSampleLibraryError(
+                    "AliMeeting TextGrid interval is incomplete"
+                )
+            start = float(interval["startSeconds"])
+            end = float(interval["endSeconds"])
+            if (
+                interval["index"] != expected_interval_index
+                or start < previous_end
+                or end <= start
+                or end > float(grid["endSeconds"])
+                or not isinstance(interval["text"], str)
+            ):
+                raise GlobalSampleLibraryError(
+                    "AliMeeting TextGrid interval is invalid"
+                )
+            previous_end = end
+        tier.pop("expectedIntervalCount")
+    return grid
+
+
+def alimeeting_textgrid_turns(grid: dict[str, Any]) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for tier in grid["tiers"]:
+        speaker_id = str(tier["name"])
+        if not ALIMEETING_SPEAKER_ID.fullmatch(speaker_id):
+            raise GlobalSampleLibraryError(
+                "AliMeeting far TextGrid speaker ID is invalid"
+            )
+        for interval in tier["intervals"]:
+            transcript = str(interval["text"]).strip()
+            if not transcript:
+                raise GlobalSampleLibraryError(
+                    "AliMeeting far TextGrid transcript is empty"
+                )
+            turns.append(
+                {
+                    "speakerId": speaker_id,
+                    "startSeconds": float(interval["startSeconds"]),
+                    "endSeconds": float(interval["endSeconds"]),
+                    "transcript": transcript,
+                }
+            )
+    return sorted(
+        turns,
+        key=lambda turn: (
+            float(turn["startSeconds"]),
+            float(turn["endSeconds"]),
+            str(turn["speakerId"]),
+        ),
+    )
+
+
+def align_alimeeting_window_to_textgrid(
+    window: dict[str, Any],
+    transcript_turns: Sequence[dict[str, Any]],
+    target_speaker_count: int,
+    *,
+    maximum_duration_seconds: float = 90.0,
+) -> dict[str, Any]:
+    """Expand a selected window to whole official TextGrid utterances."""
+
+    start = float(window["sourceStartSeconds"])
+    end = float(window["sourceEndSeconds"])
+    for _ in range(len(transcript_turns) + 1):
+        overlapping = [
+            turn
+            for turn in transcript_turns
+            if float(turn["startSeconds"]) < end
+            and float(turn["endSeconds"]) > start
+        ]
+        if not overlapping:
+            raise GlobalSampleLibraryError(
+                "AliMeeting selected window has no TextGrid transcript"
+            )
+        aligned_start = min(
+            [start] + [float(turn["startSeconds"]) for turn in overlapping]
+        )
+        aligned_end = max(
+            [end] + [float(turn["endSeconds"]) for turn in overlapping]
+        )
+        if aligned_start == start and aligned_end == end:
+            break
+        start, end = aligned_start, aligned_end
+    else:
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid boundary expansion did not converge"
+        )
+    if end - start > maximum_duration_seconds:
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid-aligned window exceeds the duration limit"
+        )
+    selected = [
+        turn
+        for turn in transcript_turns
+        if float(turn["startSeconds"]) < end
+        and float(turn["endSeconds"]) > start
+    ]
+    if any(
+        float(turn["startSeconds"]) < start
+        or float(turn["endSeconds"]) > end
+        for turn in selected
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid alignment clipped an utterance"
+        )
+    speaker_set = sorted({str(turn["speakerId"]) for turn in selected})
+    if len(speaker_set) != target_speaker_count:
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid expansion changed the target speaker count"
+        )
+    per_speaker = {
+        speaker: sum(
+            float(turn["endSeconds"]) - float(turn["startSeconds"])
+            for turn in selected
+            if turn["speakerId"] == speaker
+        )
+        for speaker in speaker_set
+    }
+    if min(per_speaker.values()) < MIN_SPEAKER_SECONDS:
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid window lacks per-speaker coverage"
+        )
+    relative_turns = [
+        {
+            "speakerId": str(turn["speakerId"]),
+            "sourceStartSeconds": round(float(turn["startSeconds"]), 6),
+            "sourceEndSeconds": round(float(turn["endSeconds"]), 6),
+            "startSeconds": round(float(turn["startSeconds"]) - start, 6),
+            "endSeconds": round(float(turn["endSeconds"]) - start, 6),
+            "transcript": None,
+        }
+        for turn in selected
+    ]
+    overlaps = overlap_intervals(relative_turns)
+    overlap_duration = sum(
+        float(interval["endSeconds"]) - float(interval["startSeconds"])
+        for interval in overlaps
+    )
+    speech_duration = _union_duration(
+        [
+            (float(turn["startSeconds"]), float(turn["endSeconds"]))
+            for turn in selected
+        ]
+    )
+    return {
+        "algorithm": (
+            "event-boundary-shortest-coverage-v2"
+            "+textgrid-whole-utterance-expansion-v1"
+        ),
+        "baseSourceStartSeconds": window["sourceStartSeconds"],
+        "baseSourceEndSeconds": window["sourceEndSeconds"],
+        "baseDurationSeconds": window["durationSeconds"],
+        "sourceStartSeconds": round(start, 6),
+        "sourceEndSeconds": round(end, 6),
+        "durationSeconds": round(end - start, 6),
+        "speakerSet": speaker_set,
+        "perSpeakerAnnotatedSeconds": {
+            speaker: round(value, 6)
+            for speaker, value in sorted(per_speaker.items())
+        },
+        "annotatedSpeechSeconds": round(speech_duration, 6),
+        "annotatedOverlapSeconds": round(overlap_duration, 6),
+        "turns": relative_turns,
+        "overlapIntervals": overlaps,
+    }
+
+
+def select_alimeeting_textgrid_window(
+    transcript_turns: Sequence[dict[str, Any]],
+    target_speaker_count: int,
+    *,
+    minimum_duration_seconds: float = 10.0,
+    maximum_duration_seconds: float = 90.0,
+    minimum_overlap_seconds: float = 0.5,
+) -> dict[str, Any]:
+    """Select whole TextGrid overlap-components without consulting a model."""
+
+    if (
+        target_speaker_count < 2
+        or not transcript_turns
+        or minimum_duration_seconds <= 0
+        or maximum_duration_seconds < minimum_duration_seconds
+        or minimum_overlap_seconds < 0
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting TextGrid window constraints are invalid"
+        )
+    ordered = sorted(
+        transcript_turns,
+        key=lambda turn: (
+            float(turn["startSeconds"]),
+            float(turn["endSeconds"]),
+            str(turn["speakerId"]),
+        ),
+    )
+    components: list[dict[str, Any]] = []
+    for turn in ordered:
+        start = float(turn["startSeconds"])
+        end = float(turn["endSeconds"])
+        if not components or start >= float(components[-1]["endSeconds"]):
+            components.append(
+                {"startSeconds": start, "endSeconds": end, "turns": [turn]}
+            )
+        else:
+            components[-1]["endSeconds"] = max(
+                float(components[-1]["endSeconds"]),
+                end,
+            )
+            components[-1]["turns"].append(turn)
+    best: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+    for first_index, first in enumerate(components):
+        selected: list[dict[str, Any]] = []
+        start = float(first["startSeconds"])
+        for component in components[first_index:]:
+            selected.extend(component["turns"])
+            end = float(component["endSeconds"])
+            duration = end - start
+            if duration < minimum_duration_seconds:
+                continue
+            if duration > maximum_duration_seconds:
+                break
+            speaker_set = sorted(
+                {str(turn["speakerId"]) for turn in selected}
+            )
+            if len(speaker_set) != target_speaker_count:
+                continue
+            per_speaker = {
+                speaker: sum(
+                    float(turn["endSeconds"])
+                    - float(turn["startSeconds"])
+                    for turn in selected
+                    if turn["speakerId"] == speaker
+                )
+                for speaker in speaker_set
+            }
+            if min(per_speaker.values()) < MIN_SPEAKER_SECONDS:
+                continue
+            relative_turns = [
+                {
+                    "speakerId": str(turn["speakerId"]),
+                    "sourceStartSeconds": round(
+                        float(turn["startSeconds"]),
+                        6,
+                    ),
+                    "sourceEndSeconds": round(float(turn["endSeconds"]), 6),
+                    "startSeconds": round(
+                        float(turn["startSeconds"]) - start,
+                        6,
+                    ),
+                    "endSeconds": round(float(turn["endSeconds"]) - start, 6),
+                    "transcript": None,
+                }
+                for turn in selected
+            ]
+            overlaps = overlap_intervals(relative_turns)
+            overlap_duration = sum(
+                float(interval["endSeconds"])
+                - float(interval["startSeconds"])
+                for interval in overlaps
+            )
+            if overlap_duration < minimum_overlap_seconds:
+                continue
+            speech_duration = _union_duration(
+                [
+                    (
+                        float(turn["startSeconds"]),
+                        float(turn["endSeconds"]),
+                    )
+                    for turn in selected
+                ]
+            )
+            score = (
+                -duration,
+                min(per_speaker.values()),
+                bool(overlaps),
+                overlap_duration,
+                speech_duration,
+                -start,
+            )
+            candidate = {
+                "algorithm": "textgrid-component-shortest-coverage-v1",
+                "sourceStartSeconds": round(start, 6),
+                "sourceEndSeconds": round(end, 6),
+                "durationSeconds": round(duration, 6),
+                "speakerSet": speaker_set,
+                "perSpeakerAnnotatedSeconds": {
+                    speaker: round(value, 6)
+                    for speaker, value in sorted(per_speaker.items())
+                },
+                "annotatedSpeechSeconds": round(speech_duration, 6),
+                "annotatedOverlapSeconds": round(overlap_duration, 6),
+                "turns": relative_turns,
+                "overlapIntervals": overlaps,
+            }
+            if best is None or score > best[0]:
+                best = (score, candidate)
+    if best is None:
+        raise GlobalSampleLibraryError(
+            "no whole-utterance AliMeeting window satisfies the constraints"
+        )
+    return best[1]
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_alimeeting_plan(plan: dict[str, Any]) -> None:
+    required = {
+        "sourceId",
+        "provider",
+        "dataset",
+        "revision",
+        "split",
+        "evaluationSplit",
+        "targetSpeakerCounts",
+        "unsupportedTargetSpeakerCounts",
+        "modalities",
+        "sessionTargets",
+        "archiveUrl",
+        "archiveBytes",
+        "archiveSha256",
+        "archiveCrc64",
+        "extractedRootName",
+        "extractedFileCount",
+        "extractedBytes",
+        "extractedTreeSha256",
+        "officialHomepage",
+        "license",
+        "licenseDecision",
+        "attribution",
+        "officialBaselineRepository",
+        "officialBaselineRevision",
+        "windowSelection",
+        "minimumAnnotatedOverlapSeconds",
+        "selectionUsesModelScores",
+    }
+    if not required <= set(plan):
+        raise GlobalSampleLibraryError("AliMeeting source plan is incomplete")
+    archive_sha256 = plan.get("archiveSha256")
+    root_name = plan.get("extractedRootName")
+    targets = plan.get("targetSpeakerCounts")
+    sessions = plan.get("sessionTargets")
+    if (
+        plan.get("sourceId") != "alimeeting"
+        or plan.get("provider") != "openslr"
+        or plan.get("dataset") != "SLR119/AliMeeting"
+        or plan.get("revision") != f"sha256:{archive_sha256}"
+        or plan.get("split") != "Eval"
+        or plan.get("evaluationSplit") not in EVALUATION_SPLITS
+        or targets != [2, 3, 4]
+        or plan.get("unsupportedTargetSpeakerCounts") != [5]
+        or plan.get("modalities")
+        != ["far-field-array", "synchronized-near-field-mixture"]
+        or not isinstance(sessions, list)
+        or len(sessions) != 8
+        or plan.get("archiveUrl")
+        != (
+            "https://speech-lab-share-data.oss-cn-shanghai.aliyuncs.com/"
+            "AliMeeting/openlr/Eval_Ali.tar.gz"
+        )
+        or isinstance(plan.get("archiveBytes"), bool)
+        or not isinstance(plan.get("archiveBytes"), int)
+        or int(plan["archiveBytes"]) <= 0
+        or not _is_sha256(archive_sha256)
+        or not isinstance(plan.get("archiveCrc64"), str)
+        or re.fullmatch(r"[0-9A-F]{16}", plan["archiveCrc64"]) is None
+        or not isinstance(root_name, str)
+        or PurePosixPath(root_name).parts != (root_name,)
+        or root_name != "Eval_Ali"
+        or isinstance(plan.get("extractedFileCount"), bool)
+        or not isinstance(plan.get("extractedFileCount"), int)
+        or int(plan["extractedFileCount"]) <= 0
+        or isinstance(plan.get("extractedBytes"), bool)
+        or not isinstance(plan.get("extractedBytes"), int)
+        or int(plan["extractedBytes"]) <= 0
+        or not _is_sha256(plan.get("extractedTreeSha256"))
+        or plan.get("officialHomepage") != "https://www.openslr.org/119/"
+        or plan.get("license") != "cc-by-sa-4.0"
+        or not isinstance(plan.get("licenseDecision"), str)
+        or not plan["licenseDecision"].strip()
+        or not isinstance(plan.get("attribution"), str)
+        or not plan["attribution"].strip()
+        or plan.get("officialBaselineRepository")
+        != "https://github.com/yufan-aslp/AliMeeting"
+        or not isinstance(plan.get("officialBaselineRevision"), str)
+        or re.fullmatch(
+            r"[0-9a-f]{40}",
+            plan["officialBaselineRevision"],
+        )
+        is None
+        or plan.get("windowSelection")
+        != "textgrid-component-shortest-coverage-v1"
+        or plan.get("minimumAnnotatedOverlapSeconds") != 0.5
+        or plan.get("selectionUsesModelScores") is not False
+    ):
+        raise GlobalSampleLibraryError("AliMeeting source plan is invalid")
+    session_ids: list[str] = []
+    session_counts: list[int] = []
+    for target in sessions:
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"sessionId", "speakerCount"}
+            or not isinstance(target.get("sessionId"), str)
+            or ALIMEETING_SESSION_ID.fullmatch(target["sessionId"]) is None
+            or isinstance(target.get("speakerCount"), bool)
+            or target.get("speakerCount") not in targets
+        ):
+            raise GlobalSampleLibraryError(
+                "AliMeeting session target is invalid"
+            )
+        session_ids.append(target["sessionId"])
+        session_counts.append(target["speakerCount"])
+    if (
+        session_ids != sorted(session_ids)
+        or len(session_ids) != len(set(session_ids))
+        or sorted(set(session_counts)) != targets
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting session targets are not canonical"
+        )
+
+
+def _alimeeting_tree_evidence(root: Path) -> dict[str, Any]:
+    if root.is_symlink() or not root.is_dir():
+        raise GlobalSampleLibraryError(
+            "AliMeeting extracted root is not a regular directory"
+        )
+    try:
+        entries = sorted(root.rglob("*"), key=lambda path: path.as_posix())
+    except OSError as exc:
+        raise GlobalSampleLibraryError(
+            f"cannot enumerate AliMeeting extracted root: {exc}"
+        ) from exc
+    files: dict[str, dict[str, Any]] = {}
+    digest = hashlib.sha256()
+    total_bytes = 0
+    for path in entries:
+        if path.is_symlink():
+            raise GlobalSampleLibraryError(
+                "AliMeeting extracted root contains a symbolic link"
+            )
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise GlobalSampleLibraryError(
+                "AliMeeting extracted root contains a non-regular entry"
+            )
+        relative = path.relative_to(root).as_posix()
+        file_bytes = path.stat().st_size
+        file_sha256 = _sha256(path)
+        digest.update(
+            f"{relative}\t{file_bytes}\t{file_sha256}\n".encode("utf-8")
+        )
+        files[relative] = {
+            "path": path,
+            "bytes": file_bytes,
+            "sha256": file_sha256,
+        }
+        total_bytes += file_bytes
+    return {
+        "fileCount": len(files),
+        "bytes": total_bytes,
+        "treeSha256": digest.hexdigest(),
+        "files": files,
+    }
+
+
+def _validate_alimeeting_tree(
+    root: Path,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = _alimeeting_tree_evidence(root)
+    if (
+        evidence["fileCount"] != plan["extractedFileCount"]
+        or evidence["bytes"] != plan["extractedBytes"]
+        or evidence["treeSha256"] != plan["extractedTreeSha256"]
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting extracted tree does not match the pinned source"
+        )
+    return evidence
+
+
+def _validated_alimeeting_archive_members(
+    archive: Path,
+    plan: dict[str, Any],
+) -> list[tarfile.TarInfo]:
+    if not archive.is_file() or archive.stat().st_size != plan["archiveBytes"]:
+        raise GlobalSampleLibraryError(
+            "AliMeeting archive size does not match the pinned source"
+        )
+    if _sha256(archive) != plan["archiveSha256"]:
+        raise GlobalSampleLibraryError(
+            "AliMeeting archive SHA-256 does not match the pinned source"
+        )
+    try:
+        with tarfile.open(archive, mode="r:gz") as handle:
+            members = handle.getmembers()
+    except (OSError, tarfile.TarError) as exc:
+        raise GlobalSampleLibraryError(
+            f"cannot inspect AliMeeting archive: {exc}"
+        ) from exc
+    seen: set[str] = set()
+    regular_count = 0
+    regular_bytes = 0
+    for member in members:
+        raw_name = member.name
+        name = raw_name.rstrip("/") if member.isdir() else raw_name
+        raw_parts = name.split("/")
+        path = PurePosixPath(name)
+        if (
+            not name
+            or "\\" in name
+            or any(not part or part in {".", ".."} for part in raw_parts)
+            or path.is_absolute()
+            or not path.parts
+            or path.parts[0] != plan["extractedRootName"]
+            or any(ord(character) < 32 for character in name)
+            or name in seen
+            or not (member.isdir() or member.isreg())
+        ):
+            raise GlobalSampleLibraryError(
+                "AliMeeting archive contains an unsafe path or entry"
+            )
+        seen.add(name)
+        if member.isreg():
+            if member.size < 0:
+                raise GlobalSampleLibraryError(
+                    "AliMeeting archive contains an invalid file size"
+                )
+            regular_count += 1
+            regular_bytes += member.size
+    if (
+        regular_count != plan["extractedFileCount"]
+        or regular_bytes != plan["extractedBytes"]
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting archive inventory does not match the pinned source"
+        )
+    return members
+
+
+def _extract_alimeeting_archive(
+    archive: Path,
+    output_root: Path,
+    plan: dict[str, Any],
+    members: Sequence[tarfile.TarInfo],
+) -> Path:
+    corpus_parent = output_root / "sources" / "alimeeting" / "corpus"
+    destination = corpus_parent / plan["extractedRootName"]
+    if destination.exists():
+        _validate_alimeeting_tree(destination, plan)
+        return destination
+    staging = corpus_parent / f".{plan['extractedRootName']}.part"
+    if staging.exists():
+        raise GlobalSampleLibraryError(
+            "AliMeeting extraction staging directory already exists"
+        )
+    staging.mkdir(parents=True)
+    try:
+        with tarfile.open(archive, mode="r:gz") as handle:
+            for member in members:
+                parts = PurePosixPath(member.name.rstrip("/")).parts[1:]
+                if not parts:
+                    continue
+                target = staging.joinpath(*parts)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = handle.extractfile(member)
+                if source is None:
+                    raise GlobalSampleLibraryError(
+                        "AliMeeting archive file cannot be read"
+                    )
+                with source, target.open("xb") as destination_handle:
+                    shutil.copyfileobj(source, destination_handle, 1024 * 1024)
+        _validate_alimeeting_tree(staging, plan)
+        staging.replace(destination)
+    except (OSError, tarfile.TarError) as exc:
+        raise GlobalSampleLibraryError(
+            f"AliMeeting safe extraction failed: {exc}"
+        ) from exc
+    return destination
+
+
+def _resolve_alimeeting_corpus(
+    *,
+    output_root: Path,
+    plan: dict[str, Any],
+    archive_path: Path | None,
+    corpus_root: Path | None,
+) -> tuple[Path, dict[str, Any], bool]:
+    archive_verified = False
+    members: list[tarfile.TarInfo] | None = None
+    if archive_path is not None:
+        archive_path = archive_path.resolve()
+        members = _validated_alimeeting_archive_members(archive_path, plan)
+        archive_verified = True
+    if corpus_root is not None:
+        corpus_root = corpus_root.resolve()
+        if (
+            corpus_root.name != plan["extractedRootName"]
+            and (corpus_root / plan["extractedRootName"]).is_dir()
+        ):
+            corpus_root = corpus_root / plan["extractedRootName"]
+        evidence = _validate_alimeeting_tree(corpus_root, plan)
+        return corpus_root, evidence, archive_verified
+    if archive_path is None:
+        archive_path = (
+            output_root
+            / "sources"
+            / "alimeeting"
+            / "Eval_Ali.tar.gz"
+        )
+        _download_resumable(
+            plan["archiveUrl"],
+            archive_path,
+            expected_bytes=plan["archiveBytes"],
+        )
+        members = _validated_alimeeting_archive_members(archive_path, plan)
+        archive_verified = True
+    if members is None:
+        raise GlobalSampleLibraryError("AliMeeting archive was not inspected")
+    corpus_root = _extract_alimeeting_archive(
+        archive_path,
+        output_root,
+        plan,
+        members,
+    )
+    return (
+        corpus_root,
+        _validate_alimeeting_tree(corpus_root, plan),
+        archive_verified,
+    )
 
 
 def parse_aishell4_rttm(
@@ -404,14 +1194,32 @@ def _clip_reference_transcript(
 def select_diarization_window(
     turns: Sequence[dict[str, Any]],
     target_speaker_count: int,
+    *,
+    maximum_duration_seconds: float = 90.0,
 ) -> dict[str, Any]:
     """Choose a deterministic short window with exactly the target speaker set."""
 
-    if target_speaker_count < 1 or not turns:
+    if (
+        target_speaker_count < 1
+        or not turns
+        or isinstance(maximum_duration_seconds, bool)
+        or not isinstance(maximum_duration_seconds, (int, float))
+        or float(maximum_duration_seconds) <= 0
+        or float(maximum_duration_seconds) > MAX_WINDOW_DURATION_SECONDS
+    ):
         raise GlobalSampleLibraryError("window target and turns must be non-empty")
+    maximum_duration_seconds = float(maximum_duration_seconds)
+    durations = sorted(
+        {
+            float(duration)
+            for duration in WINDOW_DURATIONS
+            if float(duration) <= maximum_duration_seconds
+        }
+        | {maximum_duration_seconds}
+    )
     total_duration = max(float(turn["endSeconds"]) for turn in turns)
     best: tuple[tuple[Any, ...], dict[str, Any]] | None = None
-    for duration in WINDOW_DURATIONS:
+    for duration in durations:
         candidate_starts = {0.0, max(0.0, total_duration - duration)}
         for turn in turns:
             start = float(turn["startSeconds"])
@@ -506,11 +1314,18 @@ def select_diarization_window(
                 "turns": relative_turns,
                 "overlapIntervals": overlaps,
             }
+            if maximum_duration_seconds != 90.0:
+                candidate["selectionMaximumDurationSeconds"] = round(
+                    maximum_duration_seconds,
+                    6,
+                )
             if best is None or score > best[0]:
                 best = (score, candidate)
     if best is None:
         raise GlobalSampleLibraryError(
-            f"no <=90s window contains exactly {target_speaker_count} speakers"
+            "no <="
+            f"{maximum_duration_seconds:g}s window contains exactly "
+            f"{target_speaker_count} speakers"
         )
     return best[1]
 
@@ -665,6 +1480,83 @@ def _clip_audio(source: Path, output: Path, window: dict[str, Any]) -> None:
     temporary.replace(output)
 
 
+def _clip_synchronized_near_audio(
+    sources: Sequence[Path],
+    output: Path,
+    window: dict[str, Any],
+) -> None:
+    if len(sources) < 2:
+        raise GlobalSampleLibraryError(
+            "AliMeeting near-field mixture requires multiple speakers"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp.wav")
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    for source in sources:
+        command.extend(
+            [
+                "-ss",
+                f"{float(window['sourceStartSeconds']):.6f}",
+                "-t",
+                f"{float(window['durationSeconds']):.6f}",
+                "-i",
+                str(source),
+            ]
+        )
+    labels = "".join(f"[{index}:a]" for index in range(len(sources)))
+    command.extend(
+        [
+            "-filter_complex",
+            (
+                f"{labels}amix=inputs={len(sources)}:duration=longest:"
+                "dropout_transition=0:normalize=1,"
+                f"atrim=duration={float(window['durationSeconds']):.6f}[mix]"
+            ),
+            "-map",
+            "[mix]",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            str(temporary),
+        ]
+    )
+    completed = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=240,
+    )
+    if completed.returncode != 0:
+        raise GlobalSampleLibraryError(
+            "ffmpeg failed for AliMeeting synchronized near-field mixture: "
+            + completed.stderr.strip()
+        )
+    temporary.replace(output)
+
+
+def _probe_alimeeting_source_wave(path: Path, expected_channels: int) -> float:
+    try:
+        probe = _probe_audio(path)
+    except (OSError, subprocess.SubprocessError, KeyError, ValueError) as exc:
+        raise GlobalSampleLibraryError(
+            f"AliMeeting source WAV is invalid: {path.name}: {exc}"
+        ) from exc
+    if (
+        probe["codec"] != "pcm_s16le"
+        or probe["channels"] != expected_channels
+        or probe["sampleRate"] != 16_000
+        or probe["durationSeconds"] <= 0
+    ):
+        raise GlobalSampleLibraryError(
+            f"AliMeeting source WAV format is invalid: {path.name}"
+        )
+    return float(probe["durationSeconds"])
+
+
 def _probe_audio(path: Path) -> dict[str, Any]:
     completed = subprocess.run(
         [
@@ -708,7 +1600,22 @@ def _case_record(
     source_artifact_path: Path,
     output_root: Path,
     window: dict[str, Any],
+    evaluation_split: str,
+    maximum_duration_seconds: float = 90.0,
 ) -> dict[str, Any]:
+    if evaluation_split not in EVALUATION_SPLITS:
+        raise GlobalSampleLibraryError(
+            f"{case_id} evaluation split is invalid"
+        )
+    if (
+        isinstance(maximum_duration_seconds, bool)
+        or not isinstance(maximum_duration_seconds, (int, float))
+        or float(maximum_duration_seconds) <= 0
+        or float(maximum_duration_seconds) > MAX_WINDOW_DURATION_SECONDS
+    ):
+        raise GlobalSampleLibraryError(
+            f"{case_id} maximum duration is invalid"
+        )
     output = output_root / "audio" / f"{case_id}.wav"
     _clip_audio(source_path, output, window)
     probe = _probe_audio(output)
@@ -716,7 +1623,7 @@ def _case_record(
         probe["codec"] != "pcm_s16le"
         or probe["sampleRate"] != 16_000
         or probe["channels"] != 1
-        or probe["durationSeconds"] > 90.05
+        or probe["durationSeconds"] > float(maximum_duration_seconds) + 0.05
     ):
         raise GlobalSampleLibraryError(f"{case_id} normalized audio is invalid")
     return {
@@ -734,6 +1641,7 @@ def _case_record(
         "sha256": _sha256(output),
         "audio": probe,
         "realOrSynthetic": "real-recording",
+        "evaluationSplit": evaluation_split,
         "expectedSpeakerCount": len(window["speakerSet"]),
         "speakerSet": window["speakerSet"],
         "windowSelection": {
@@ -930,6 +1838,7 @@ def _build_aishell4(
     session_id = plan.get("sessionId")
     split = plan.get("split")
     targets = plan.get("targetSpeakerCounts")
+    evaluation_split = plan.get("evaluationSplit")
     if (
         not isinstance(session_id, str)
         or split != "test"
@@ -941,6 +1850,7 @@ def _build_aishell4(
             or target < 2
             for target in targets
         )
+        or evaluation_split not in EVALUATION_SPLITS
     ):
         raise GlobalSampleLibraryError("AISHELL-4 target plan is invalid")
     paths, annotation_evidence = _download_aishell4_annotations(
@@ -1061,7 +1971,7 @@ def _build_aishell4(
                 "realOrSynthetic": "real-recording",
                 "language": "zh-CN",
                 "region": "East Asia",
-                "evaluationSplit": "held-out",
+                "evaluationSplit": evaluation_split,
                 "scenario": [
                     "real-recording",
                     "far-field-meeting",
@@ -1135,12 +2045,334 @@ def _planned_by_id(manifest: Any, source_id: str) -> dict[str, Any]:
     raise GlobalSampleLibraryError(f"real diarization plan is missing: {source_id}")
 
 
+def _alimeeting_file_evidence(
+    root: Path,
+    tree_evidence: dict[str, Any],
+    path: Path,
+) -> dict[str, Any]:
+    relative = path.relative_to(root).as_posix()
+    entry = tree_evidence["files"].get(relative)
+    if not isinstance(entry, dict) or entry.get("path") != path:
+        raise GlobalSampleLibraryError(
+            f"AliMeeting file is absent from pinned tree: {relative}"
+        )
+    return {
+        "path": relative,
+        "bytes": entry["bytes"],
+        "sha256": entry["sha256"],
+    }
+
+
+def _discover_alimeeting_sessions(
+    root: Path,
+    plan: dict[str, Any],
+    tree_evidence: dict[str, Any],
+) -> list[dict[str, Any]]:
+    far_audio_dir = root / "Eval_Ali_far" / "audio_dir"
+    far_textgrid_dir = root / "Eval_Ali_far" / "textgrid_dir"
+    near_audio_dir = root / "Eval_Ali_near" / "audio_dir"
+    near_textgrid_dir = root / "Eval_Ali_near" / "textgrid_dir"
+    if not all(
+        path.is_dir()
+        for path in (
+            far_audio_dir,
+            far_textgrid_dir,
+            near_audio_dir,
+            near_textgrid_dir,
+        )
+    ):
+        raise GlobalSampleLibraryError(
+            "AliMeeting Eval near/far directory layout is invalid"
+        )
+    sessions: list[dict[str, Any]] = []
+    for target in plan["sessionTargets"]:
+        session_id = target["sessionId"]
+        speaker_count = target["speakerCount"]
+        far_audio_candidates = sorted(
+            far_audio_dir.glob(f"{session_id}_MS[0-9][0-9][0-9].wav")
+        )
+        far_textgrid = far_textgrid_dir / f"{session_id}.TextGrid"
+        if len(far_audio_candidates) != 1 or not far_textgrid.is_file():
+            raise GlobalSampleLibraryError(
+                f"AliMeeting far source pair is invalid: {session_id}"
+            )
+        far_audio = far_audio_candidates[0]
+        far_grid = parse_alimeeting_textgrid(
+            far_textgrid.read_text(encoding="utf-8")
+        )
+        turns = alimeeting_textgrid_turns(far_grid)
+        speaker_set = sorted({str(turn["speakerId"]) for turn in turns})
+        if len(speaker_set) != speaker_count:
+            raise GlobalSampleLibraryError(
+                f"AliMeeting speaker count does not match plan: {session_id}"
+            )
+        far_duration = _probe_alimeeting_source_wave(far_audio, 8)
+        if far_duration + 0.01 < float(far_grid["endSeconds"]):
+            raise GlobalSampleLibraryError(
+                f"AliMeeting far audio is shorter than truth: {session_id}"
+            )
+        far_tiers = {str(tier["name"]): tier for tier in far_grid["tiers"]}
+        near_audio: list[Path] = []
+        near_audio_evidence: list[dict[str, Any]] = []
+        near_textgrid_evidence: list[dict[str, Any]] = []
+        for speaker_id in speaker_set:
+            near_stem = f"{session_id}_{speaker_id}"
+            speaker_audio = near_audio_dir / f"{near_stem}.wav"
+            speaker_textgrid = near_textgrid_dir / f"{near_stem}.TextGrid"
+            if not speaker_audio.is_file() or not speaker_textgrid.is_file():
+                raise GlobalSampleLibraryError(
+                    f"AliMeeting near source pair is missing: {near_stem}"
+                )
+            near_grid = parse_alimeeting_textgrid(
+                speaker_textgrid.read_text(encoding="utf-8")
+            )
+            if (
+                len(near_grid["tiers"]) != 1
+                or near_grid["tiers"][0]["intervals"]
+                != far_tiers[speaker_id]["intervals"]
+            ):
+                raise GlobalSampleLibraryError(
+                    "AliMeeting synchronized near/far TextGrid truth differs: "
+                    + near_stem
+                )
+            near_duration = _probe_alimeeting_source_wave(speaker_audio, 1)
+            if near_duration + 0.01 < float(near_grid["endSeconds"]):
+                raise GlobalSampleLibraryError(
+                    f"AliMeeting near audio is shorter than truth: {near_stem}"
+                )
+            near_audio.append(speaker_audio)
+            near_audio_evidence.append(
+                _alimeeting_file_evidence(root, tree_evidence, speaker_audio)
+            )
+            near_textgrid_evidence.append(
+                _alimeeting_file_evidence(root, tree_evidence, speaker_textgrid)
+            )
+        sessions.append(
+            {
+                "sessionId": session_id,
+                "speakerCount": speaker_count,
+                "speakerSet": speaker_set,
+                "turns": turns,
+                "farAudio": far_audio,
+                "farAudioEvidence": _alimeeting_file_evidence(
+                    root,
+                    tree_evidence,
+                    far_audio,
+                ),
+                "farTextGridEvidence": _alimeeting_file_evidence(
+                    root,
+                    tree_evidence,
+                    far_textgrid,
+                ),
+                "nearAudio": near_audio,
+                "nearAudioEvidence": near_audio_evidence,
+                "nearTextGridEvidence": near_textgrid_evidence,
+            }
+        )
+    return sessions
+
+
+def _alimeeting_case_record(
+    *,
+    output_root: Path,
+    plan: dict[str, Any],
+    session: dict[str, Any],
+    window: dict[str, Any],
+    modality: str,
+) -> dict[str, Any]:
+    session_id = str(session["sessionId"])
+    speaker_count = int(session["speakerCount"])
+    if modality == "far-field-array":
+        suffix = "far"
+        source_audio = [session["farAudio"]]
+        source_evidence = [session["farAudioEvidence"]]
+        real_or_synthetic = "real-recording"
+        scenarios = [
+            "real-recording",
+            "far-field-meeting",
+            "multichannel-source",
+            "overlap",
+            "rapid-turns",
+        ]
+    elif modality == "synchronized-near-field-mixture":
+        suffix = "near-mix"
+        source_audio = list(session["nearAudio"])
+        source_evidence = list(session["nearAudioEvidence"])
+        real_or_synthetic = "synthetic-mixture"
+        scenarios = [
+            "synthetic-mixture",
+            "synchronized-near-field",
+            "close-talk",
+            "overlap",
+            "rapid-turns",
+        ]
+    else:
+        raise GlobalSampleLibraryError("AliMeeting modality is unsupported")
+    case_id = f"alimeeting-eval-{session_id.lower()}-{suffix}-n{speaker_count}"
+    output = output_root / "audio" / f"{case_id}.wav"
+    if modality == "far-field-array":
+        _clip_audio(source_audio[0], output, window)
+    else:
+        _clip_synchronized_near_audio(source_audio, output, window)
+    probe = _probe_audio(output)
+    if (
+        probe["codec"] != "pcm_s16le"
+        or probe["sampleRate"] != 16_000
+        or probe["channels"] != 1
+        or probe["durationSeconds"] > 90.05
+    ):
+        raise GlobalSampleLibraryError(
+            f"AliMeeting normalized audio is invalid: {case_id}"
+        )
+    references = _clip_reference_transcript(session["turns"], window)
+    scoring_transcript = "".join(
+        str(reference["transcript"]) for reference in references
+    )
+    if not scoring_transcript:
+        raise GlobalSampleLibraryError(
+            f"AliMeeting ASR truth is empty: {case_id}"
+        )
+    return {
+        "id": case_id,
+        "sourceId": "alimeeting",
+        "sourceDataset": plan["dataset"],
+        "sourceRevision": plan["revision"],
+        "sourceSessionId": session_id,
+        "sourceModality": modality,
+        "sourceArtifactPath": session["farTextGridEvidence"]["path"],
+        "sourceArtifactSha256": session["farTextGridEvidence"]["sha256"],
+        "sourceAudioArtifacts": source_evidence,
+        "path": str(output.relative_to(output_root)),
+        "bytes": output.stat().st_size,
+        "sha256": _sha256(output),
+        "audio": probe,
+        "realOrSynthetic": real_or_synthetic,
+        "language": "zh-CN",
+        "region": "East Asia",
+        "evaluationSplit": plan["evaluationSplit"],
+        "scenario": scenarios,
+        "expectedSpeakerCount": len(window["speakerSet"]),
+        "speakerSet": window["speakerSet"],
+        "windowSelection": {
+            **{
+                key: value
+                for key, value in window.items()
+                if key not in {"turns", "overlapIntervals"}
+            },
+            "selectionUsesModelScores": False,
+        },
+        "turns": window["turns"],
+        "overlapIntervals": window["overlapIntervals"],
+        "referenceTranscriptTurns": references,
+        "scoringTranscript": scoring_transcript,
+        "asrReferenceMode": (
+            "official-textgrid-whole-utterances-serialized-by-"
+            "start-end-speaker-v1"
+        ),
+        "derJerReferenceMode": "official-far-textgrid-speaker-intervals-v1",
+        "transcript": scoring_transcript,
+        "truthEligibility": {
+            "speakerCount": True,
+            "turnBoundaries": True,
+            "overlap": True,
+            "derJer": True,
+            "asr": True,
+            "language": True,
+        },
+    }
+
+
+def _build_alimeeting(
+    manifest: Any,
+    output_root: Path,
+    *,
+    archive_path: Path | None = None,
+    corpus_root: Path | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    plan = _planned_by_id(manifest, "alimeeting")
+    _validate_alimeeting_plan(plan)
+    root, tree_evidence, archive_verified = _resolve_alimeeting_corpus(
+        output_root=output_root,
+        plan=plan,
+        archive_path=archive_path,
+        corpus_root=corpus_root,
+    )
+    sessions = _discover_alimeeting_sessions(root, plan, tree_evidence)
+    cases: list[dict[str, Any]] = []
+    for session in sessions:
+        window = select_alimeeting_textgrid_window(
+            session["turns"],
+            session["speakerCount"],
+            minimum_duration_seconds=10.0,
+            maximum_duration_seconds=90.0,
+            minimum_overlap_seconds=plan["minimumAnnotatedOverlapSeconds"],
+        )
+        for modality in plan["modalities"]:
+            cases.append(
+                _alimeeting_case_record(
+                    output_root=output_root,
+                    plan=plan,
+                    session=session,
+                    window=window,
+                    modality=modality,
+                )
+            )
+    session_inventory = [
+        {
+            "sessionId": session["sessionId"],
+            "speakerCount": session["speakerCount"],
+            "speakerSet": session["speakerSet"],
+            "farAudio": session["farAudioEvidence"],
+            "farTextGrid": session["farTextGridEvidence"],
+            "nearAudio": session["nearAudioEvidence"],
+            "nearTextGrid": session["nearTextGridEvidence"],
+        }
+        for session in sessions
+    ]
+    return cases, {
+        "sourceId": "alimeeting",
+        "provider": plan["provider"],
+        "dataset": plan["dataset"],
+        "revision": plan["revision"],
+        "license": plan["license"],
+        "licenseDecision": plan["licenseDecision"],
+        "attribution": plan["attribution"],
+        "split": plan["split"],
+        "archive": {
+            "url": plan["archiveUrl"],
+            "bytes": plan["archiveBytes"],
+            "sha256": plan["archiveSha256"],
+            "crc64": plan["archiveCrc64"],
+            "verifiedThisRun": archive_verified,
+        },
+        "extractedTree": {
+            "rootName": plan["extractedRootName"],
+            "fileCount": tree_evidence["fileCount"],
+            "bytes": tree_evidence["bytes"],
+            "sha256": tree_evidence["treeSha256"],
+        },
+        "targetSpeakerCounts": plan["targetSpeakerCounts"],
+        "unsupportedTargetSpeakerCounts": plan[
+            "unsupportedTargetSpeakerCounts"
+        ],
+        "modalities": plan["modalities"],
+        "selectionUsesModelScores": False,
+        "officialHomepage": plan["officialHomepage"],
+        "officialBaselineRepository": plan["officialBaselineRepository"],
+        "officialBaselineRevision": plan["officialBaselineRevision"],
+        "sessions": session_inventory,
+    }
+
+
 def _build_ami(
     manifest: Any,
     output_root: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     source = _source_by_id(manifest, "ami")
     plan = _planned_by_id(manifest, "ami")
+    evaluation_split = plan.get("evaluationSplit")
+    if evaluation_split not in EVALUATION_SPLITS:
+        raise GlobalSampleLibraryError("AMI evaluation split is invalid")
     params = urllib.parse.urlencode(
         {
             "dataset": source.dataset,
@@ -1208,6 +2440,7 @@ def _build_ami(
             source_artifact_path=metadata_path,
             output_root=output_root,
             window=select_diarization_window(turns, target),
+            evaluation_split=evaluation_split,
         )
         for target in plan["targetSpeakerCounts"]
     ]
@@ -1225,6 +2458,97 @@ def _build_ami(
     }
 
 
+def _voxconverse_shard_plans(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_shards = plan.get("parquetShards")
+    legacy = raw_shards is None
+    shards = (
+        [
+            {
+                "config": plan.get("config"),
+                "split": plan.get("split"),
+                "parquetPath": plan.get("parquetPath"),
+                "parquetBytes": plan.get("parquetBytes"),
+                "parquetSha256": plan.get("parquetSha256"),
+                "rowTargets": plan.get("rowTargets"),
+            }
+        ]
+        if legacy
+        else raw_shards
+    )
+    if not isinstance(shards, list) or not shards:
+        raise GlobalSampleLibraryError("VoxConverse parquet shards are invalid")
+    normalized: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for index, raw in enumerate(shards):
+        if not isinstance(raw, dict):
+            raise GlobalSampleLibraryError("VoxConverse parquet shard is invalid")
+        parquet_path = raw.get("parquetPath")
+        parquet_bytes = raw.get("parquetBytes")
+        parquet_sha256 = raw.get("parquetSha256")
+        config = raw.get("config")
+        split = raw.get("split")
+        row_targets = raw.get("rowTargets")
+        safe_path = PurePosixPath(parquet_path) if isinstance(parquet_path, str) else None
+        if (
+            safe_path is None
+            or safe_path.is_absolute()
+            or ".." in safe_path.parts
+            or safe_path.suffix != ".parquet"
+            or parquet_path in seen_paths
+            or isinstance(parquet_bytes, bool)
+            or not isinstance(parquet_bytes, int)
+            or parquet_bytes <= 0
+            or not _is_sha256(parquet_sha256)
+            or not isinstance(config, str)
+            or not config
+            or split not in {"dev", "test"}
+            or not isinstance(row_targets, list)
+            or not row_targets
+        ):
+            raise GlobalSampleLibraryError("VoxConverse parquet shard is invalid")
+        seen_paths.add(parquet_path)
+        normalized.append(
+            {
+                "index": index,
+                "legacyNames": legacy,
+                "config": config,
+                "split": split,
+                "parquetPath": parquet_path,
+                "parquetBytes": parquet_bytes,
+                "parquetSha256": parquet_sha256,
+                "rowTargets": row_targets,
+            }
+        )
+    return normalized
+
+
+def _voxconverse_parquet_row(parquet_file: Any, row_index: int) -> dict[str, Any]:
+    if row_index < 0 or row_index >= parquet_file.metadata.num_rows:
+        raise GlobalSampleLibraryError("VoxConverse row target is out of range")
+    offset = 0
+    for group_index in range(parquet_file.num_row_groups):
+        group_rows = parquet_file.metadata.row_group(group_index).num_rows
+        if offset <= row_index < offset + group_rows:
+            rows = parquet_file.read_row_group(
+                group_index,
+                columns=["audio", "timestamps_start", "timestamps_end", "speakers"],
+            ).slice(row_index - offset, 1)
+            values = rows.to_pylist()
+            if len(values) != 1 or not isinstance(values[0], dict):
+                break
+            return values[0]
+        offset += group_rows
+    raise GlobalSampleLibraryError("VoxConverse parquet row is missing")
+
+
+def _voxconverse_shard_label(parquet_path: str) -> str:
+    stem = PurePosixPath(parquet_path).stem
+    label = re.sub(r"[^a-z0-9]+", "-", stem.casefold()).strip("-")
+    if not label:
+        raise GlobalSampleLibraryError("VoxConverse parquet label is invalid")
+    return label
+
+
 def _build_voxconverse(
     manifest: Any,
     output_root: Path,
@@ -1233,87 +2557,128 @@ def _build_voxconverse(
 
     source = _source_by_id(manifest, "voxconverse")
     plan = _planned_by_id(manifest, "voxconverse")
-    parquet_path = plan.get("parquetPath")
-    parquet_bytes = plan.get("parquetBytes")
-    row_targets = plan.get("rowTargets")
-    if (
-        not isinstance(parquet_path, str)
-        or not isinstance(parquet_bytes, int)
-        or not isinstance(row_targets, list)
-    ):
-        raise GlobalSampleLibraryError("VoxConverse parquet plan is invalid")
-    source_url = (
-        f"https://huggingface.co/datasets/{source.dataset}/resolve/"
-        f"{source.revision}/{parquet_path}"
-    )
-    local_parquet = output_root / "sources" / Path(parquet_path).name
-    _download_resumable(
-        source_url,
-        local_parquet,
-        expected_bytes=parquet_bytes,
-    )
-    table = pq.read_table(
-        local_parquet,
-        columns=["audio", "timestamps_start", "timestamps_end", "speakers"],
-    )
+    shard_plans = _voxconverse_shard_plans(plan)
     cases: list[dict[str, Any]] = []
-    for target in row_targets:
-        if not isinstance(target, dict):
-            raise GlobalSampleLibraryError("VoxConverse row target is invalid")
-        row_index = target.get("rowIndex")
-        speaker_count = target.get("targetSpeakerCount")
-        if (
-            not isinstance(row_index, int)
-            or not isinstance(speaker_count, int)
-            or row_index < 0
-            or row_index >= table.num_rows
-        ):
-            raise GlobalSampleLibraryError("VoxConverse row target is out of range")
-        row = table.slice(row_index, 1).to_pylist()[0]
-        audio = row.get("audio")
-        if (
-            not isinstance(audio, dict)
-            or not isinstance(audio.get("bytes"), bytes)
-            or not audio["bytes"]
-        ):
+    source_shards: list[dict[str, Any]] = []
+    seen_case_ids: set[str] = set()
+    seen_targets: set[tuple[str, int, int, str]] = set()
+    for shard in shard_plans:
+        parquet_path = str(shard["parquetPath"])
+        source_url = (
+            f"https://huggingface.co/datasets/{source.dataset}/resolve/"
+            f"{source.revision}/{parquet_path}"
+        )
+        local_parquet = output_root / "sources" / PurePosixPath(parquet_path).name
+        _download_resumable(
+            source_url,
+            local_parquet,
+            expected_bytes=int(shard["parquetBytes"]),
+        )
+        actual_parquet_sha256 = _sha256(local_parquet)
+        if actual_parquet_sha256 != shard["parquetSha256"]:
             raise GlobalSampleLibraryError(
-                f"VoxConverse row {row_index} audio bytes are missing"
+                "VoxConverse parquet SHA-256 does not match the pinned source"
             )
-        source_audio = (
-            output_root
-            / "sources"
-            / f"voxconverse_dev_row_{row_index:03d}.wav"
+        parquet_file = pq.ParquetFile(local_parquet)
+        shard_label = _voxconverse_shard_label(parquet_path)
+        source_shards.append(
+            {
+                "config": shard["config"],
+                "split": shard["split"],
+                "sourcePath": parquet_path,
+                "path": str(local_parquet.relative_to(output_root)),
+                "bytes": local_parquet.stat().st_size,
+                "sha256": actual_parquet_sha256,
+            }
         )
-        source_audio.write_bytes(audio["bytes"])
-        metadata_path = (
-            output_root
-            / "sources"
-            / f"voxconverse_dev_row_{row_index:03d}.json"
-        )
-        metadata_path.write_text(
-            json.dumps(
-                {
-                    "dataset": source.dataset,
-                    "revision": source.revision,
-                    "config": plan["config"],
-                    "split": plan["split"],
-                    "rowIndex": row_index,
-                    "path": audio.get("path"),
-                    "timestamps_start": row["timestamps_start"],
-                    "timestamps_end": row["timestamps_end"],
-                    "speakers": row["speakers"],
-                },
-                ensure_ascii=False,
-                indent=2,
+        for target in shard["rowTargets"]:
+            if not isinstance(target, dict):
+                raise GlobalSampleLibraryError("VoxConverse row target is invalid")
+            row_index = target.get("rowIndex")
+            speaker_count = target.get("targetSpeakerCount")
+            evaluation_split = target.get("evaluationSplit")
+            maximum_duration = target.get("maximumDurationSeconds", 90.0)
+            if (
+                isinstance(row_index, bool)
+                or not isinstance(row_index, int)
+                or isinstance(speaker_count, bool)
+                or not isinstance(speaker_count, int)
+                or speaker_count < 1
+                or evaluation_split not in EVALUATION_SPLITS
+                or isinstance(maximum_duration, bool)
+                or not isinstance(maximum_duration, (int, float))
+                or float(maximum_duration) <= 0
+                or float(maximum_duration) > MAX_WINDOW_DURATION_SECONDS
+            ):
+                raise GlobalSampleLibraryError("VoxConverse row target is invalid")
+            target_identity = (
+                parquet_path,
+                row_index,
+                speaker_count,
+                str(evaluation_split),
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        turns = _turns(row)
-        window = select_diarization_window(turns, speaker_count)
-        cases.append(
-            _case_record(
-                case_id=f"voxconverse-dev-row{row_index:03d}-n{speaker_count}",
+            if target_identity in seen_targets:
+                raise GlobalSampleLibraryError("VoxConverse row target is repeated")
+            seen_targets.add(target_identity)
+            row = _voxconverse_parquet_row(parquet_file, row_index)
+            audio = row.get("audio")
+            if (
+                not isinstance(audio, dict)
+                or not isinstance(audio.get("bytes"), bytes)
+                or not audio["bytes"]
+            ):
+                raise GlobalSampleLibraryError(
+                    f"VoxConverse row {row_index} audio bytes are missing"
+                )
+            if shard["legacyNames"]:
+                source_stem = f"voxconverse_dev_row_{row_index:03d}"
+                case_id = (
+                    f"voxconverse-dev-row{row_index:03d}-n{speaker_count}"
+                )
+            else:
+                source_stem = (
+                    "voxconverse_"
+                    f"{shard_label.replace('-', '_')}_row_{row_index:03d}"
+                )
+                case_id = (
+                    f"voxconverse-{shard_label}-row{row_index:03d}-"
+                    f"n{speaker_count}"
+                )
+            if case_id in seen_case_ids:
+                raise GlobalSampleLibraryError("VoxConverse case ID is repeated")
+            seen_case_ids.add(case_id)
+            source_audio = output_root / "sources" / f"{source_stem}.wav"
+            source_audio.write_bytes(audio["bytes"])
+            metadata_path = output_root / "sources" / f"{source_stem}.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": source.dataset,
+                        "revision": source.revision,
+                        "config": shard["config"],
+                        "split": shard["split"],
+                        "parquetPath": parquet_path,
+                        "parquetSha256": actual_parquet_sha256,
+                        "rowIndex": row_index,
+                        "path": audio.get("path"),
+                        "timestamps_start": row["timestamps_start"],
+                        "timestamps_end": row["timestamps_end"],
+                        "speakers": row["speakers"],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            turns = _turns(row)
+            window = select_diarization_window(
+                turns,
+                speaker_count,
+                maximum_duration_seconds=float(maximum_duration),
+            )
+            case = _case_record(
+                case_id=case_id,
                 source_id=source.source_id,
                 source_dataset=source.dataset,
                 source_revision=source.revision,
@@ -1322,24 +2687,52 @@ def _build_voxconverse(
                 source_artifact_path=metadata_path,
                 output_root=output_root,
                 window=window,
+                evaluation_split=evaluation_split,
+                maximum_duration_seconds=float(maximum_duration),
             )
-        )
-    return cases, {
+            case["acquisition"] = {
+                "kind": "hf-pinned-parquet-row",
+                "config": shard["config"],
+                "split": shard["split"],
+                "rowIndex": row_index,
+                "parquetPath": parquet_path,
+            }
+            case["language"] = "en-US"
+            case["region"] = "Global"
+            case["scenario"] = [
+                "real-recording",
+                "meeting-speech",
+                "high-speaker-count",
+            ]
+            cases.append(case)
+    source_record = {
         "sourceId": source.source_id,
         "dataset": source.dataset,
         "revision": source.revision,
         "license": source.license,
         "attribution": source.attribution,
-        "parquetPath": str(local_parquet.relative_to(output_root)),
-        "parquetBytes": local_parquet.stat().st_size,
-        "parquetSha256": _sha256(local_parquet),
+        "languageTags": ["en-US"],
     }
+    if len(source_shards) == 1 and shard_plans[0]["legacyNames"]:
+        source_record.update(
+            {
+                "parquetPath": source_shards[0]["path"],
+                "parquetBytes": source_shards[0]["bytes"],
+                "parquetSha256": source_shards[0]["sha256"],
+            }
+        )
+    else:
+        source_record["parquetShards"] = source_shards
+    return cases, source_record
 
 
 def build_real_diarization_library(
     manifest_path: Path,
     output_root: Path,
     source_ids: Sequence[str] | None = None,
+    *,
+    alimeeting_archive: Path | None = None,
+    alimeeting_root: Path | None = None,
 ) -> Path:
     manifest = load_global_manifest(manifest_path)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1347,6 +2740,7 @@ def build_real_diarization_library(
         "ami": _build_ami,
         "voxconverse": _build_voxconverse,
         "aishell4": _build_aishell4,
+        "alimeeting": _build_alimeeting,
     }
     selected = list(source_ids) if source_ids else list(builders)
     unknown = sorted(set(selected) - set(builders))
@@ -1361,10 +2755,18 @@ def build_real_diarization_library(
     cases: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
     for source_id in selected:
-        source_cases, source_record = builders[source_id](
-            manifest,
-            output_root,
-        )
+        if source_id == "alimeeting":
+            source_cases, source_record = _build_alimeeting(
+                manifest,
+                output_root,
+                archive_path=alimeeting_archive,
+                corpus_root=alimeeting_root,
+            )
+        else:
+            source_cases, source_record = builders[source_id](
+                manifest,
+                output_root,
+            )
         cases.extend(source_cases)
         sources.append(source_record)
     attribution = output_root / "ATTRIBUTION.md"
@@ -1386,16 +2788,26 @@ def build_real_diarization_library(
         "sourceManifest": str(manifest_path.resolve()),
         "sourceManifestSha256": _sha256(manifest_path),
         "windowSelection": {
-            "algorithm": "event-boundary-max-overlap-v1",
-            "candidateDurationsSeconds": list(WINDOW_DURATIONS),
+            "algorithms": sorted(
+                {
+                    str(case["windowSelection"]["algorithm"])
+                    for case in cases
+                }
+            ),
             "minimumPerSpeakerAnnotatedSeconds": MIN_SPEAKER_SECONDS,
             "maximumDurationSeconds": manifest.max_duration_seconds,
+            "selectionUsesModelScores": any(
+                case["windowSelection"].get("selectionUsesModelScores", False)
+                is True
+                for case in cases
+            ),
         },
         "sources": sources,
         "cases": cases,
         "failedCases": [],
         "attributionPath": str(attribution.relative_to(output_root)),
     }
+    resolved["canonicalSha256"] = canonical_json_sha256(resolved)
     destination = output_root / RESOLVED_NAME
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(
@@ -1413,9 +2825,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source",
         action="append",
-        choices=("ami", "voxconverse", "aishell4"),
+        choices=("ami", "voxconverse", "aishell4", "alimeeting"),
         default=[],
         help="build only the selected source; repeat to select multiple",
+    )
+    parser.add_argument(
+        "--alimeeting-archive",
+        type=Path,
+        help=(
+            "local pinned Eval_Ali.tar.gz; omitted only when using an "
+            "already verified --alimeeting-root or allowing download"
+        ),
+    )
+    parser.add_argument(
+        "--alimeeting-root",
+        type=Path,
+        help="local extracted Eval_Ali root validated by its pinned tree hash",
     )
     return parser
 
@@ -1426,6 +2851,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.manifest,
         args.output_root,
         source_ids=args.source,
+        alimeeting_archive=args.alimeeting_archive,
+        alimeeting_root=args.alimeeting_root,
     )
     resolved = json.loads(destination.read_text(encoding="utf-8"))
     print(

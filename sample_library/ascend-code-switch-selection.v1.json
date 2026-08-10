@@ -1,0 +1,243 @@
+{
+  "schemaVersion": "1.0.0",
+  "libraryId": "mts-caire-ascend-code-switch-v1",
+  "source": {
+    "dataset": "CAiRE/ASCEND",
+    "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+    "config": "main",
+    "license": "cc-by-sa-4.0",
+    "homepage": "https://huggingface.co/datasets/CAiRE/ASCEND",
+    "attributionPath": "ascend-code-switch/ATTRIBUTION.md"
+  },
+  "selectionPolicy": {
+    "sourceSplitByEvaluationSplit": {
+      "development": "validation",
+      "held-out": "test"
+    },
+    "sourceLanguageLabel": "mixed",
+    "casesPerEvaluationSplit": 6,
+    "durationBuckets": [
+      {
+        "id": "short",
+        "minimumSecondsInclusive": 0.0,
+        "maximumSecondsExclusive": 3.0,
+        "casesPerEvaluationSplit": 2
+      },
+      {
+        "id": "medium",
+        "minimumSecondsInclusive": 3.0,
+        "maximumSecondsExclusive": 6.0,
+        "casesPerEvaluationSplit": 2
+      },
+      {
+        "id": "long",
+        "minimumSecondsInclusive": 6.0,
+        "maximumSecondsExclusive": null,
+        "casesPerEvaluationSplit": 2
+      }
+    ],
+    "minimumDistinctSpeakersOverall": 3,
+    "minimumDistinctSpeakerSessionsPerEvaluationSplit": 3,
+    "minimumDistinctTopicsPerEvaluationSplit": 3,
+    "speakerDisjointEvaluationSplits": true,
+    "heldOutSpeakerLimitation": {
+      "availableDistinctSpeakersInTestMixed": 2,
+      "selectedDistinctSpeakers": 2,
+      "note": "The pinned test/mixed source rows contain only two speaker identities, so a three-speaker held-out claim is impossible. Coverage is reported without extrapolation."
+    }
+  },
+  "cases": [
+    {
+      "id": "ascend-dev-validation-00953",
+      "evaluationSplit": "development",
+      "durationBucket": "short",
+      "durationSeconds": 1.24,
+      "topic": "sports",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "validation",
+        "id": "00953",
+        "rowIndex": 953,
+        "speaker": 12,
+        "session": 4
+      }
+    },
+    {
+      "id": "ascend-dev-validation-00067",
+      "evaluationSplit": "development",
+      "durationBucket": "short",
+      "durationSeconds": 2.94,
+      "topic": "technology",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "validation",
+        "id": "00067",
+        "rowIndex": 67,
+        "speaker": 20,
+        "session": 4
+      }
+    },
+    {
+      "id": "ascend-dev-validation-00516",
+      "evaluationSplit": "development",
+      "durationBucket": "medium",
+      "durationSeconds": 4.35,
+      "topic": "education",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "validation",
+        "id": "00516",
+        "rowIndex": 516,
+        "speaker": 12,
+        "session": 2
+      }
+    },
+    {
+      "id": "ascend-dev-validation-00037",
+      "evaluationSplit": "development",
+      "durationBucket": "medium",
+      "durationSeconds": 5.52,
+      "topic": "technology",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "validation",
+        "id": "00037",
+        "rowIndex": 37,
+        "speaker": 20,
+        "session": 4
+      }
+    },
+    {
+      "id": "ascend-dev-validation-00621",
+      "evaluationSplit": "development",
+      "durationBucket": "long",
+      "durationSeconds": 11.22,
+      "topic": "education",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "validation",
+        "id": "00621",
+        "rowIndex": 621,
+        "speaker": 20,
+        "session": 2
+      }
+    },
+    {
+      "id": "ascend-dev-validation-00340",
+      "evaluationSplit": "development",
+      "durationBucket": "long",
+      "durationSeconds": 7.96,
+      "topic": "persona",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "validation",
+        "id": "00340",
+        "rowIndex": 340,
+        "speaker": 7,
+        "session": 1
+      }
+    },
+    {
+      "id": "ascend-held-test-00368",
+      "evaluationSplit": "held-out",
+      "durationBucket": "short",
+      "durationSeconds": 2.96,
+      "topic": "persona",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "test",
+        "id": "00368",
+        "rowIndex": 368,
+        "speaker": 3,
+        "session": 1
+      }
+    },
+    {
+      "id": "ascend-held-test-01283",
+      "evaluationSplit": "held-out",
+      "durationBucket": "short",
+      "durationSeconds": 2.66,
+      "topic": "technology",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "test",
+        "id": "01283",
+        "rowIndex": 1283,
+        "speaker": 17,
+        "session": 4
+      }
+    },
+    {
+      "id": "ascend-held-test-00228",
+      "evaluationSplit": "held-out",
+      "durationBucket": "medium",
+      "durationSeconds": 5.9,
+      "topic": "persona",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "test",
+        "id": "00228",
+        "rowIndex": 228,
+        "speaker": 3,
+        "session": 1
+      }
+    },
+    {
+      "id": "ascend-held-test-00919",
+      "evaluationSplit": "held-out",
+      "durationBucket": "medium",
+      "durationSeconds": 3.34,
+      "topic": "education",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "test",
+        "id": "00919",
+        "rowIndex": 919,
+        "speaker": 17,
+        "session": 3
+      }
+    },
+    {
+      "id": "ascend-held-test-00386",
+      "evaluationSplit": "held-out",
+      "durationBucket": "long",
+      "durationSeconds": 7.52,
+      "topic": "persona",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "test",
+        "id": "00386",
+        "rowIndex": 386,
+        "speaker": 3,
+        "session": 1
+      }
+    },
+    {
+      "id": "ascend-held-test-00955",
+      "evaluationSplit": "held-out",
+      "durationBucket": "long",
+      "durationSeconds": 6.46,
+      "topic": "education",
+      "stableKey": {
+        "revision": "737e9800ae31be9932ba8464c80366559bd28424",
+        "config": "main",
+        "split": "test",
+        "id": "00955",
+        "rowIndex": 955,
+        "speaker": 17,
+        "session": 3
+      }
+    }
+  ]
+}

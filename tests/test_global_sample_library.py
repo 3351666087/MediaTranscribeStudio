@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import sys
+import tarfile
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -21,13 +24,20 @@ from tools.build_global_sample_library import (
     _streaming_row,
 )
 from tools.build_global_derived_matrix import overlap_intervals
+import tools.build_global_real_diarization as real_diarization_builder
 from tools.build_global_real_diarization import (
+    _alimeeting_tree_evidence,
     _clip_reference_transcript,
+    _validated_alimeeting_archive_members,
     align_diarization_window_to_stm,
+    alimeeting_textgrid_turns,
+    parse_alimeeting_textgrid,
     parse_aishell4_rttm,
     parse_aishell4_stm,
     parse_aishell4_textgrid_audio_tier,
+    select_alimeeting_textgrid_window,
     select_diarization_window,
+    _voxconverse_shard_plans,
 )
 
 
@@ -39,7 +49,7 @@ def test_global_manifest_covers_regions_languages_and_splits() -> None:
     manifest = load_global_manifest(MANIFEST)
     coverage = coverage_summary(manifest)
 
-    assert coverage["caseCount"] == 60
+    assert coverage["caseCount"] == 93
     assert len(coverage["languages"]) == 34
     assert len(coverage["regions"]) >= 8
     assert coverage["evaluationSplits"] == [
@@ -64,8 +74,8 @@ def test_global_manifest_covers_regions_languages_and_splits() -> None:
         for split in coverage["evaluationSplits"]
     }
     assert split_counts == {
-        "development": 20,
-        "held-out": 20,
+        "development": 38,
+        "held-out": 35,
         "regression": 20,
     }
 
@@ -317,14 +327,98 @@ def test_global_manifest_pins_real_diarization_sources() -> None:
     assert sources["aishell4"].license == "cc-by-sa-4.0"
     assert plans["aishell4"]["sessionId"] == "L_R003S01C02"
     assert plans["aishell4"]["targetSpeakerCounts"] == [5]
+    assert plans["aishell4"]["evaluationSplit"] == "regression"
     assert plans["aishell4"]["officialEvaluationRevision"] == (
         "bad82b77c3753df1b232c5c6491cd3e2f2e32d24"
     )
-    assert plans["voxconverse"]["targetSpeakerCounts"] == [1, 2, 3, 5, 8]
+    assert plans["voxconverse"]["targetSpeakerCounts"] == [1, 2, 3, 5, 8, 13]
+    assert plans["voxconverse"]["parquetBytes"] == 485283393
+    assert plans["voxconverse"]["parquetSha256"] == (
+        "f36c54412f0ac9cfe7ec2682e27f70f3"
+        "e3df63d8e2b8f288d4f62341a595917d"
+    )
+    shards = plans["voxconverse"]["parquetShards"]
+    assert [shard["parquetPath"] for shard in shards] == [
+        "data/dev-00000-of-00005.parquet",
+        "data/dev-00002-of-00005.parquet",
+        "data/test-00000-of-00011.parquet",
+    ]
+    assert [shard["parquetSha256"] for shard in shards[1:]] == [
+        "77800f7d5fa37116e7f7d7c6b482f9a9ea654827b7af0e4d61c43facc5a7125e",
+        "487d66b75a2edc808407a6aa3b344bdd492b326f6a5b78b580d250e203f0860f",
+    ]
+    n13_targets = [
+        (shard["parquetPath"], target)
+        for shard in shards
+        for target in shard["rowTargets"]
+        if target["targetSpeakerCount"] == 13
+    ]
+    assert n13_targets == [
+        (
+            "data/dev-00002-of-00005.parquet",
+            {
+                "rowIndex": 38,
+                "targetSpeakerCount": 13,
+                "evaluationSplit": "development",
+                "maximumDurationSeconds": 300,
+            },
+        ),
+        (
+            "data/test-00000-of-00011.parquet",
+            {
+                "rowIndex": 8,
+                "targetSpeakerCount": 13,
+                "evaluationSplit": "held-out",
+                "maximumDurationSeconds": 120,
+            },
+        ),
+    ]
+    assert {
+        target["evaluationSplit"]
+        for target in plans["voxconverse"]["rowTargets"]
+    } == {"development", "held-out", "regression"}
+    assert plans["ami"]["evaluationSplit"] == "development"
     assert {
         (target["rowIndex"], target["targetSpeakerCount"])
         for target in plans["voxconverse"]["rowTargets"]
-    } >= {(35, 1)}
+    } >= {
+        (35, 1),
+        (13, 5),
+        (15, 5),
+        (23, 8),
+        (2, 8),
+    }
+    held_out_rows = {
+        target["rowIndex"]
+        for target in plans["voxconverse"]["rowTargets"]
+        if target["evaluationSplit"] == "held-out"
+    }
+    development_rows = {
+        target["rowIndex"]
+        for target in plans["voxconverse"]["rowTargets"]
+        if target["evaluationSplit"] == "development"
+    }
+    assert held_out_rows.isdisjoint(development_rows)
+    alimeeting = plans["alimeeting"]
+    assert alimeeting["provider"] == "openslr"
+    assert alimeeting["officialHomepage"] == "https://www.openslr.org/119/"
+    assert alimeeting["license"] == "cc-by-sa-4.0"
+    assert alimeeting["evaluationSplit"] == "held-out"
+    assert alimeeting["targetSpeakerCounts"] == [2, 3, 4]
+    assert alimeeting["unsupportedTargetSpeakerCounts"] == [5]
+    assert alimeeting["archiveBytes"] == 3673718355
+    assert alimeeting["archiveSha256"] == (
+        "dc47343b2474b5ebcf458927e878155f6"
+        "ddeb59c85e685b3645c32a1f9578d92"
+    )
+    assert alimeeting["extractedTreeSha256"] == (
+        "3e39ace217a8a7c98707d9742e55332c"
+        "bdb9349ea47ef18e05f4d60e9a12b629"
+    )
+    assert alimeeting["selectionUsesModelScores"] is False
+    assert {
+        target["speakerCount"] for target in alimeeting["sessionTargets"]
+    } == {2, 3, 4}
 
 
 def test_overlap_intervals_tracks_distinct_active_speakers() -> None:
@@ -361,6 +455,271 @@ def test_real_diarization_window_is_exact_bounded_and_deterministic() -> None:
     assert first["durationSeconds"] == 10.0
     assert first["annotatedOverlapSeconds"] == 6.0
     assert {turn["transcript"] for turn in first["turns"]} == {None}
+
+
+def test_real_diarization_window_supports_pinned_high_n_duration() -> None:
+    turns = [
+        {
+            "speakerId": f"speaker-{index:02d}",
+            "startSeconds": float(index * 9),
+            "endSeconds": float(index * 9 + 1),
+        }
+        for index in range(13)
+    ]
+    turns[-1]["endSeconds"] = 120.0
+
+    with pytest.raises(GlobalSampleLibraryError, match=r"no <=90s window"):
+        select_diarization_window(turns, 13)
+
+    window = select_diarization_window(
+        turns,
+        13,
+        maximum_duration_seconds=120.0,
+    )
+
+    assert window["sourceStartSeconds"] == 0.0
+    assert window["sourceEndSeconds"] == 120.0
+    assert window["durationSeconds"] == 120.0
+    assert window["selectionMaximumDurationSeconds"] == 120.0
+    assert len(window["speakerSet"]) == 13
+
+
+def test_voxconverse_multi_shard_plan_is_split_and_path_bound() -> None:
+    plan = {
+        "parquetShards": [
+            {
+                "config": "default",
+                "split": "dev",
+                "parquetPath": "data/dev-00002-of-00005.parquet",
+                "parquetBytes": 123,
+                "parquetSha256": "a" * 64,
+                "rowTargets": [
+                    {
+                        "rowIndex": 38,
+                        "targetSpeakerCount": 13,
+                        "evaluationSplit": "development",
+                        "maximumDurationSeconds": 300,
+                    }
+                ],
+            },
+            {
+                "config": "default",
+                "split": "test",
+                "parquetPath": "data/test-00000-of-00011.parquet",
+                "parquetBytes": 456,
+                "parquetSha256": "b" * 64,
+                "rowTargets": [
+                    {
+                        "rowIndex": 8,
+                        "targetSpeakerCount": 13,
+                        "evaluationSplit": "held-out",
+                        "maximumDurationSeconds": 120,
+                    }
+                ],
+            },
+        ]
+    }
+
+    shards = _voxconverse_shard_plans(plan)
+
+    assert [shard["split"] for shard in shards] == ["dev", "test"]
+    assert [shard["legacyNames"] for shard in shards] == [False, False]
+    assert [shard["parquetPath"] for shard in shards] == [
+        "data/dev-00002-of-00005.parquet",
+        "data/test-00000-of-00011.parquet",
+    ]
+
+    plan["parquetShards"][1]["parquetPath"] = (
+        "data/dev-00002-of-00005.parquet"
+    )
+    with pytest.raises(GlobalSampleLibraryError, match="shard is invalid"):
+        _voxconverse_shard_plans(plan)
+
+
+def test_alimeeting_textgrid_window_preserves_joint_truth() -> None:
+    textgrid = """File type = "ooTextFile"
+Object class = "TextGrid"
+
+xmin = 0
+xmax = 12
+tiers? <exists>
+size = 2
+item []:
+    item [1]:
+        class = "IntervalTier"
+        name = "N_SPK0001"
+        xmin = 0
+        xmax = 12
+        intervals: size = 2
+        intervals [1]:
+            xmin = 0
+            xmax = 6
+            text = "甲""乙"
+        intervals [2]:
+            xmin = 9
+            xmax = 11
+            text = "收尾"
+    item [2]:
+        class = "IntervalTier"
+        name = "N_SPK0002"
+        xmin = 0
+        xmax = 12
+        intervals: size = 1
+        intervals [1]:
+            xmin = 4
+            xmax = 7
+            text = "回答"
+"""
+
+    grid = parse_alimeeting_textgrid(textgrid)
+    turns = alimeeting_textgrid_turns(grid)
+    first = select_alimeeting_textgrid_window(turns, 2)
+    second = select_alimeeting_textgrid_window(turns, 2)
+
+    assert first == second
+    assert first["algorithm"] == "textgrid-component-shortest-coverage-v1"
+    assert first["sourceStartSeconds"] == 0.0
+    assert first["sourceEndSeconds"] == 11.0
+    assert first["durationSeconds"] == 11.0
+    assert first["speakerSet"] == ["N_SPK0001", "N_SPK0002"]
+    assert first["annotatedOverlapSeconds"] == 2.0
+    assert [turn["transcript"] for turn in turns] == ['甲"乙', "回答", "收尾"]
+    assert [
+        turn["transcript"]
+        for turn in _clip_reference_transcript(turns, first)
+    ] == ['甲"乙', "回答", "收尾"]
+
+
+def test_alimeeting_case_records_distinguish_far_from_near_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turns = [
+        {
+            "speakerId": "N_SPK0001",
+            "startSeconds": 0.0,
+            "endSeconds": 6.0,
+            "transcript": "你好",
+        },
+        {
+            "speakerId": "N_SPK0002",
+            "startSeconds": 4.0,
+            "endSeconds": 11.0,
+            "transcript": "世界",
+        },
+    ]
+    window = select_alimeeting_textgrid_window(turns, 2)
+    session = {
+        "sessionId": "R0001_M0001",
+        "speakerCount": 2,
+        "turns": turns,
+        "farAudio": tmp_path / "far.wav",
+        "farAudioEvidence": {"path": "far.wav", "sha256": "a" * 64},
+        "nearAudio": [tmp_path / "near-a.wav", tmp_path / "near-b.wav"],
+        "nearAudioEvidence": [
+            {"path": "near-a.wav", "sha256": "b" * 64},
+            {"path": "near-b.wav", "sha256": "c" * 64},
+        ],
+        "farTextGridEvidence": {
+            "path": "truth.TextGrid",
+            "sha256": "d" * 64,
+        },
+    }
+    plan = {
+        "dataset": "SLR119/AliMeeting",
+        "revision": "sha256:" + "e" * 64,
+        "evaluationSplit": "held-out",
+    }
+
+    def write_fixture_audio(
+        _sources: object,
+        output: Path,
+        _window: dict[str, object],
+    ) -> None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"fixture-wave")
+
+    monkeypatch.setattr(real_diarization_builder, "_clip_audio", write_fixture_audio)
+    monkeypatch.setattr(
+        real_diarization_builder,
+        "_clip_synchronized_near_audio",
+        write_fixture_audio,
+    )
+    monkeypatch.setattr(
+        real_diarization_builder,
+        "_probe_audio",
+        lambda _path: {
+            "codec": "pcm_s16le",
+            "sampleRate": 16000,
+            "channels": 1,
+            "durationSeconds": 11.0,
+        },
+    )
+
+    far = real_diarization_builder._alimeeting_case_record(
+        output_root=tmp_path,
+        plan=plan,
+        session=session,
+        window=window,
+        modality="far-field-array",
+    )
+    near = real_diarization_builder._alimeeting_case_record(
+        output_root=tmp_path,
+        plan=plan,
+        session=session,
+        window=window,
+        modality="synchronized-near-field-mixture",
+    )
+
+    assert far["realOrSynthetic"] == "real-recording"
+    assert near["realOrSynthetic"] == "synthetic-mixture"
+    assert far["truthEligibility"]["derJer"] is True
+    assert far["truthEligibility"]["asr"] is True
+    assert near["truthEligibility"] == far["truthEligibility"]
+    assert far["scoringTranscript"] == near["scoringTranscript"] == "你好世界"
+    assert len(far["sourceAudioArtifacts"]) == 1
+    assert len(near["sourceAudioArtifacts"]) == 2
+    assert far["windowSelection"]["selectionUsesModelScores"] is False
+
+
+def test_alimeeting_tree_fingerprint_is_deterministic(tmp_path: Path) -> None:
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "a.txt").write_bytes(b"alpha")
+    (tmp_path / "nested" / "b.txt").write_bytes(b"beta")
+    first = _alimeeting_tree_evidence(tmp_path)
+    second = _alimeeting_tree_evidence(tmp_path)
+    alpha_sha = hashlib.sha256(b"alpha").hexdigest()
+    beta_sha = hashlib.sha256(b"beta").hexdigest()
+    expected = hashlib.sha256(
+        (
+            f"a.txt\t5\t{alpha_sha}\n"
+            f"nested/b.txt\t4\t{beta_sha}\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert first["fileCount"] == 2
+    assert first["bytes"] == 9
+    assert first["treeSha256"] == expected
+    assert second["treeSha256"] == first["treeSha256"]
+
+
+def test_alimeeting_archive_rejects_path_traversal(tmp_path: Path) -> None:
+    archive = tmp_path / "unsafe.tar.gz"
+    payload = b"escape"
+    with tarfile.open(archive, mode="w:gz") as handle:
+        member = tarfile.TarInfo("Eval_Ali/../escape.txt")
+        member.size = len(payload)
+        handle.addfile(member, io.BytesIO(payload))
+    plan = {
+        "archiveBytes": archive.stat().st_size,
+        "archiveSha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "extractedRootName": "Eval_Ali",
+        "extractedFileCount": 1,
+        "extractedBytes": len(payload),
+    }
+
+    with pytest.raises(GlobalSampleLibraryError, match="unsafe path or entry"):
+        _validated_alimeeting_archive_members(archive, plan)
 
 
 def test_aishell4_annotation_parsers_preserve_joint_truth() -> None:

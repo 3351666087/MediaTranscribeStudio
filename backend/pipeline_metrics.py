@@ -99,12 +99,12 @@ class PipelineMetricsCollector:
         self._peak_vram_mb = 0.0
         self._policy: dict[str, Any] = {
             "primaryVoiceprint": "CAM++",
-            "secondaryVoiceprint": "ERes2NetV2",
+            "secondaryVoiceprint": "unconfigured",
             "secondaryScope": "difficult-segments-only",
             "fullCorpusSecondaryRunAllowed": False,
             "pyannoteMode": "disabled",
             "pyannoteTelemetryEnabled": False,
-            "localLlmModel": "qwen3.5:9b",
+            "localLlmModel": "qwen3.5:27b-q4_K_M",
             "localLlmMode": "disabled",
             "localLlmAutoApply": False,
         }

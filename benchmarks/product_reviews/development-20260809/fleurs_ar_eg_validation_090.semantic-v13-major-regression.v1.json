@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "semantic-major-regression-fixture",
+  "fixtureId": "fleurs-ar-eg-validation-090-cross-segment-asr-lexical-v1",
+  "visibilityPolicy": {
+    "caseIdIsAuditOnly": true,
+    "referenceTranscriptVisibleToArbitrator": false,
+    "expectedDecisionVisibleToArbitrator": false,
+    "modelIdentityVisibleToArbitrator": false
+  },
+  "auditBinding": {
+    "caseId": "fleurs_ar_eg_validation_090",
+    "caseAlias": "case-003",
+    "blindReviewId": "multilingual22-four-model-codex-blind-review-v13-r2",
+    "blindReviewCanonicalSha256": "101de196eaa977a884322b3d909de356bbd69363fdd0e60946845e8a896b635a",
+    "defectAuditCanonicalSha256": "4b5424dacb01257a2eb14b97631c88534a6f298374da9b4fb24ef1347a4b5dd3",
+    "findingId": "b00edfc41667cb5d89cd234568df468bdc20e9ee4a70d1f9b0ef7a7653a35028"
+  },
+  "inputBinding": {
+    "sourceMediaSha256": "803cf6d8910040c9181bb7215814638b512755bd1c6d903c1ce0fe497f75bad8",
+    "transcriptDocumentSha256": "6df6b06d7769094e7977fa046302324fb6ab27a9817d54e74b468a9c028fcd07",
+    "candidateLatticeSha256": "231e01947f00289b8bb2a0dc3d756e04ba1b2d3022a5366e0f31a238ab9c9600",
+    "sourceDurationMs": 13960
+  },
+  "visibleInput": {
+    "language": "ar-EG",
+    "speakerCount": 1,
+    "segments": [
+      {
+        "segmentId": "window-000001.rf01",
+        "startMs": 80,
+        "endMs": 11280,
+        "speakerId": "speaker-1",
+        "language": "ar-EG",
+        "text": "شراكة بين مصلحة المتنزهات الوطنية والحياة البرية وجمعية الرماة الرياضيين في أستراليا اختير متطوعون مؤهلون في إطار برنامج.",
+        "asrSelectableCandidateCount": 1,
+        "asrDistinctSummaryCount": 1
+      },
+      {
+        "segmentId": "window-000001.rf02",
+        "startMs": 11280,
+        "endMs": 13240,
+        "speakerId": "speaker-1",
+        "language": "ar-EG",
+        "text": "الصيد التابعة للجمعية.",
+        "asrSelectableCandidateCount": 1,
+        "asrDistinctSummaryCount": 1
+      }
+    ]
+  },
+  "blindReviewFinding": {
+    "severity": "major",
+    "category": "asr-lexical",
+    "observation": "The first fragment ends at an unattached program clause and the second begins as a dangling hunting phrase.",
+    "reason": "The two Arabic fragments form an awkward incomplete construction, but none of the candidates requests an ASR alternative for the affected wording.",
+    "expectedRequests": [
+      {
+        "domain": "asr-text",
+        "scopeId": "segment:window-000001.rf01",
+        "requestKind": "provider-native-nbest"
+      },
+      {
+        "domain": "asr-text",
+        "scopeId": "segment:window-000001.rf02",
+        "requestKind": "provider-native-nbest"
+      }
+    ]
+  },
+  "canonicalSha256": "48e7bd3e68d59c1b718479667fe524bf7e6d920ee642d0c7c0de6e91bf99948d"
+}

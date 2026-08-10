@@ -24,12 +24,16 @@ from tools.run_production_smoke import (
     BatchSmokeJob,
     HarnessSettings,
     ProductionBatchSmokeHarness,
+    ReviewDecisionPlan,
     SmokePaths,
     SmokeResult,
     build_start_payload,
     calculate_job_hard_timeout_seconds,
+    load_output_recipe,
+    load_review_decision_plan,
 )
 from backend.persistence import read_json_strict
+from backend.production_config import ProductionConfig, ProductionConfigError
 
 
 _RECOVERABLE_SESSION_FAILURES = frozenset(
@@ -48,6 +52,12 @@ _RECOVERABLE_SESSION_FAILURES = frozenset(
 )
 
 
+def _configured_local_llm_model(config: Path) -> str:
+    """Load the digest-pinned production model from a strictly valid config."""
+
+    return ProductionConfig.load(config).speaker.local_llm_model
+
+
 def _case_duration_seconds(row: Mapping[str, object], *, case_id: str) -> float:
     """Read either supported manifest duration shape without losing budgets."""
 
@@ -58,11 +68,18 @@ def _case_duration_seconds(row: Mapping[str, object], *, case_id: str) -> float:
         if isinstance(raw_audio, Mapping)
         else None
     )
+    raw_media = row.get("media")
+    frozen_media = (
+        raw_media.get("durationSeconds")
+        if isinstance(raw_media, Mapping)
+        else None
+    )
     values = [
         (field, value)
         for field, value in (
             ("durationSeconds", top_level),
             ("audio.durationSeconds", nested),
+            ("media.durationSeconds", frozen_media),
         )
         if value is not None
     ]
@@ -96,6 +113,44 @@ def _case_duration_seconds(row: Mapping[str, object], *, case_id: str) -> float:
     return normalized[0][1]
 
 
+def _case_source_path(
+    row: Mapping[str, object],
+    *,
+    manifest_parent: Path,
+    case_id: str,
+) -> Path:
+    """Resolve both product manifests and frozen media-library manifests."""
+
+    raw_path = row.get("path")
+    if raw_path is None:
+        raw_media = row.get("media")
+        if isinstance(raw_media, Mapping):
+            raw_path = raw_media.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError(f"{case_id} is missing a non-empty media path")
+    return manifest_parent / raw_path.strip()
+
+
+def _case_language(row: Mapping[str, object]) -> str:
+    """Return a BCP-47 hint, falling back to auto for mixed-language rows."""
+
+    raw_language = row.get("language")
+    if isinstance(raw_language, str) and raw_language.strip():
+        language = raw_language.strip()
+        if language.casefold() != "mixed":
+            return language
+    raw_tags = row.get("languageTags")
+    if isinstance(raw_tags, list):
+        tags = [
+            tag.strip()
+            for tag in raw_tags
+            if isinstance(tag, str) and tag.strip()
+        ]
+        if len(tags) == 1:
+            return tags[0]
+    return "auto"
+
+
 def _run_case(
     *,
     case_id: str,
@@ -110,13 +165,17 @@ def _run_case(
     idle_timeout_seconds: float,
     hard_timeout_seconds: float,
     render_pdf: bool,
+    output_recipe_path: Path | None,
+    review_decisions_path: Path | None,
     local_llm_mode: str,
+    local_llm_model: str,
     translation_targets: Sequence[str],
     summary: bool,
 ) -> int:
     command = [
         sys.executable,
-        str(ROOT / "tools" / "run_production_smoke.py"),
+        "-m",
+        "tools.run_production_smoke",
         "--config",
         str(config),
         "--source",
@@ -133,6 +192,8 @@ def _run_case(
         language,
         "--local-llm-mode",
         local_llm_mode,
+        "--local-llm-model",
+        local_llm_model,
         "--idle-timeout-seconds",
         str(idle_timeout_seconds),
         "--hard-timeout-seconds",
@@ -167,6 +228,12 @@ def _run_case(
         )
     if render_pdf:
         command.append("--render-pdf")
+    if output_recipe_path is not None:
+        command.extend(["--output-recipe", str(output_recipe_path.resolve())])
+    if review_decisions_path is not None:
+        command.extend(
+            ["--review-decisions", str(review_decisions_path.resolve())]
+        )
     for target in translation_targets:
         command.extend(["--translation-target", target])
     if summary:
@@ -188,7 +255,10 @@ def _batch_job(
     idle_timeout_seconds: float,
     hard_timeout_seconds: float,
     render_pdf: bool,
+    output_recipe: Mapping[str, object] | None,
+    review_decisions: ReviewDecisionPlan | None,
     local_llm_mode: str,
+    local_llm_model: str,
     translation_targets: Sequence[str],
     summary: bool,
 ) -> BatchSmokeJob:
@@ -216,9 +286,11 @@ def _batch_job(
         speaker_count_max=speaker_count_max,
         speaker_count_prior=speaker_count_prior,
         render_pdf=render_pdf,
+        output_customization=output_recipe,
         title=f"Sample {case_id}",
         language=language,
         local_llm_mode=local_llm_mode,
+        local_llm_model=local_llm_model,
         translation_targets=translation_targets,
         summary=summary,
     )
@@ -231,7 +303,26 @@ def _batch_job(
         ),
         idle_timeout_seconds=idle_timeout_seconds,
         hard_timeout_seconds=hard_timeout_seconds,
+        review_decisions=review_decisions,
     )
+
+
+def _review_decision_paths(values: Sequence[str]) -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    for value in values:
+        case_id, separator, raw_path = value.partition("=")
+        case_id = case_id.strip()
+        raw_path = raw_path.strip()
+        if not separator or not case_id or not raw_path:
+            raise ValueError(
+                "--review-decisions must use non-empty CASE_ID=PATH values"
+            )
+        if case_id in result:
+            raise ValueError(
+                f"duplicate --review-decisions case binding: {case_id}"
+            )
+        result[case_id] = Path(raw_path)
+    return result
 
 
 def _aborted_session_error(result: SmokeResult) -> Mapping[str, object] | None:
@@ -440,6 +531,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--render-pdf", action="store_true")
     parser.add_argument(
+        "--output-recipe",
+        type=Path,
+        help="strict versioned recipe for full product artifact generation",
+    )
+    parser.add_argument(
+        "--review-decisions",
+        action="append",
+        default=[],
+        metavar="CASE_ID=PATH",
+        help=(
+            "strict manually authored review plan for one selected case; "
+            "repeat for multiple cases"
+        ),
+    )
+    parser.add_argument(
         "--local-llm-mode",
         choices=("disabled", "suggestion-only", "business"),
         default="disabled",
@@ -477,6 +583,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.render_pdf and args.output_recipe is not None:
+        raise SystemExit("--render-pdf and --output-recipe are mutually exclusive")
+    try:
+        output_recipe = (
+            load_output_recipe(args.output_recipe)
+            if args.output_recipe is not None
+            else None
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        local_llm_model = _configured_local_llm_model(args.config.resolve())
+    except (OSError, ProductionConfigError) as exc:
+        raise SystemExit(str(exc)) from exc
     resolved = json.loads(args.manifest.read_text(encoding="utf-8"))
     rows = resolved.get("cases", [])
     if not isinstance(rows, list) or not rows:
@@ -486,6 +606,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     unknown = sorted(set(selected) - set(available))
     if unknown:
         raise SystemExit(f"unknown sample case(s): {', '.join(unknown)}")
+    try:
+        review_decision_paths = _review_decision_paths(
+            args.review_decisions
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    unknown_review_cases = sorted(set(review_decision_paths) - set(available))
+    if unknown_review_cases:
+        raise SystemExit(
+            "review decisions reference unknown sample case(s): "
+            + ", ".join(unknown_review_cases)
+        )
+    unselected_review_cases = sorted(
+        set(review_decision_paths) - set(selected)
+    )
+    if unselected_review_cases:
+        raise SystemExit(
+            "review decisions reference unselected sample case(s): "
+            + ", ".join(unselected_review_cases)
+        )
+    repeated_review_cases = sorted(
+        case_id
+        for case_id in review_decision_paths
+        if selected.count(case_id) != 1
+    )
+    if repeated_review_cases:
+        raise SystemExit(
+            "review decisions require each bound case to be selected once: "
+            + ", ".join(repeated_review_cases)
+        )
     if args.timeout_seconds is not None and args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be positive")
     if args.max_jobs_per_worker_session <= 0:
@@ -515,7 +665,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected_outputs: dict[str, Path] = {}
     for case_id in selected:
         row = available[case_id]
-        source = args.manifest.parent / str(row["path"])
+        try:
+            source = _case_source_path(
+                row,
+                manifest_parent=args.manifest.parent,
+                case_id=case_id,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
         base_artifact_id = (
             case_id
             if args.speaker_count_mode == "auto"
@@ -565,11 +722,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{args.speaker_count_mode} mode"
             )
         print(f"== {case_id} ({source.name}) ==", flush=True)
-        language = (
-            "auto"
-            if args.language_mode == "auto"
-            else str(row.get("language") or "auto")
-        )
+        review_decisions_path = review_decision_paths.get(case_id)
+        try:
+            review_decisions = (
+                load_review_decision_plan(
+                    review_decisions_path,
+                    expected_job_id=f"sample-{artifact_id}",
+                )
+                if review_decisions_path is not None
+                else None
+            )
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"{case_id}: {exc}") from exc
+        language = "auto" if args.language_mode == "auto" else _case_language(row)
         if args.reuse_worker:
             batch_jobs.append(
                 _batch_job(
@@ -584,7 +749,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     idle_timeout_seconds=args.idle_timeout_seconds,
                     hard_timeout_seconds=hard_timeout_seconds,
                     render_pdf=args.render_pdf,
+                    output_recipe=output_recipe,
+                    review_decisions=review_decisions,
                     local_llm_mode=args.local_llm_mode,
+                    local_llm_model=local_llm_model,
                     translation_targets=args.translation_target,
                     summary=args.summary,
                 )
@@ -603,7 +771,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 idle_timeout_seconds=args.idle_timeout_seconds,
                 hard_timeout_seconds=hard_timeout_seconds,
                 render_pdf=args.render_pdf,
+                output_recipe_path=args.output_recipe,
+                review_decisions_path=review_decisions_path,
                 local_llm_mode=args.local_llm_mode,
+                local_llm_model=local_llm_model,
                 translation_targets=args.translation_target,
                 summary=args.summary,
             )

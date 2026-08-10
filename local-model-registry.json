@@ -1,0 +1,681 @@
+{
+  "schemaVersion": "1.0.0",
+  "registryId": "mediatranscribestudio.local-models",
+  "hardwareProfiles": [
+    {
+      "id": "windows-rtx3060-12gb",
+      "platform": "windows-x86_64",
+      "cpu": {
+        "model": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
+        "physicalCores": 8,
+        "logicalProcessors": 16
+      },
+      "ramBytes": 34145546240,
+      "gpu": {
+        "model": "NVIDIA GeForce RTX 3060",
+        "vramBytes": 12884901888,
+        "computeCapability": "8.6",
+        "driverVersion": "610.88"
+      }
+    }
+  ],
+  "models": [
+    {
+      "id": "qwen3-asr-1.7b",
+      "displayName": "Qwen3-ASR 1.7B",
+      "source": {
+        "provider": "modelscope",
+        "repository": "Qwen/Qwen3-ASR-1.7B",
+        "revision": "master"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "automatic-speech-recognition"
+        ],
+        "decisionPolicy": "direct"
+      },
+      "runtime": {
+        "engine": "qwen-asr",
+        "version": "0.0.6",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/media-asr/python.exe",
+        "accelerator": "cuda:0",
+        "artifactFormat": "safetensors"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/qwen/Qwen3-ASR-1.7B-resharded-768MiB",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "b29a332d65303f2298bcdf72d6e269e0ccef49159184bc86f32b029e06d0ddec",
+          "fileCount": 18,
+          "totalBytes": 4703114700
+        }
+      }
+    },
+    {
+      "id": "qwen3-forced-aligner-0.6b",
+      "displayName": "Qwen3 ForcedAligner 0.6B",
+      "source": {
+        "provider": "modelscope",
+        "repository": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "revision": "master"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "5058416891bc47a2051557765997e8c42f8eb78a0e33c3e775bd17d4b0ba4d50"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "forced-alignment",
+          "timestamp-refinement"
+        ],
+        "decisionPolicy": "direct"
+      },
+      "runtime": {
+        "engine": "qwen-asr",
+        "version": "0.0.6",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/media-asr/python.exe",
+        "accelerator": "cuda:0",
+        "artifactFormat": "safetensors"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/qwen/Qwen3-ForcedAligner-0.6B-resharded-768MiB",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "961b298876885a22c348fa70b4fd8278f8cc97e47e17572150f3e48fb794a2e4",
+          "fileCount": 14,
+          "totalBytes": 1840137412
+        }
+      }
+    },
+    {
+      "id": "funasr-fsmn-vad",
+      "displayName": "FunASR FSMN VAD",
+      "source": {
+        "provider": "modelscope",
+        "repository": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "revision": "v2.0.4"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "6fc838ef6b23aef579ac9001c3d098941ff1d37b800efc0bd25e455309edcb37"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "voice-activity-detection"
+        ],
+        "decisionPolicy": "direct"
+      },
+      "runtime": {
+        "engine": "funasr",
+        "version": "1.3.1",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/media-asr/python.exe",
+        "accelerator": "cpu",
+        "artifactFormat": "pytorch-checkpoint"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/funasr/fsmn-vad",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "a3e862ac1f0bc8968323ac40fc6ffdf43304ae90ec0e84192194ff8b7737ff9f",
+          "fileCount": 8,
+          "totalBytes": 4030689
+        }
+      }
+    },
+    {
+      "id": "campplus",
+      "displayName": "CAM++ Chinese Common",
+      "source": {
+        "provider": "modelscope",
+        "repository": "iic/speech_campplus_sv_zh-cn_16k-common",
+        "revision": "v2.0.2"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "9bd58b989a534fa0121c8d10e62c0cce9080a9a9aeb2499bb429676f9c17cc3a"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "primary-speaker-embedding"
+        ],
+        "decisionPolicy": "direct"
+      },
+      "runtime": {
+        "engine": "funasr",
+        "version": "1.3.1",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/media-asr/python.exe",
+        "accelerator": "cuda:0",
+        "artifactFormat": "pytorch-checkpoint"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/funasr/campplus",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "1a18108b1118b24b944c1acb1ee8848aaaef27b17ebb9d36ea6b15e65e75b9fb",
+          "fileCount": 11,
+          "totalBytes": 28962447
+        }
+      }
+    },
+    {
+      "id": "eres2netv2",
+      "displayName": "ERes2NetV2 Chinese Common",
+      "source": {
+        "provider": "modelscope",
+        "repository": "iic/speech_eres2netv2_sv_zh-cn_16k-common",
+        "revision": "v1.0.2"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "f2201730b0695c039839a4f41343fb81e518e60ba7be59935740c92072bebbb6"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "secondary-speaker-verification"
+        ],
+        "decisionPolicy": "evidence-only"
+      },
+      "deploymentSlots": [
+        {
+          "id": "secondary-speaker-verification",
+          "adapterIds": [
+            "modelscope-eres2netv2"
+          ]
+        }
+      ],
+      "runtime": {
+        "engine": "modelscope",
+        "version": "1.38.1",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/media-asr/python.exe",
+        "accelerator": "gpu",
+        "artifactFormat": "pytorch-checkpoint"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/modelscope/eres2netv2",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "8fecfdc3bd88b6a72cce8e13fa2e5f5e5178164def0469f38dde276cc7bf639e",
+          "fileCount": 9,
+          "totalBytes": 74138798
+        }
+      }
+    },
+    {
+      "id": "eres2netv2-w24s4ep4",
+      "displayName": "ERes2NetV2 w24s4ep4",
+      "source": {
+        "provider": "modelscope",
+        "repository": "iic/speech_eres2netv2w24s4ep4_sv_zh-cn_16k-common",
+        "revision": "v1.0.1"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "3e16e90a6f020a93a9dcbc5befa4d76132e983103345267e7692533d792c6823"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "chinese-speaker-embedding"
+        ],
+        "decisionPolicy": "challenger-only"
+      },
+      "deploymentSlots": [
+        {
+          "id": "secondary-speaker-verification",
+          "adapterIds": [
+            "modelscope-eres2netv2"
+          ]
+        }
+      ],
+      "runtime": {
+        "engine": "modelscope",
+        "version": "1.38.1",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/media-asr/python.exe",
+        "accelerator": "gpu",
+        "artifactFormat": "pytorch-checkpoint"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/modelscope/eres2netv2w24s4ep4",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "c635880504cbacbc95adbc96a4c1567585c4f229426054c64067cfbead2a0ed9",
+          "fileCount": 9,
+          "totalBytes": 217058921
+        }
+      }
+    },
+    {
+      "id": "pyannote-community-1",
+      "displayName": "Pyannote Speaker Diarization Community-1",
+      "source": {
+        "provider": "huggingface",
+        "repository": "pyannote-community/speaker-diarization-community-1",
+        "revision": "8a527374977391da736e0daaef26855d949d9685"
+      },
+      "license": {
+        "spdx": "CC-BY-4.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "2db91f9265bd81f1653ff088b5bff22bf6aebebea03328513af65501643f8a31"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "diarization-baseline",
+          "overlap-evidence",
+          "timeline-fallback"
+        ],
+        "decisionPolicy": "fallback-only"
+      },
+      "runtime": {
+        "engine": "pyannote-audio",
+        "version": "4.0.4",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/pyannote/python.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "pytorch-checkpoint"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/pyannote/speaker-diarization-community-1",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "8c7fcc0845adb5cb74eaee7fdedccdda15aca3eefa05c6ceee92eff4a7761096",
+          "fileCount": 10,
+          "totalBytes": 33695573
+        }
+      }
+    },
+    {
+      "id": "wespeaker-redimnet2-b6-lm",
+      "displayName": "WeSpeaker ReDimNet2 B6 LM",
+      "source": {
+        "provider": "huggingface",
+        "repository": "Wespeaker/wespeaker-voxceleb-redimnet2-B6-LM",
+        "revision": "e34354de2429a45894905bd58c24c22250485b9a"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "README.md",
+        "evidenceSha256": "98b45ea81164d1e1a1dd82255207053b15cd6c69d922a1c5cf3387ce604d4b74"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "cross-domain-speaker-embedding"
+        ],
+        "decisionPolicy": "challenger-only"
+      },
+      "runtime": {
+        "engine": "wespeaker",
+        "version": "0.0.1",
+        "executablePath": "D:/MediaTranscribeStudio/runtime/wespeaker/Scripts/python.exe",
+        "accelerator": "cuda:0",
+        "artifactFormat": "pytorch-checkpoint"
+      },
+      "quantization": {
+        "scheme": "not-declared",
+        "evidencePath": ".mts-model-manifest.json"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/wespeaker/redimnet2-B6-LM",
+        "manifest": {
+          "format": "mts-model-manifest-v1",
+          "path": ".mts-model-manifest.json",
+          "sha256": "34bab830c5ae34665334233fc8dc83ca49ebac41b771a7122e01eaa25e0b7aab",
+          "fileCount": 4,
+          "totalBytes": 55529384
+        }
+      }
+    },
+    {
+      "id": "ollama-qwen3.5-9b",
+      "displayName": "Ollama Qwen3.5 9B",
+      "source": {
+        "provider": "ollama",
+        "repository": "library/qwen3.5",
+        "tag": "9b",
+        "digest": "sha256:6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "blobs/sha256-7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2",
+        "evidenceSha256": "7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "semantic-arbitration",
+          "translation",
+          "summarization"
+        ],
+        "decisionPolicy": "suggestion-only"
+      },
+      "runtime": {
+        "engine": "ollama",
+        "version": "0.32.6",
+        "executablePath": "D:/Ollama/ollama.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "gguf"
+      },
+      "quantization": {
+        "scheme": "Q4_K_M",
+        "evidencePath": "blobs/sha256-be595b49fe22012bd1f5605ec14c7ffa58331783a88a4fd8c22e5fc8ec42cf9f"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/ollama",
+        "manifest": {
+          "format": "ollama-oci-manifest-v2",
+          "path": "manifests/registry.ollama.ai/library/qwen3.5/9b",
+          "sha256": "6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7",
+          "fileCount": 4,
+          "totalBytes": 6594474711
+        }
+      }
+    },
+    {
+      "id": "ollama-qwen3.5-27b-q4-k-m",
+      "displayName": "Ollama Qwen3.5 27B Q4_K_M",
+      "source": {
+        "provider": "ollama",
+        "repository": "library/qwen3.5",
+        "tag": "27b-q4_K_M",
+        "digest": "sha256:7653528ba5cba4dd8e19da24aaddc7f4d0b5ecd93571c0825dfd4137958ec06e"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "blobs/sha256-7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2",
+        "evidenceSha256": "7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2"
+      },
+      "usage": {
+        "status": "production",
+        "roles": [
+          "semantic-arbitration"
+        ],
+        "decisionPolicy": "suggestion-only"
+      },
+      "runtime": {
+        "engine": "ollama",
+        "version": "0.32.6",
+        "executablePath": "D:/Ollama/ollama.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "gguf"
+      },
+      "quantization": {
+        "scheme": "Q4_K_M",
+        "evidencePath": "blobs/sha256-ba0915cbf15878a68d300f640d3d575f5805cac42dd8f83746eb31a0e8afec22"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/ollama",
+        "manifest": {
+          "format": "ollama-oci-manifest-v2",
+          "path": "manifests/registry.ollama.ai/library/qwen3.5/27b-q4_K_M",
+          "sha256": "7653528ba5cba4dd8e19da24aaddc7f4d0b5ecd93571c0825dfd4137958ec06e",
+          "fileCount": 4,
+          "totalBytes": 17420432728
+        }
+      }
+    },
+    {
+      "id": "ollama-qwen3.5-35b-a3b-q4-k-m",
+      "displayName": "Ollama Qwen3.5 35B-A3B Q4_K_M",
+      "source": {
+        "provider": "ollama",
+        "repository": "library/qwen3.5",
+        "tag": "35b-a3b-q4_K_M",
+        "digest": "sha256:3460ffeede5453ead027dbd2f821b12ad0aa3de54630971993babdb2165221f7"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "blobs/sha256-7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2",
+        "evidenceSha256": "7339fa418c9ad3e8e12e74ad0fd26a9cc4be8703f9c110728a992b193be85cb2"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "semantic-arbitration"
+        ],
+        "decisionPolicy": "suggestion-only"
+      },
+      "runtime": {
+        "engine": "ollama",
+        "version": "0.32.6",
+        "executablePath": "D:/Ollama/ollama.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "gguf"
+      },
+      "quantization": {
+        "scheme": "Q4_K_M",
+        "evidencePath": "blobs/sha256-606ad9f1ecbcd0d400a89572f49d9a8e80b11a346be74883245e24ecbbc3ac81"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/ollama",
+        "manifest": {
+          "format": "ollama-oci-manifest-v2",
+          "path": "manifests/registry.ollama.ai/library/qwen3.5/35b-a3b-q4_K_M",
+          "sha256": "3460ffeede5453ead027dbd2f821b12ad0aa3de54630971993babdb2165221f7",
+          "fileCount": 4,
+          "totalBytes": 23869191742
+        }
+      }
+    },
+    {
+      "id": "ollama-qwen3.6-27b-q4-k-m",
+      "displayName": "Ollama Qwen3.6 27B Q4_K_M",
+      "source": {
+        "provider": "ollama",
+        "repository": "library/qwen3.6",
+        "tag": "27b-q4_K_M",
+        "digest": "sha256:a50eda8ed977ab48a12431878896b27ffd5cef552c17af3317d9623b939a7f1e"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "blobs/sha256-5f3a3c817e78f5b8a4ad2d2c458a3e4b2cce470d6c12642c4eeb12cb8a9bf51d",
+        "evidenceSha256": "5f3a3c817e78f5b8a4ad2d2c458a3e4b2cce470d6c12642c4eeb12cb8a9bf51d"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "semantic-arbitration"
+        ],
+        "decisionPolicy": "suggestion-only"
+      },
+      "runtime": {
+        "engine": "ollama",
+        "version": "0.32.6",
+        "executablePath": "D:/Ollama/ollama.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "gguf"
+      },
+      "quantization": {
+        "scheme": "Q4_K_M",
+        "evidencePath": "blobs/sha256-728c795c776272002ed455cf94ef825cbbe4cc04c9a925a1a78933bbf0c2b63b"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/ollama",
+        "manifest": {
+          "format": "ollama-oci-manifest-v2",
+          "path": "manifests/registry.ollama.ai/library/qwen3.6/27b-q4_K_M",
+          "sha256": "a50eda8ed977ab48a12431878896b27ffd5cef552c17af3317d9623b939a7f1e",
+          "fileCount": 4,
+          "totalBytes": 17420432739
+        }
+      }
+    },
+    {
+      "id": "ollama-qwen3.6-35b-a3b-q4-k-m",
+      "displayName": "Ollama Qwen3.6 35B-A3B Q4_K_M",
+      "source": {
+        "provider": "ollama",
+        "repository": "library/qwen3.6",
+        "tag": "35b-a3b-q4_K_M",
+        "digest": "sha256:07d35212591fc27746f0a317c975a6d68754fb38e9053d82e25f06057af28522"
+      },
+      "license": {
+        "spdx": "Apache-2.0",
+        "evidencePath": "blobs/sha256-5f3a3c817e78f5b8a4ad2d2c458a3e4b2cce470d6c12642c4eeb12cb8a9bf51d",
+        "evidenceSha256": "5f3a3c817e78f5b8a4ad2d2c458a3e4b2cce470d6c12642c4eeb12cb8a9bf51d"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "semantic-arbitration"
+        ],
+        "decisionPolicy": "suggestion-only"
+      },
+      "runtime": {
+        "engine": "ollama",
+        "version": "0.32.6",
+        "executablePath": "D:/Ollama/ollama.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "gguf"
+      },
+      "quantization": {
+        "scheme": "Q4_K_M",
+        "evidencePath": "blobs/sha256-5d1c86a949f7f3b5e75370e129765af7526f0cc1812a9de21a541da042596faa"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/ollama",
+        "manifest": {
+          "format": "ollama-oci-manifest-v2",
+          "path": "manifests/registry.ollama.ai/library/qwen3.6/35b-a3b-q4_K_M",
+          "sha256": "07d35212591fc27746f0a317c975a6d68754fb38e9053d82e25f06057af28522",
+          "fileCount": 4,
+          "totalBytes": 23938333577
+        }
+      }
+    },
+    {
+      "id": "ollama-glm-4.7-flash-q4-k-m",
+      "displayName": "Ollama GLM-4.7-Flash 30B-A3B Q4_K_M",
+      "source": {
+        "provider": "ollama",
+        "repository": "library/glm-4.7-flash",
+        "tag": "q4_K_M",
+        "digest": "sha256:4475827791a269b02c8ec49b1c3bc1abb5846bacf3fae015b75d33986322d8f6"
+      },
+      "license": {
+        "spdx": "MIT",
+        "evidencePath": "blobs/sha256-b1bca6ec8117a09783df643e500e7331c5d6ea79fe4ba4d29d9a256c2f794a83",
+        "evidenceSha256": "b1bca6ec8117a09783df643e500e7331c5d6ea79fe4ba4d29d9a256c2f794a83"
+      },
+      "usage": {
+        "status": "challenger",
+        "roles": [
+          "semantic-arbitration"
+        ],
+        "decisionPolicy": "suggestion-only"
+      },
+      "runtime": {
+        "engine": "ollama",
+        "version": "0.32.6",
+        "executablePath": "D:/Ollama/ollama.exe",
+        "accelerator": "cuda",
+        "artifactFormat": "gguf"
+      },
+      "quantization": {
+        "scheme": "Q4_K_M",
+        "evidencePath": "blobs/sha256-89d1ec0bb8381384b592647db2b6dd223e6ddc59fa3991ba940afd867540a9b8"
+      },
+      "hardwareProfileIds": [
+        "windows-rtx3060-12gb"
+      ],
+      "local": {
+        "path": "D:/models/ollama",
+        "manifest": {
+          "format": "ollama-oci-manifest-v2",
+          "path": "manifests/registry.ollama.ai/library/glm-4.7-flash/q4_K_M",
+          "sha256": "4475827791a269b02c8ec49b1c3bc1abb5846bacf3fae015b75d33986322d8f6",
+          "fileCount": 4,
+          "totalBytes": 19019270897
+        }
+      }
+    }
+  ]
+}

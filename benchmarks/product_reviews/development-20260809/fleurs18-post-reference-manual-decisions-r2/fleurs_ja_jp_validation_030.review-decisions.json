@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ja_jp_validation_030-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ja-jp-030-postref-text-0001",
+      "reason": "Post-reference Codex adjudication restores the official Arabic numerals and punctuation exactly.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ja_jp_validation_030", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "audio:full"],
+      "confidence": 1.0,
+      "normalizedText": "最終スコア21対20の1点差勝利で、オールブラックスの15連勝に終止符が打たれました。",
+      "displayText": "最終スコア21対20の1点差勝利で、オールブラックスの15連勝に終止符が打たれました。",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ja-jp-030-postref-speaker-0002",
+      "reason": "The complete recording is one continuous read utterance and the manual one-speaker assignment is retained.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "review-queue-file-sha256:00f08e8aed8de0205b974f0d0a25790ee698f4d8870268e2b435d68d58d410e7"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

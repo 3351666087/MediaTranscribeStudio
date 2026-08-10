@@ -31,7 +31,8 @@ from .language import normalize_language_tag
 from .local_llm import (
     LocalLLMError,
     LocalLLMProvider,
-    assert_loopback_provider,
+    PROVIDER_NETWORK_POLICIES,
+    assert_provider_network_policy,
 )
 from .persistence import (
     atomic_write_json,
@@ -360,7 +361,7 @@ class BusinessProcessingConfig:
 
     translation_targets: tuple[str, ...] = ()
     summary: bool = False
-    model: str = "qwen3.5:9b"
+    model: str = "qwen3.5:27b-q4_K_M"
     output_locale: str = "en"
     prompt_version: str = BUSINESS_PROMPT_VERSION
 
@@ -843,11 +844,11 @@ def _provider_call(
 
 def _assert_business_provider(provider: LocalLLMProvider) -> str:
     try:
-        return assert_loopback_provider(provider)
+        return assert_provider_network_policy(provider)
     except LocalLLMError as exc:
         raise WorkerError(
             "BUSINESS_PROVIDER_POLICY_INVALID",
-            "business-model provider is not loopback-only",
+            "business-model provider network policy is invalid",
             details={
                 "providerId": str(getattr(provider, "provider_id", "unknown")),
                 "declaredNetworkPolicy": getattr(
@@ -1390,7 +1391,7 @@ def _validate_business_artifact(
         expected_provider = {
             "id": provider.provider_id,
             "version": provider.provider_version,
-            "networkPolicy": "loopback-only",
+            "networkPolicy": _assert_business_provider(provider),
         }
     else:
         expected_model = expected_provenance.get("model")
@@ -1529,7 +1530,7 @@ def _translation_from_semantic_arbitration(
     if (
         not isinstance(provider, Mapping)
         or set(provider) != {"id", "version", "networkPolicy"}
-        or provider.get("networkPolicy") != "loopback-only"
+        or provider.get("networkPolicy") not in PROVIDER_NETWORK_POLICIES
         or not isinstance(prompt_version, str)
         or not prompt_version
     ):

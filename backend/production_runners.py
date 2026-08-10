@@ -13,6 +13,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -2675,6 +2676,11 @@ class LocalERes2NetV2Verifier:
         model_path: str | Path,
         device: str = "gpu",
         decision_margin: float = 0.05,
+        deployment_slot: str = "secondary-speaker-verification",
+        registry_model_id: str = "eres2netv2",
+        manifest_model_key: str = "eres2netV2",
+        manifest_sha256: str | None = None,
+        adapter_id: str | None = None,
         pipeline_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.model_path = _local_model_path(model_path, "ERes2NetV2 model")
@@ -2682,6 +2688,28 @@ class LocalERes2NetV2Verifier:
         self.decision_margin = float(decision_margin)
         if not 0.0 <= self.decision_margin <= 1.0:
             raise ValueError("decision_margin must be between 0 and 1")
+        identity_fields = {
+            "deployment_slot": deployment_slot,
+            "registry_model_id": registry_model_id,
+            "manifest_model_key": manifest_model_key,
+            "adapter_id": adapter_id or type(self).adapter_id,
+        }
+        for field, value in identity_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} must be a non-empty string")
+        normalized_manifest_sha256 = None
+        if manifest_sha256 is not None:
+            normalized_manifest_sha256 = str(manifest_sha256).removeprefix(
+                "sha256:"
+            )
+            if re.fullmatch(r"[0-9a-f]{64}", normalized_manifest_sha256) is None:
+                raise ValueError("manifest_sha256 must be a lowercase SHA-256 digest")
+            normalized_manifest_sha256 = f"sha256:{normalized_manifest_sha256}"
+        self.deployment_slot = deployment_slot.strip()
+        self.registry_model_id = registry_model_id.strip()
+        self.manifest_model_key = manifest_model_key.strip()
+        self.manifest_sha256 = normalized_manifest_sha256
+        self.adapter_id = identity_fields["adapter_id"].strip()
         self._pipeline_factory = pipeline_factory
         self._pipeline_instance: Any = None
         self._load_lock = threading.Lock()
@@ -2835,6 +2863,11 @@ class LocalERes2NetV2Verifier:
         references_by_speaker = self._references_by_speaker(segments)
         return {
             "modelPath": str(self.model_path),
+            "deploymentSlot": self.deployment_slot,
+            "registryModelId": self.registry_model_id,
+            "manifestModelKey": self.manifest_model_key,
+            "manifestSha256": self.manifest_sha256,
+            "adapterId": self.adapter_id,
             "references": [
                 {
                     "segmentId": segment.segment_id,

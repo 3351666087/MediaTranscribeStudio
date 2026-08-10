@@ -351,9 +351,13 @@ def _allocated_bytes(path: Path) -> int:
         stat = path.lstat()
     except FileNotFoundError:
         return 0
+    if os.name == "nt":
+        own_bytes = max(0, int(getattr(stat, "st_size", 0)))
+    else:
+        own_bytes = max(0, int(getattr(stat, "st_blocks", 0))) * 512
     if path.is_symlink() or not path.is_dir():
-        return int(getattr(stat, "st_blocks", 0)) * 512
-    total = int(getattr(stat, "st_blocks", 0)) * 512
+        return own_bytes
+    total = own_bytes
     with os.scandir(path) as entries:
         for entry in entries:
             total += _allocated_bytes(Path(entry.path))

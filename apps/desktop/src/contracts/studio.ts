@@ -374,7 +374,13 @@ export interface CreateJobRequest {
   localLlmMode: LocalLlmMode;
   localLlmModel: string;
   localLlmEndpoint: string;
-  localLlmEndpointPolicy: "loopback-only";
+  /** Stable provider id, e.g. ollama-loopback, openai, anthropic, or custom. */
+  llmProvider?: string;
+  /** Name of the environment variable that contains the API key. */
+  llmApiKeyEnv?: string | null;
+  /** Optional HTTP(S) proxy; the secret itself is never part of this request. */
+  llmProxyUrl?: string | null;
+  localLlmEndpointPolicy: "loopback-only" | "remote-explicit";
   localLlmAutoApply: false;
   translationTargets: string[];
   summary: boolean;

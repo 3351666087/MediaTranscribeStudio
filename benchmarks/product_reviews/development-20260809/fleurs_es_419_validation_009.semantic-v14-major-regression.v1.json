@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "semantic-major-regression-fixture",
+  "fixtureId": "fleurs-es-419-validation-009-asr-lexical-v1",
+  "visibilityPolicy": {
+    "caseIdIsAuditOnly": true,
+    "referenceTranscriptVisibleToArbitrator": false,
+    "expectedDecisionVisibleToArbitrator": false,
+    "modelIdentityVisibleToArbitrator": false
+  },
+  "auditBinding": {
+    "caseId": "fleurs_es_419_validation_009",
+    "caseAlias": "case-005",
+    "caseSha256": "486600e8de802d0230e698824cf36c3a72c4e94baeb361e9bbf029d7b4255d4b",
+    "postRunAuditId": "multilingual22-qwen35-27b-v14-development-20260810-r2-batch32.codex-visible-review",
+    "postRunAuditFileSha256": "6c8b16a3c7989d461e314471e081a56ac080f29276ba12f7d66059d188c7b699",
+    "postRunAuditCanonicalSha256": "094e3d0cf94dd93c66250bc09607582baa9b60b80ab1383c4928f397b08f316b"
+  },
+  "inputBinding": {
+    "sourceMediaSha256": "e7e113fb6b52c9c91452506fe11f0e82793bf17fcfc1c20e8f422f40325761b2",
+    "transcriptDocumentSha256": "10e8c878a883c08a849ed9fd918d371631965d184b9c6fbc042fa47ca479f3c8",
+    "candidateLatticeSha256": "5b8d47d7e170196149cd46fd0c59ee4d030bb2b8e342e166a86267a4b361d398",
+    "sourceDurationMs": 5520
+  },
+  "visibleInput": {
+    "language": "es-419",
+    "speakerCount": 1,
+    "segments": [
+      {
+        "segmentId": "window-000001",
+        "startMs": 1340,
+        "endMs": 4610,
+        "speakerId": "speaker-1",
+        "language": "es-419",
+        "text": "En cuatro años es el quinto sep de Martelli.",
+        "asrSelectableCandidateCount": 1,
+        "asrDistinctSummaryCount": 1
+      }
+    ]
+  },
+  "blindReviewFinding": {
+    "severity": "major",
+    "category": "asr-lexical",
+    "observation": "The visible sequence around 'quinto sep de Martelli' is not a coherent Spanish lexical construction in its syntactic slot.",
+    "reason": "Publishing the singleton unchanged leaves a concrete lexical defect unresolved; no replacement text is supplied to the arbitrator.",
+    "expectedRequests": [
+      {
+        "domain": "asr-text",
+        "scopeId": "segment:window-000001",
+        "requestKind": "provider-native-nbest"
+      }
+    ]
+  },
+  "canonicalSha256": "96051ec3b20699781835e2ca0f70ebf9186b08f1b6fe396ffe89e3c8c2f55154"
+}

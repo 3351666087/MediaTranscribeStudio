@@ -1,0 +1,184 @@
+name: Tauri Windows release candidate
+
+"on":
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Windows target architecture
+        required: true
+        default: x64
+        type: choice
+        options:
+          - x64
+          - arm64
+      channel:
+        description: Release channel recorded in the manifest
+        required: true
+        default: stable
+        type: string
+      release_mode:
+        description: Signed requires the repository certificate secrets; unsigned is development-only
+        required: true
+        default: unsigned-development
+        type: choice
+        options:
+          - unsigned-development
+          - signed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mts-windows-${{ github.ref }}-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Windows ${{ inputs.architecture }}
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      MTS_ARCHITECTURE: ${{ inputs.architecture }}
+      MTS_CHANNEL: ${{ inputs.channel }}
+      MTS_RELEASE_MODE: ${{ inputs.release_mode }}
+      WINDOWS_CODESIGN_THUMBPRINT: ${{ secrets.WINDOWS_CODESIGN_THUMBPRINT }}
+
+    steps:
+      - name: Check out locked source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Set up Java 17 for OpenHTMLtoPDF
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+
+      - name: Install the locked Rust Windows target
+        shell: pwsh
+        run: |
+          $target = if ($env:MTS_ARCHITECTURE -eq 'arm64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          rustup target add $target
+
+      - name: Build the locked PDF sidecar
+        shell: pwsh
+        run: |
+          mvn -B -ntp -f pdf-renderer/pom.xml package
+          if (-not (Test-Path -LiteralPath 'pdf-renderer/target/pdf-renderer.jar' -PathType Leaf)) {
+            throw 'pdf-renderer.jar was not produced.'
+          }
+
+      - name: Validate the Windows release plan
+        shell: pwsh
+        run: |
+          $planArgs = @(
+            '-ProjectRoot', $env:GITHUB_WORKSPACE,
+            '-Architecture', $env:MTS_ARCHITECTURE,
+            '-Channel', $env:MTS_CHANNEL,
+            '-TargetDirectory', (Join-Path $env:RUNNER_TEMP 'mts-cargo-target')
+          )
+          if ($env:MTS_RELEASE_MODE -eq 'unsigned-development') {
+            $planArgs += '-AllowUnsignedDevelopment'
+          }
+          else {
+            $planArgs += @('-PublisherThumbprint', $env:WINDOWS_CODESIGN_THUMBPRINT)
+          }
+          $planArgs += @(
+            '-DryRun'
+          )
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File (Join-Path $env:GITHUB_WORKSPACE 'packaging/tauri/Build-TauriRelease.ps1') @planArgs
+          if ($LASTEXITCODE -ne 0) { throw "Windows release plan failed with exit code $LASTEXITCODE." }
+
+      - name: Import Authenticode certificate
+        if: inputs.release_mode == 'signed'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_THUMBPRINT)) { throw 'WINDOWS_CODESIGN_THUMBPRINT is required for signed builds.' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64)) { throw 'WINDOWS_CODESIGN_PFX_BASE64 is required for signed builds.' }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_PASSWORD)) { throw 'WINDOWS_CODESIGN_PFX_PASSWORD is required for signed builds.' }
+          $pfx = Join-Path $env:RUNNER_TEMP 'mts-codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+          $securePassword = ConvertTo-SecureString $env:WINDOWS_CODESIGN_PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+          if ($null -eq $certificate) { throw 'The Authenticode certificate could not be imported.' }
+          $actual = ($certificate.Thumbprint -replace ' ', '').ToUpperInvariant()
+          $expected = ($env:WINDOWS_CODESIGN_THUMBPRINT -replace ' ', '').ToUpperInvariant()
+          if ($actual -ne $expected) { throw "Imported certificate thumbprint does not match WINDOWS_CODESIGN_THUMBPRINT." }
+
+      - name: Build and collect native Windows candidate
+        shell: pwsh
+        run: |
+          $sourceDateEpoch = [int64]((& git show -s --format=%ct HEAD).Trim())
+          $output = Join-Path $env:RUNNER_TEMP ("mts-release\windows-{0}" -f $env:MTS_ARCHITECTURE)
+          $arguments = @(
+            '-ProjectRoot', $env:GITHUB_WORKSPACE,
+            '-OutputDirectory', $output,
+            '-Architecture', $env:MTS_ARCHITECTURE,
+            '-Channel', $env:MTS_CHANNEL,
+            '-SourceDateEpoch', $sourceDateEpoch,
+            '-TargetDirectory', (Join-Path $env:RUNNER_TEMP 'mts-cargo-target')
+          )
+          if ($env:MTS_RELEASE_MODE -eq 'unsigned-development') {
+            $arguments += '-AllowUnsignedDevelopment'
+          }
+          else {
+            $arguments += @('-PublisherThumbprint', $env:WINDOWS_CODESIGN_THUMBPRINT)
+          }
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File (Join-Path $env:GITHUB_WORKSPACE 'packaging/tauri/Build-TauriRelease.ps1') @arguments
+          if ($LASTEXITCODE -ne 0) { throw "Windows native release failed with exit code $LASTEXITCODE." }
+          "MTS_WINDOWS_OUTPUT=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify runtime resources in MSI and NSIS payloads
+        shell: pwsh
+        run: |
+          $release = $env:MTS_WINDOWS_OUTPUT
+          $msi = Get-ChildItem -LiteralPath (Join-Path $release 'installers') -File -Recurse | Where-Object Extension -ieq '.msi' | Select-Object -First 1
+          $nsis = Get-ChildItem -LiteralPath (Join-Path $release 'installers') -File -Recurse | Where-Object Extension -ieq '.exe' | Select-Object -First 1
+          if ($null -eq $msi -or $null -eq $nsis) { throw 'Both MSI and NSIS artifacts are required.' }
+
+          $msiRoot = Join-Path $env:RUNNER_TEMP 'mts-msi-expanded'
+          $msiArguments = "/a `"$($msi.FullName)`" /qn TARGETDIR=`"$msiRoot`""
+          $msiProcess = Start-Process -FilePath msiexec.exe -ArgumentList $msiArguments -Wait -PassThru
+          if ($msiProcess.ExitCode -ne 0) { throw "MSI administrative extraction failed with exit code $($msiProcess.ExitCode)." }
+          if (-not (Get-ChildItem -LiteralPath $msiRoot -Filter 'worker.py' -File -Recurse -ErrorAction SilentlyContinue)) {
+            throw 'MSI does not contain the embedded worker runtime marker.'
+          }
+
+          $nsisRoot = Join-Path $env:RUNNER_TEMP 'mts-nsis-expanded'
+          $sevenZip = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if ([string]::IsNullOrWhiteSpace($sevenZip)) { throw '7z.exe is required to inspect the NSIS candidate.' }
+          & $sevenZip x $nsis.FullName ("-o{0}" -f $nsisRoot) '-y' | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "NSIS extraction failed with exit code $LASTEXITCODE." }
+          if (-not (Get-ChildItem -LiteralPath $nsisRoot -Filter 'worker.py' -File -Recurse -ErrorAction SilentlyContinue)) {
+            throw 'NSIS does not contain the embedded worker runtime marker.'
+          }
+
+      - name: Upload Windows candidate, manifest, and portable archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mts-windows-${{ inputs.architecture }}-${{ inputs.release_mode }}
+          path: ${{ runner.temp }}/mts-release/windows-${{ inputs.architecture }}*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove imported signing certificate
+        if: always() && inputs.release_mode == 'signed'
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_THUMBPRINT)) {
+            $thumbprint = $env:WINDOWS_CODESIGN_THUMBPRINT -replace ' ', ''
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'mts-codesign.pfx') -Force -ErrorAction SilentlyContinue

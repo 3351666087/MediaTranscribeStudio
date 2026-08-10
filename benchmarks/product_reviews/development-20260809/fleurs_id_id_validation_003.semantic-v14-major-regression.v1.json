@@ -1,0 +1,124 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "semantic-major-regression-fixture",
+  "fixtureId": "fleurs-id-id-validation-003-speaker-continuity-v1",
+  "visibilityPolicy": {
+    "caseIdIsAuditOnly": true,
+    "referenceTranscriptVisibleToArbitrator": false,
+    "expectedDecisionVisibleToArbitrator": false,
+    "modelIdentityVisibleToArbitrator": false
+  },
+  "auditBinding": {
+    "caseId": "fleurs_id_id_validation_003",
+    "caseAlias": "case-012",
+    "caseSha256": "58ade569d55da761a3007c0fb28673d8e1493f4614f0e2981229b0b26968ca0a",
+    "postRunAuditId": "multilingual22-qwen35-27b-v14-development-20260810-r2-batch32.codex-visible-review",
+    "postRunAuditFileSha256": "6c8b16a3c7989d461e314471e081a56ac080f29276ba12f7d66059d188c7b699",
+    "postRunAuditCanonicalSha256": "094e3d0cf94dd93c66250bc09607582baa9b60b80ab1383c4928f397b08f316b"
+  },
+  "inputBinding": {
+    "sourceMediaSha256": "4f03d0412ae4e902f6d3adeda0a5b3136a51c1eef1080ff47e6638c60e9bf27f",
+    "transcriptDocumentSha256": "2f6960a5b6ebb3258c5608f686d9514f486f7382a580faac04a35c6415faec6a",
+    "candidateLatticeSha256": "93935966fea37391b78e3305e771fbc262dda2f07700aa77a346e411c718f8a8",
+    "sourceDurationMs": 8760
+  },
+  "visibleInput": {
+    "language": "id-ID",
+    "speakerCount": 2,
+    "speakerIds": [
+      "speaker-1",
+      "speaker-2"
+    ],
+    "joinedText": "Sebagian besar distrik dilayani oleh bus kruaster Jepang kecil yang nyaman dan kokoh",
+    "segments": [
+      {
+        "segmentId": "window-000001.speaker-run-01",
+        "startMs": 280,
+        "endMs": 2220,
+        "speakerId": "speaker-1",
+        "language": "id-ID",
+        "text": "Sebagian besar distrik"
+      },
+      {
+        "segmentId": "window-000001.cardinality-03",
+        "startMs": 2220,
+        "endMs": 3000,
+        "speakerId": "speaker-2",
+        "language": "id-ID",
+        "text": "dilayani"
+      },
+      {
+        "segmentId": "window-000001.speaker-run-03",
+        "startMs": 3000,
+        "endMs": 5600,
+        "speakerId": "speaker-1",
+        "language": "id-ID",
+        "text": "oleh bus kruaster Jepang kecil"
+      },
+      {
+        "segmentId": "window-000001.cardinality-07",
+        "startMs": 5600,
+        "endMs": 6420,
+        "speakerId": "speaker-2",
+        "language": "id-ID",
+        "text": "yang nyaman"
+      },
+      {
+        "segmentId": "window-000001.cardinality-08",
+        "startMs": 6420,
+        "endMs": 7290,
+        "speakerId": "speaker-1",
+        "language": "id-ID",
+        "text": "dan kokoh"
+      }
+    ]
+  },
+  "blindReviewFinding": {
+    "severity": "major",
+    "category": "speaker-continuity-and-asr-lexical",
+    "observation": "Five timestamp-adjacent fragments alternate labels inside one continuous Indonesian sentence; 'bus kruaster' is also a bounded lexical defect.",
+    "reason": "A timeline request without all five assignment requests cannot repair the attribution, while unrelated language or disposition work cannot substitute for speaker evidence.",
+    "expectedRequests": [
+      {
+        "domain": "speaker-cardinality-timeline",
+        "scopeId": "media",
+        "requestKind": "timeline-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.speaker-run-01",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-03",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.speaker-run-03",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-07",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "speaker-assignment",
+        "scopeId": "segment:window-000001.cardinality-08",
+        "requestKind": "speaker-assignment-challenger"
+      },
+      {
+        "domain": "asr-text",
+        "scopeId": "segment:window-000001.speaker-run-03",
+        "requestKind": "provider-native-nbest"
+      }
+    ],
+    "forbiddenSubstituteDomains": [
+      "speech-disposition",
+      "language-span"
+    ]
+  },
+  "canonicalSha256": "6c1116db8e0c3ced5ea72110801d569ead609b8002131810c32d293cd4e7a989"
+}

@@ -214,6 +214,35 @@ def normalize_language_tag(value: Any, *, allow_auto: bool = False) -> str:
     return "-".join(output)
 
 
+def language_tags_compatible(left: Any, right: Any) -> bool:
+    """Return whether two persisted language tags can describe one ASR span.
+
+    ASR providers commonly emit a primary tag (``zh``) while a language
+    detector emits a more specific regional or script tag (``zh-CN`` or
+    ``zh-Hans``).  Those tags are compatible evidence, whereas different
+    primary languages are not. ``und`` and ``mul`` remain explicit wildcard
+    evidence: they do not contradict a concrete span language.
+    """
+
+    left_tag = normalize_language_tag(left, allow_auto=False)
+    right_tag = normalize_language_tag(right, allow_auto=False)
+    if left_tag == right_tag:
+        return True
+    if {
+        left_tag,
+        right_tag,
+    } & {UNDETERMINED_LANGUAGE, MULTIPLE_LANGUAGES}:
+        return True
+
+    def equivalence_primary(tag: str) -> str:
+        primary = tag.split("-", 1)[0]
+        # ``cmn`` is the ISO 639-3 extlang used for Mandarin and is routinely
+        # serialized alongside the broader BCP-47 ``zh`` tag.
+        return "zh" if primary == "cmn" else primary
+
+    return equivalence_primary(left_tag) == equivalence_primary(right_tag)
+
+
 def qwen_language_for_request(requested_language: Any) -> str | None:
     """Map a request language to the canonical Qwen3-ASR language name.
 

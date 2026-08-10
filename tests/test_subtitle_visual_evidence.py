@@ -34,6 +34,7 @@ from backend.subtitle_visual_evidence import (
     verify_evidence_artifact_hash,
 )
 from backend.subtitle_visual_qa import (
+    contrast_ratio,
     default_subtitle_visual_qa_policy,
     evaluate_subtitle_visual_qa,
 )
@@ -172,6 +173,7 @@ def _delivery_receipt(
     *,
     mode: str,
     receipt_marker: str = "fixture-a",
+    subtitle_path: Path | None = None,
 ) -> dict[str, Any]:
     source_payload = files["source"].read_bytes()
     rendered_payload = files["rendered"].read_bytes()
@@ -185,6 +187,9 @@ def _delivery_receipt(
         "schemaVersion": "1.0.0",
         "status": "delivered",
         "mode": mode,
+        "subtitlePath": (
+            str(subtitle_path.resolve()) if subtitle_path is not None else None
+        ),
         "receiptMarker": receipt_marker,
         "sourceIntegrity": {
             "unchanged": True,
@@ -211,11 +216,13 @@ class FakeRunner:
         *,
         on_run: Callable[[tuple[str, ...]], None] | None = None,
         oversized: bool = False,
+        frame_timestamps: list[str] | None = None,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.cwds: list[Path] = []
         self.on_run = on_run
         self.oversized = oversized
+        self.frame_timestamps = frame_timestamps
 
     def run(
         self,
@@ -249,10 +256,11 @@ class FakeRunner:
             payload = {
                 "frames": [
                     {
-                        "best_effort_timestamp_time": seconds,
+                        "best_effort_timestamp_time": timestamp,
                         "width": 1920,
                         "height": 1080,
                     }
+                    for timestamp in (self.frame_timestamps or [seconds])
                 ]
             }
             return EvidenceProcessResult(
@@ -311,6 +319,8 @@ class FakeAnalyzer:
         *,
         rendered_frame_path: Path,
         source_frame_path: Path,
+        contrast_background_frame_path: Path | None = None,
+        glyph_fill_matte_frame_path: Path | None = None,
         frame_id: str,
         timestamp_ms: int,
         width_px: int,
@@ -322,6 +332,8 @@ class FakeAnalyzer:
             {
                 "rendered": rendered_frame_path,
                 "source": source_frame_path,
+                "contrastBackground": contrast_background_frame_path,
+                "glyphFillMatte": glyph_fill_matte_frame_path,
                 "frameId": frame_id,
                 "timestampMs": timestamp_ms,
                 "cues": [cue["cueId"] for cue in cues],
@@ -359,6 +371,26 @@ class FakeAnalyzer:
                             foreground_pixel_count=96,
                             background_pixel_count=128,
                         ),
+                    ),
+                    contrast_diagnostics=(
+                        {
+                            "strategy": "glyph-fill-core-component-q05-v2",
+                            "glyphComponentCount": 2,
+                            "glyphComponentsCovered": 2,
+                            "pairedCorePixelCount": 192,
+                            "glyphCoreAlphaThreshold": 0.8,
+                            "glyphNonzeroAlphaQuantile75": 0.75,
+                            "componentContrastQuantile": 0.05,
+                            "tinyComponentFallbackCount": 0,
+                            "tinyComponentMaxPixels": 6,
+                            "tinyComponentMinimumAlpha": 0.5,
+                            "minimumComponentCorePixelCount": 64,
+                            "effectiveBackgroundClasses": ["dark", "light"],
+                            "underlyingSceneClasses": ["dark", "light"],
+                            "componentCoverageSha256": "9" * 64,
+                        }
+                        if contrast_background_frame_path is not None
+                        else None
                     ),
                 )
             )
@@ -509,6 +541,63 @@ def test_same_inputs_produce_identical_evidence(
     ]
 
 
+def test_long_gop_seek_selects_closest_frame_within_cue(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    runner = FakeRunner(
+        frame_timestamps=["0.000000", "2.498000", "2.502000"]
+    )
+
+    payload = _collector(files, runner=runner).collect(
+        _request(files)
+    ).to_dict()
+
+    candidate = payload["selection"]["candidates"][0]
+    assert candidate["requestedTimestampMs"] == 2500
+    assert candidate["decodedTimestampMs"] == 2502
+    timestamp_commands = [
+        command for command in runner.commands if "-show_frames" in command
+    ]
+    assert len(timestamp_commands) == 1
+    command = timestamp_commands[0]
+    assert command[command.index("-read_intervals") + 1] == "2.500%4.000"
+
+
+def test_frame_resolution_without_a_cue_interior_frame_fails_closed(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    runner = FakeRunner(frame_timestamps=["0.000000", "4.001000"])
+
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        _collector(files, runner=runner).collect(_request(files))
+
+    assert (
+        captured.value.code
+        is SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE
+    )
+
+
+@pytest.mark.parametrize("invalid_timestamp", ["nan", "604800.001"])
+def test_every_decoded_frame_timestamp_is_validated(
+    tmp_path: Path,
+    invalid_timestamp: str,
+) -> None:
+    files = _files(tmp_path)
+    runner = FakeRunner(
+        frame_timestamps=["2.500000", invalid_timestamp]
+    )
+
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        _collector(files, runner=runner).collect(_request(files))
+
+    assert (
+        captured.value.code
+        is SubtitleVisualEvidenceErrorCode.FRAME_TIME_UNAVAILABLE
+    )
+
+
 def test_explicit_tools_argv_only_and_same_directory_cleanup(
     tmp_path: Path,
 ) -> None:
@@ -563,7 +652,11 @@ def test_soft_mux_renders_only_representative_png_with_private_ass(
     files = _files(tmp_path)
     overlay = _ass_overlay(tmp_path)
     overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
-    receipt = _delivery_receipt(files, mode="soft-mux")
+    receipt = _delivery_receipt(
+        files,
+        mode="soft-mux",
+        subtitle_path=overlay,
+    )
     runner = FakeRunner()
 
     payload = _collector(files, runner=runner).collect(
@@ -577,8 +670,14 @@ def test_soft_mux_renders_only_representative_png_with_private_ass(
     overlay_commands = [
         command for command in runner.commands if "-vf" in command
     ]
-    assert len(overlay_commands) == 1
-    command = overlay_commands[0]
+    assert len(overlay_commands) == 3
+    commands_by_filter = {
+        command[command.index("-vf") + 1]: command
+        for command in overlay_commands
+    }
+    command = commands_by_filter[
+        "setpts=PTS+2.500/TB,ass=filename=canonical-overlay.ass"
+    ]
     assert Path(command[command.index("-i") + 1]).suffix == ".png"
     assert command[command.index("-vf") + 1] == (
         "setpts=PTS+2.500/TB,ass=filename=canonical-overlay.ass"
@@ -587,9 +686,27 @@ def test_soft_mux_renders_only_representative_png_with_private_ass(
     assert command[command.index("-frames:v") + 1] == "1"
     assert str(files["rendered"].resolve()) not in command
     assert str(overlay.resolve()) not in command
+    assert (
+        "setpts=PTS+2.500/TB,ass=filename=contrast-background.ass"
+        in commands_by_filter
+    )
+    assert (
+        "lutrgb=r=0:g=0:b=0,setpts=PTS+2.500/TB,"
+        "ass=filename=glyph-fill-matte.ass"
+        in commands_by_filter
+    )
     serialized = canonical_json(payload)
     assert str(overlay.resolve()) not in serialized
-    assert overlay_sha256 not in serialized
+    assert overlay_sha256 in serialized
+    assert payload["contrastMatte"]["canonicalAssOverlaySha256"] == (
+        overlay_sha256
+    )
+    frame_record = payload["selection"]["frames"][0]
+    assert len(frame_record["contrastBackgroundImageSha256"]) == 64
+    assert len(frame_record["glyphFillMatteImageSha256"]) == 64
+    assert frame_record["contrastAnalysis"][0][
+        "glyphComponentsCovered"
+    ] == frame_record["contrastAnalysis"][0]["glyphComponentCount"]
     assert payload["renderArtifact"]["renderConfigurationSha256"] != SHA_A
     assert payload["qaRequest"]["renderArtifact"][
         "renderConfigurationSha256"
@@ -612,6 +729,7 @@ def test_soft_mux_hash_chain_binds_overlay_receipt_and_font_evidence(
         files,
         mode="soft-mux",
         receipt_marker="receipt-a",
+        subtitle_path=first_overlay,
     )
     first = _collector(files).collect(
         _request(files),
@@ -624,6 +742,7 @@ def test_soft_mux_hash_chain_binds_overlay_receipt_and_font_evidence(
         files,
         mode="soft-mux",
         receipt_marker="receipt-b",
+        subtitle_path=first_overlay,
     )
     second = _collector(files).collect(
         _request(files),
@@ -672,7 +791,12 @@ def test_soft_mux_hash_chain_binds_overlay_receipt_and_font_evidence(
         _request(files),
         canonical_ass_overlay_path=second_overlay,
         canonical_ass_overlay_sha256=second_overlay_sha256,
-        delivery_receipt=first_receipt,
+        delivery_receipt=_delivery_receipt(
+            files,
+            mode="soft-mux",
+            receipt_marker="receipt-a",
+            subtitle_path=second_overlay,
+        ),
     ).to_dict()
     assert with_other_overlay["renderArtifact"][
         "renderConfigurationSha256"
@@ -683,7 +807,7 @@ def test_soft_mux_hash_chain_binds_overlay_receipt_and_font_evidence(
     ("mode", "include_overlay", "hash_override"),
     [
         ("soft-mux", False, None),
-        ("burn-in", True, None),
+        ("burn-in", False, None),
         ("soft-mux", True, "f" * 64),
     ],
 )
@@ -697,7 +821,11 @@ def test_overlay_and_delivery_mismatch_fail_closed(
     overlay = _ass_overlay(tmp_path)
     overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
     kwargs: dict[str, Any] = {
-        "delivery_receipt": _delivery_receipt(files, mode=mode),
+        "delivery_receipt": _delivery_receipt(
+            files,
+            mode=mode,
+            subtitle_path=overlay if include_overlay else None,
+        ),
     }
     if include_overlay:
         kwargs["canonical_ass_overlay_path"] = overlay
@@ -706,6 +834,28 @@ def test_overlay_and_delivery_mismatch_fail_closed(
         )
     with pytest.raises(SubtitleVisualEvidenceError) as captured:
         _collector(files).collect(_request(files), **kwargs)
+    assert captured.value.code is SubtitleVisualEvidenceErrorCode.INVALID_REQUEST
+
+
+def test_inline_ass_overrides_fail_closed_for_contrast_matte_transform(
+    tmp_path: Path,
+) -> None:
+    files = _files(tmp_path)
+    overlay = _ass_overlay(tmp_path, text=r"{\c&H00FFFFFF&}Hello")
+    overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
+
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        _collector(files).collect(
+            _request(files),
+            canonical_ass_overlay_path=overlay,
+            canonical_ass_overlay_sha256=overlay_sha256,
+            delivery_receipt=_delivery_receipt(
+                files,
+                mode="burn-in",
+                subtitle_path=overlay,
+            ),
+        )
+
     assert captured.value.code is SubtitleVisualEvidenceErrorCode.INVALID_REQUEST
 
 
@@ -737,6 +887,7 @@ def test_overlay_mutation_during_collection_fails_closed(
             delivery_receipt=_delivery_receipt(
                 files,
                 mode="soft-mux",
+                subtitle_path=overlay,
             ),
         )
     assert captured.value.code is SubtitleVisualEvidenceErrorCode.SOURCE_CHANGED
@@ -745,17 +896,28 @@ def test_overlay_mutation_during_collection_fails_closed(
     )
 
 
-def test_burn_in_receipt_is_bound_without_ass_overlay(
+def test_burn_in_receipt_binds_canonical_ass_contrast_mattes(
     tmp_path: Path,
 ) -> None:
     files = _files(tmp_path)
+    overlay = _ass_overlay(tmp_path)
+    overlay_sha256 = hashlib.sha256(overlay.read_bytes()).hexdigest()
     runner = FakeRunner()
     payload = _collector(files, runner=runner).collect(
         _request(files),
-        delivery_receipt=_delivery_receipt(files, mode="burn-in"),
+        canonical_ass_overlay_path=overlay,
+        canonical_ass_overlay_sha256=overlay_sha256,
+        delivery_receipt=_delivery_receipt(
+            files,
+            mode="burn-in",
+            subtitle_path=overlay,
+        ),
     ).to_dict()
     assert payload["renderArtifact"]["renderConfigurationSha256"] != SHA_A
-    assert all("-vf" not in command for command in runner.commands)
+    assert len([command for command in runner.commands if "-vf" in command]) == 2
+    assert payload["contrastMatte"]["canonicalAssOverlaySha256"] == (
+        overlay_sha256
+    )
     assert verify_evidence_artifact_hash(payload)
 
 
@@ -1010,6 +1172,205 @@ def test_missing_pillow_fails_closed_before_reading_images(
         captured.value.code
         is SubtitleVisualEvidenceErrorCode.ANALYZER_UNAVAILABLE
     )
+
+
+def _glyph_matte_observation(
+    tmp_path: Path,
+    *,
+    foreground_rgb: tuple[int, int, int],
+    high_contrast_outlier: bool = False,
+    tiny_component_alpha: tuple[int, ...] | None = None,
+) -> FrameObservation:
+    image_module = pytest.importorskip("PIL.Image")
+    width = height = 100
+    source = image_module.new("RGB", (width, height), (0, 0, 0))
+    for x_coord in range(50, width):
+        for y_coord in range(height):
+            source.putpixel((x_coord, y_coord), (255, 255, 255))
+
+    contrast_background = source.copy()
+    rendered = source.copy()
+    for x_coord in range(8, 92):
+        for y_coord in range(24, 76):
+            contrast_background.putpixel((x_coord, y_coord), (80, 80, 80))
+            rendered.putpixel((x_coord, y_coord), (80, 80, 80))
+
+    matte = image_module.new("RGB", (width, height), (0, 0, 0))
+    component_origins = ((18, 40), (37, 40), (57, 40), (76, 40))
+    first_core: tuple[int, int] | None = None
+    for origin_x, origin_y in component_origins:
+        for x_coord in range(origin_x, origin_x + 8):
+            for y_coord in range(origin_y, origin_y + 12):
+                edge = (
+                    x_coord in {origin_x, origin_x + 7}
+                    or y_coord in {origin_y, origin_y + 11}
+                )
+                alpha = 96 if edge else 255
+                matte.putpixel((x_coord, y_coord), (alpha, alpha, alpha))
+                rendered.putpixel(
+                    (x_coord, y_coord),
+                    (88, 88, 88) if edge else foreground_rgb,
+                )
+                if not edge and first_core is None:
+                    first_core = (x_coord, y_coord)
+    if high_contrast_outlier:
+        assert first_core is not None
+        rendered.putpixel(first_core, (255, 255, 255))
+    if tiny_component_alpha is not None:
+        assert len(tiny_component_alpha) >= 1
+        tiny_coordinates = (
+            (10, 30),
+            (11, 30),
+            (12, 30),
+            (10, 31),
+            (11, 31),
+            (12, 31),
+            (10, 32),
+            (11, 32),
+        )
+        assert len(tiny_component_alpha) <= len(tiny_coordinates)
+        for coordinate, alpha in zip(
+            tiny_coordinates, tiny_component_alpha
+        ):
+            matte.putpixel(coordinate, (alpha, alpha, alpha))
+            rendered.putpixel(coordinate, foreground_rgb)
+
+    paths = {
+        "source": tmp_path / "matte-source.png",
+        "rendered": tmp_path / "matte-rendered.png",
+        "background": tmp_path / "matte-background.png",
+        "matte": tmp_path / "glyph-fill-matte.png",
+    }
+    source.save(paths["source"])
+    rendered.save(paths["rendered"])
+    contrast_background.save(paths["background"])
+    matte.save(paths["matte"])
+    return PillowFrameAnalyzer().analyze(
+        rendered_frame_path=paths["rendered"],
+        source_frame_path=paths["source"],
+        contrast_background_frame_path=paths["background"],
+        glyph_fill_matte_frame_path=paths["matte"],
+        frame_id="frame-glyph-matte",
+        timestamp_ms=1000,
+        width_px=width,
+        height_px=height,
+        cues=[
+            {
+                "cueId": "cue-glyph-matte",
+                "bounds": {"x": 5, "y": 20, "width": 90, "height": 60},
+            }
+        ],
+        contrast_policy={
+            "darkMaximumLuminance": 0.35,
+            "lightMinimumLuminance": 0.65,
+        },
+    )
+
+
+def test_glyph_matte_ignores_antialias_edges_and_covers_every_component(
+    tmp_path: Path,
+) -> None:
+    observation = _glyph_matte_observation(
+        tmp_path,
+        foreground_rgb=(250, 190, 80),
+    )
+
+    instance = observation.instances[0]
+    assert len(instance.contrast_samples) == 1
+    sample = instance.contrast_samples[0]
+    assert sample.background_class == "dark"
+    assert contrast_ratio(sample.foreground_rgb, sample.background_rgb) > 3.0
+    assert sample.foreground_pixel_count == 240
+    assert instance.contrast_diagnostics == {
+        "strategy": "glyph-fill-core-component-q05-v2",
+        "glyphComponentCount": 4,
+        "glyphComponentsCovered": 4,
+        "pairedCorePixelCount": 240,
+        "glyphCoreAlphaThreshold": 1.0,
+        "glyphNonzeroAlphaQuantile75": 1.0,
+        "componentContrastQuantile": 0.05,
+        "tinyComponentFallbackCount": 0,
+        "tinyComponentMaxPixels": 6,
+        "tinyComponentMinimumAlpha": 0.5,
+        "minimumComponentCorePixelCount": 60,
+        "effectiveBackgroundClasses": ["dark"],
+        "underlyingSceneClasses": ["dark", "light"],
+        "componentCoverageSha256": instance.contrast_diagnostics[
+            "componentCoverageSha256"
+        ],
+    }
+
+
+def test_uniform_low_contrast_glyph_components_fail_contrast_threshold(
+    tmp_path: Path,
+) -> None:
+    observation = _glyph_matte_observation(
+        tmp_path,
+        foreground_rgb=(105, 105, 105),
+    )
+
+    sample = observation.instances[0].contrast_samples[0]
+    assert contrast_ratio(sample.foreground_rgb, sample.background_rgb) < 3.0
+
+
+def test_tiny_high_contrast_outlier_cannot_rescue_low_contrast_text(
+    tmp_path: Path,
+) -> None:
+    observation = _glyph_matte_observation(
+        tmp_path,
+        foreground_rgb=(105, 105, 105),
+        high_contrast_outlier=True,
+    )
+
+    sample = observation.instances[0].contrast_samples[0]
+    assert sample.foreground_rgb == "#696969"
+    assert contrast_ratio(sample.foreground_rgb, sample.background_rgb) < 3.0
+
+
+def test_tiny_rasterized_component_uses_local_core_fallback(
+    tmp_path: Path,
+) -> None:
+    observation = _glyph_matte_observation(
+        tmp_path,
+        foreground_rgb=(250, 190, 80),
+        tiny_component_alpha=(100, 130, 140, 150, 160, 166),
+    )
+
+    instance = observation.instances[0]
+    assert instance.contrast_diagnostics is not None
+    assert instance.contrast_diagnostics["strategy"] == (
+        "glyph-fill-core-component-q05-v2"
+    )
+    assert instance.contrast_diagnostics["tinyComponentFallbackCount"] == 1
+    assert instance.contrast_diagnostics["minimumComponentCorePixelCount"] == 2
+    assert instance.contrast_diagnostics["effectiveBackgroundClasses"] == [
+        "dark"
+    ]
+    assert instance.contrast_diagnostics["underlyingSceneClasses"] == [
+        "dark",
+        "light",
+    ]
+
+
+@pytest.mark.parametrize(
+    "alpha_values",
+    [
+        (160, 160, 160, 160, 160, 160, 160),
+        (100, 100, 100, 100, 100, 100),
+    ],
+)
+def test_uncovered_glyph_component_still_fails_closed(
+    tmp_path: Path,
+    alpha_values: tuple[int, ...],
+) -> None:
+    with pytest.raises(SubtitleVisualEvidenceError) as captured:
+        _glyph_matte_observation(
+            tmp_path,
+            foreground_rgb=(250, 190, 80),
+            tiny_component_alpha=alpha_values,
+        )
+    assert captured.value.code is SubtitleVisualEvidenceErrorCode.ANALYSIS_INCOMPLETE
+    assert "uncovered glyph component" in str(captured.value).casefold()
 
 
 def test_pillow_analyzer_collects_real_visible_ink_and_dark_light_pixels(

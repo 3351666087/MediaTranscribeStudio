@@ -1,0 +1,1281 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "real-multilingual-semantic-development-freeze",
+  "freezeId": "real-multilingual-semantic-development-v1",
+  "selection": {
+    "freezeSplit": "development",
+    "targetLanguages": [
+      "zh-CN",
+      "yue-Hant-HK",
+      "en-US",
+      "es-419",
+      "fr-FR",
+      "id-ID",
+      "ja-JP",
+      "ko-KR",
+      "ar-EG",
+      "hi-IN"
+    ],
+    "productionCaseIds": [
+      "minds_zh_cn_258",
+      "minds_en_us_034",
+      "minds_fr_fr_089",
+      "fleurs_id_id_validation_003"
+    ],
+    "referenceLanguages": [
+      "yue-Hant-HK",
+      "es-419",
+      "ja-JP",
+      "ko-KR",
+      "ar-EG",
+      "hi-IN"
+    ],
+    "productionPolicy": "latest-valid-manually-adjudicated-production-run",
+    "referencePolicy": "all-locally-verified-FLEURS-development-rows",
+    "heldOutIncluded": false
+  },
+  "inputContract": {
+    "benchmarkTool": "tools/benchmark_real_multilingual_semantic_models.py",
+    "casesContainOnlyBenchmarkEligibleRows": true,
+    "requiredArtifacts": [
+      "hash-bound transcript document",
+      "hash-bound initial candidate lattice",
+      "manual final-adjudicated baseline"
+    ],
+    "referenceOnlyRowsNeverEnterCases": true
+  },
+  "sourceEvidence": {
+    "globalManifest": {
+      "path": "../../../sample_library/global-manifest.v1.json",
+      "fileSha256": "04504dfdd2fa2740104692a6e66c4f189e3fccc35b44210a07cad20ebc53b7c1"
+    },
+    "fleursReference": {
+      "path": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+      "fileSha256": "5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01",
+      "canonicalSha256": "3497ab0fb1b2dfb842a94b80875effdb36d244c2ec05c348d421010f2ac48c04"
+    },
+    "productRunsRoot": "../../../../mts-eval/product-runs"
+  },
+  "truthPolicy": {
+    "referenceTextCopiedIntoFreeze": false,
+    "referenceTextHashAndLocatorPersisted": true,
+    "referenceOnlyRowsAreNotManualBaselines": true,
+    "modelIdentityPresent": false
+  },
+  "counts": {
+    "benchmarkCases": 4,
+    "inventoryRows": 22,
+    "production-lattice-human-baseline": 4,
+    "audio-reference-only": 18,
+    "unavailable": 0,
+    "rejectedProductionCandidates": 0
+  },
+  "languageCoverage": [
+    {
+      "language": "zh-CN",
+      "productionCaseCount": 1,
+      "referenceOnlyCount": 0,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "yue-Hant-HK",
+      "productionCaseCount": 0,
+      "referenceOnlyCount": 3,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "en-US",
+      "productionCaseCount": 1,
+      "referenceOnlyCount": 0,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "es-419",
+      "productionCaseCount": 0,
+      "referenceOnlyCount": 3,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "fr-FR",
+      "productionCaseCount": 1,
+      "referenceOnlyCount": 0,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "id-ID",
+      "productionCaseCount": 1,
+      "referenceOnlyCount": 0,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "ja-JP",
+      "productionCaseCount": 0,
+      "referenceOnlyCount": 3,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "ko-KR",
+      "productionCaseCount": 0,
+      "referenceOnlyCount": 3,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "ar-EG",
+      "productionCaseCount": 0,
+      "referenceOnlyCount": 3,
+      "unavailableCount": 0,
+      "covered": true
+    },
+    {
+      "language": "hi-IN",
+      "productionCaseCount": 0,
+      "referenceOnlyCount": 3,
+      "unavailableCount": 0,
+      "covered": true
+    }
+  ],
+  "cases": [
+    {
+      "caseId": "minds_zh_cn_258",
+      "language": "zh-CN",
+      "documentPath": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/transcript-document.v2.json",
+      "latticePath": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/semantic/composition-runs/f84b70575b88a9337d4071c5214ce6feee24aeb66fc1204d4334dfe3d4fd1de8/semantic-candidate-lattice.initial.v1.json",
+      "baseline": {
+        "schemaVersion": "1.0.0",
+        "artifactType": "final-adjudicated-transcript",
+        "artifactId": "manual-baseline-f84b70575b88a9337d4071c5",
+        "status": "final",
+        "disposition": "transcribable-speech",
+        "generatedAt": "2026-08-09T04:52:36.166178Z",
+        "adjudicationSource": "human",
+        "input": {
+          "sourceMediaSha256": "9eeb3d1be60d5c4ebc9643a65a54a79e6bcc53ec1bf688ee9c1b3c558039be0b",
+          "transcriptDocumentSha256": "f84b70575b88a9337d4071c5214ce6feee24aeb66fc1204d4334dfe3d4fd1de8",
+          "candidateLatticeSha256": "6227490e82cacad2d0485a5b93bd3eddc657bd1c8100486104e447636359f1fd",
+          "reviewQueueSha256": "1e9c7f1998592308ce18ef361b6a52d9527e1b44ac79397e2bccec242ff0b713"
+        },
+        "review": {
+          "openCount": 0,
+          "decisionCount": 10,
+          "actorIds": [
+            "codex-semantic-adjudicator"
+          ],
+          "source": "human"
+        },
+        "timeline": {
+          "turns": [
+            {
+              "startMs": 620,
+              "endMs": 1360,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 1360,
+              "endMs": 2126,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 2126,
+              "endMs": 2880,
+              "speakerId": "speaker-1",
+              "overlap": false
+            }
+          ]
+        },
+        "segments": [
+          {
+            "id": "window-000001.cardinality-01",
+            "startMs": 620,
+            "endMs": 1360,
+            "speakerId": "speaker-1",
+            "language": "zh-CN",
+            "finalText": "你好",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-02",
+            "startMs": 1360,
+            "endMs": 2126,
+            "speakerId": "speaker-1",
+            "language": "zh-CN",
+            "finalText": "请冻结我的",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-03",
+            "startMs": 2126,
+            "endMs": 2880,
+            "speakerId": "speaker-1",
+            "language": "zh-CN",
+            "finalText": "卡",
+            "overlapping": false
+          }
+        ],
+        "provenance": {
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1",
+          "modelGeneratedBaseline": false
+        }
+      },
+      "baselineAuditSource": "human",
+      "documentSha256": "f84b70575b88a9337d4071c5214ce6feee24aeb66fc1204d4334dfe3d4fd1de8",
+      "latticeSha256": "6227490e82cacad2d0485a5b93bd3eddc657bd1c8100486104e447636359f1fd",
+      "baselineSha256": "8a434b1146266f22839464c65856be77abd19f3f6cc41d242faef6f05b0617b4",
+      "caseSha256": "d3cb8d1bdb76b41c1c9f46a5085bd583b7b5d968a12de5c42d2868f0ec514eec"
+    },
+    {
+      "caseId": "minds_en_us_034",
+      "language": "en-US",
+      "documentPath": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/transcript-document.v2.json",
+      "latticePath": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/semantic/composition-runs/144c8c7ba95f4b0d60e136ec3ba31237316220abf05fd9507031dde099b477b8/semantic-candidate-lattice.initial.v1.json",
+      "baseline": {
+        "schemaVersion": "1.0.0",
+        "artifactType": "final-adjudicated-transcript",
+        "artifactId": "manual-baseline-144c8c7ba95f4b0d60e136ec",
+        "status": "final",
+        "disposition": "transcribable-speech",
+        "generatedAt": "2026-08-09T05:14:13.996504Z",
+        "adjudicationSource": "human",
+        "input": {
+          "sourceMediaSha256": "1ec88e91ff3d34141369de420f4a3ad242044b5891f06a01d6c79bb2afcb479e",
+          "transcriptDocumentSha256": "144c8c7ba95f4b0d60e136ec3ba31237316220abf05fd9507031dde099b477b8",
+          "candidateLatticeSha256": "3d24303f611ca0b859990812fd09c994e342bc4211e932fc9ca07cde17981cf7",
+          "reviewQueueSha256": "65dcd049362e952ae3254473bcb635c704acfd3dfefae000232c9eb58d91825f"
+        },
+        "review": {
+          "openCount": 0,
+          "decisionCount": 8,
+          "actorIds": [
+            "codex-semantic-adjudicator"
+          ],
+          "source": "human"
+        },
+        "timeline": {
+          "turns": [
+            {
+              "startMs": 540,
+              "endMs": 3020,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 3330,
+              "endMs": 6820,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 9230,
+              "endMs": 13800,
+              "speakerId": "speaker-1",
+              "overlap": false
+            }
+          ]
+        },
+        "segments": [
+          {
+            "id": "window-000001.speaker-run-01",
+            "startMs": 540,
+            "endMs": 3020,
+            "speakerId": "speaker-1",
+            "language": "en-US",
+            "finalText": "Yes I'd like to set up a joint account",
+            "overlapping": false
+          },
+          {
+            "id": "window-000002.speaker-run-01",
+            "startMs": 3330,
+            "endMs": 6820,
+            "speakerId": "speaker-1",
+            "language": "en-US",
+            "finalText": "I'm allowed to set up a joint account with anyone",
+            "overlapping": false
+          },
+          {
+            "id": "window-000003.speaker-run-01",
+            "startMs": 9230,
+            "endMs": 13800,
+            "speakerId": "speaker-1",
+            "language": "en-US",
+            "finalText": "And where in the app is the option for me to sign up for a joint account",
+            "overlapping": false
+          }
+        ],
+        "provenance": {
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1",
+          "modelGeneratedBaseline": false
+        }
+      },
+      "baselineAuditSource": "human",
+      "documentSha256": "144c8c7ba95f4b0d60e136ec3ba31237316220abf05fd9507031dde099b477b8",
+      "latticeSha256": "3d24303f611ca0b859990812fd09c994e342bc4211e932fc9ca07cde17981cf7",
+      "baselineSha256": "bb5b6d1af2c818c2c8f55157ef0e61788d6722871e7d74589085b936192c8e13",
+      "caseSha256": "9974b15cf66d8097d6895e42dbde24af65fca33893d3e01d14cf80be1098795c"
+    },
+    {
+      "caseId": "minds_fr_fr_089",
+      "language": "fr-FR",
+      "documentPath": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/transcript-document.v2.json",
+      "latticePath": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/semantic/composition-runs/6a4c441beb85307462853fd9a08d8ee82597852b9b7107e53a0f5f9cb279d76d/semantic-candidate-lattice.initial.v1.json",
+      "baseline": {
+        "schemaVersion": "1.0.0",
+        "artifactType": "final-adjudicated-transcript",
+        "artifactId": "manual-baseline-6a4c441beb85307462853fd9",
+        "status": "final",
+        "disposition": "transcribable-speech",
+        "generatedAt": "2026-08-07T14:33:52.626857Z",
+        "adjudicationSource": "human",
+        "input": {
+          "sourceMediaSha256": "6d92987c097f80db78e249a78afd166f32160a4f0d0339d67beeb03c1f1b97cc",
+          "transcriptDocumentSha256": "6a4c441beb85307462853fd9a08d8ee82597852b9b7107e53a0f5f9cb279d76d",
+          "candidateLatticeSha256": "c6e1ea75ae4af29b7316e8e31fb469b9a8583181d911f128bae894f54bbba0a0",
+          "reviewQueueSha256": "6d3a6ff3ff4de73ad3bc614c7f1477bd05bb7db0e2d2ddf5f2de08183409955d"
+        },
+        "review": {
+          "openCount": 0,
+          "decisionCount": 25,
+          "actorIds": [
+            "codex-human-semantic-reviewer"
+          ],
+          "source": "human"
+        },
+        "timeline": {
+          "turns": [
+            {
+              "startMs": 2460,
+              "endMs": 3520,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 3520,
+              "endMs": 4640,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 4640,
+              "endMs": 5380,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 5380,
+              "endMs": 6460,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 6460,
+              "endMs": 7400,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 8100,
+              "endMs": 9034,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 9034,
+              "endMs": 10912,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 10912,
+              "endMs": 12220,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 12220,
+              "endMs": 13730,
+              "speakerId": "speaker-1",
+              "overlap": false
+            }
+          ]
+        },
+        "segments": [
+          {
+            "id": "window-000001.cardinality-01",
+            "startMs": 2460,
+            "endMs": 3520,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "Bonjour je vous",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-02",
+            "startMs": 3520,
+            "endMs": 4640,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "contactais pour savoir",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-03",
+            "startMs": 4640,
+            "endMs": 5380,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "si la",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-04",
+            "startMs": 5380,
+            "endMs": 6460,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "carte que",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-05",
+            "startMs": 6460,
+            "endMs": 7400,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "j'ai",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-07",
+            "startMs": 8100,
+            "endMs": 9034,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "dans votre banque",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.speaker-run-07",
+            "startMs": 9034,
+            "endMs": 10912,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "pourrait marcher à l'étranger notamment",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-10",
+            "startMs": 10912,
+            "endMs": 12220,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "si je pars en vacances ou si",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.speaker-run-09",
+            "startMs": 12220,
+            "endMs": 13730,
+            "speakerId": "speaker-1",
+            "language": "fr-FR",
+            "finalText": "je pars faire des études",
+            "overlapping": false
+          }
+        ],
+        "provenance": {
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1",
+          "modelGeneratedBaseline": false
+        }
+      },
+      "baselineAuditSource": "human",
+      "documentSha256": "6a4c441beb85307462853fd9a08d8ee82597852b9b7107e53a0f5f9cb279d76d",
+      "latticeSha256": "c6e1ea75ae4af29b7316e8e31fb469b9a8583181d911f128bae894f54bbba0a0",
+      "baselineSha256": "b46f6486798fafd80b9569b8e0ee815ac27527e4179950c5a3a1aa346b7106f0",
+      "caseSha256": "f35f25c225ebd00dd3e23dfb9c80db9c06e9ee64fa1566da9e8fae32afd8b18f"
+    },
+    {
+      "caseId": "fleurs_id_id_validation_003",
+      "language": "id-ID",
+      "documentPath": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/transcript-document.v2.json",
+      "latticePath": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/semantic/composition-runs/303dd29fb91e6d0b159800d9586e0761be9c5738bc60204fbefe75d890d760b2/semantic-candidate-lattice.initial.v1.json",
+      "baseline": {
+        "schemaVersion": "1.0.0",
+        "artifactType": "final-adjudicated-transcript",
+        "artifactId": "manual-baseline-303dd29fb91e6d0b159800d9",
+        "status": "final",
+        "disposition": "transcribable-speech",
+        "generatedAt": "2026-08-09T06:05:26.529809Z",
+        "adjudicationSource": "human",
+        "input": {
+          "sourceMediaSha256": "4f03d0412ae4e902f6d3adeda0a5b3136a51c1eef1080ff47e6638c60e9bf27f",
+          "transcriptDocumentSha256": "303dd29fb91e6d0b159800d9586e0761be9c5738bc60204fbefe75d890d760b2",
+          "candidateLatticeSha256": "f51ce8787031d21690c0a855f674e5e488229dc06f307a51cef3c1a01e509438",
+          "reviewQueueSha256": "58dd6336eaf04b09b5fd93e0d305b19fcdab369fc5a63a76f05ba26f01b9b82c"
+        },
+        "review": {
+          "openCount": 0,
+          "decisionCount": 12,
+          "actorIds": [
+            "codex-semantic-adjudicator"
+          ],
+          "source": "human"
+        },
+        "timeline": {
+          "turns": [
+            {
+              "startMs": 280,
+              "endMs": 2220,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 2220,
+              "endMs": 3000,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 3000,
+              "endMs": 5600,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 5600,
+              "endMs": 6420,
+              "speakerId": "speaker-1",
+              "overlap": false
+            },
+            {
+              "startMs": 6420,
+              "endMs": 7290,
+              "speakerId": "speaker-1",
+              "overlap": false
+            }
+          ]
+        },
+        "segments": [
+          {
+            "id": "window-000001.speaker-run-01",
+            "startMs": 280,
+            "endMs": 2220,
+            "speakerId": "speaker-1",
+            "language": "id-ID",
+            "finalText": "Sebagian besar distrik",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-03",
+            "startMs": 2220,
+            "endMs": 3000,
+            "speakerId": "speaker-1",
+            "language": "id-ID",
+            "finalText": "dilayani",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.speaker-run-03",
+            "startMs": 3000,
+            "endMs": 5600,
+            "speakerId": "speaker-1",
+            "language": "id-ID",
+            "finalText": "oleh Bus Coaster Jepang kecil",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-07",
+            "startMs": 5600,
+            "endMs": 6420,
+            "speakerId": "speaker-1",
+            "language": "id-ID",
+            "finalText": "yang nyaman",
+            "overlapping": false
+          },
+          {
+            "id": "window-000001.cardinality-08",
+            "startMs": 6420,
+            "endMs": 7290,
+            "speakerId": "speaker-1",
+            "language": "id-ID",
+            "finalText": "dan kokoh",
+            "overlapping": false
+          }
+        ],
+        "provenance": {
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1",
+          "modelGeneratedBaseline": false
+        }
+      },
+      "baselineAuditSource": "human",
+      "documentSha256": "303dd29fb91e6d0b159800d9586e0761be9c5738bc60204fbefe75d890d760b2",
+      "latticeSha256": "f51ce8787031d21690c0a855f674e5e488229dc06f307a51cef3c1a01e509438",
+      "baselineSha256": "aa3f9c3242601a43ecaedbe8412cf3702c077e9691247f4c5b1aa67565524a8a",
+      "caseSha256": "034bbf7fe051996bb00d8d855997e789eaa620aed37203d3f4a372dedf6c5240"
+    }
+  ],
+  "inventory": [
+    {
+      "caseId": "minds_zh_cn_258",
+      "language": "zh-CN",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "regression",
+      "status": "production-lattice-human-baseline",
+      "benchmarkEligible": true,
+      "selection": {
+        "runId": "pilot-20260809-qwen3.5-9b-r17-publication-fix",
+        "finalGeneratedAt": "2026-08-09T04:52:36.166178Z",
+        "policy": "latest-valid-manually-adjudicated-production-run"
+      },
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/minds_zh_cn_258.wav",
+        "bytes": 92922,
+        "sha256": "9eeb3d1be60d5c4ebc9643a65a54a79e6bcc53ec1bf688ee9c1b3c558039be0b"
+      },
+      "artifacts": {
+        "inputTranscript": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/semantic/input-transcript.v2.json",
+          "fileSha256": "75282149d896fbd4a50a176d6912e0a0b06cfa38da60badb2de728f2c14451b1",
+          "canonicalSha256": "3481bfeeb69673aa17818921ef601e1bd17369254fddbae0ba03167e148c6c38"
+        },
+        "benchmarkDocument": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/transcript-document.v2.json",
+          "fileSha256": "de619749082c11e8092c23e5dce3515c68e9395b1b58435fe1645b483fe61444",
+          "canonicalSha256": "f84b70575b88a9337d4071c5214ce6feee24aeb66fc1204d4334dfe3d4fd1de8"
+        },
+        "candidateLattice": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/semantic/composition-runs/f84b70575b88a9337d4071c5214ce6feee24aeb66fc1204d4334dfe3d4fd1de8/semantic-candidate-lattice.initial.v1.json",
+          "fileSha256": "52d1f643a428863b012d8bfabdecbc38c19bc4e2a2c94e53c404394f68ed515b",
+          "canonicalSha256": "335fdd7e6b5e2f6f3cf448ba8bed9024c59ace4de9a7b93edc775936ab2105f7"
+        },
+        "manualBaseline": {
+          "embeddedInBenchmarkCase": true,
+          "canonicalSha256": "8a434b1146266f22839464c65856be77abd19f3f6cc41d242faef6f05b0617b4",
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1"
+        },
+        "legacyFinalArtifact": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/final-adjudicated-transcript.v1.json",
+          "fileSha256": "9d2744cd7d4c5b89b19b3e641ae3a9a1c8b4f77f8c9d1eb2c795a04939858460",
+          "canonicalSha256": "eaa0d085ba38505e37c52bc8554d68efd8b9953751effb21eb3e13d954cb5c64",
+          "classification": "consistent-supporting-evidence",
+          "usedAsBenchmarkBaseline": false
+        },
+        "reviewQueue": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r17-publication-fix/outputs/minds_zh_cn_258/review/review-queue.json",
+          "fileSha256": "cc756cf26c94b23c1d63f1759fe0e6aee0b2d18dfe8f6be4637c6bb9b965ce1a",
+          "canonicalSha256": "1e9c7f1998592308ce18ef361b6a52d9527e1b44ac79397e2bccec242ff0b713"
+        }
+      },
+      "manualAdjudication": {
+        "source": "human",
+        "actorIds": [
+          "codex-semantic-adjudicator"
+        ],
+        "decisionCount": 10,
+        "reviewQueueCanonicalSha256": "1e9c7f1998592308ce18ef361b6a52d9527e1b44ac79397e2bccec242ff0b713"
+      },
+      "limitations": [
+        "benchmark document is the post-review transcript-document bound to the final lattice and baseline",
+        "pre-review semantic input is retained as provenance and is not rebound to the final baseline"
+      ]
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_030",
+      "language": "yue-Hant-HK",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_yue_hant_hk_validation_030.wav",
+        "bytes": 222798,
+        "sha256": "277908047b12e7160aac230d8f7032d82a3a42046ee23ff190010b15cc65fcf8"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_yue_hant_hk_validation_030",
+        "manifestCaseCanonicalSha256": "d9555b7649198288cf5d93f709b831ebaffcae468eb43aec1070a753109477b4",
+        "scoringTranscriptCanonicalSha256": "c421eb96534f6eb0e53197d095327d18cac17f61b5055cdf4d265c541de61315",
+        "nativeTranscriptCanonicalSha256": "e9d2bc6d39ccc633a9776217d35f858f3c700b1846b3ef88a5039cae623df507",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_060",
+      "language": "yue-Hant-HK",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_yue_hant_hk_validation_060.wav",
+        "bytes": 378318,
+        "sha256": "ab882ac92882c1e477c180166819d97a3ce3c3d5a9570de2d57bc986b610302f"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_yue_hant_hk_validation_060",
+        "manifestCaseCanonicalSha256": "1809679e146f9a3f470fe853b42436cffa1f9221010c061d0993e5e7c6c02172",
+        "scoringTranscriptCanonicalSha256": "70225a8ad1e6ecbdfe9ee702c38df8bd49cb2473251de5ca76332d8f00e43aba",
+        "nativeTranscriptCanonicalSha256": "4b12bd3ada3ed46b9cb5b17bb6c0b0e36c0c5b1b0173dd163228b78761c80a79",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_yue_hant_hk_validation_090",
+      "language": "yue-Hant-HK",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_yue_hant_hk_validation_090.wav",
+        "bytes": 537678,
+        "sha256": "b481fcb6f01943784e25a3e958f1bfc1412307acaa80caf8eb7df7bd95c86c10"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_yue_hant_hk_validation_090",
+        "manifestCaseCanonicalSha256": "9444dedeb83f3f94af7ba0c474bb1b8c873f877b219abc93977dc09e12663709",
+        "scoringTranscriptCanonicalSha256": "0f464a308988709214327a4727190af4997887f855df4d6e5c91af49b7440beb",
+        "nativeTranscriptCanonicalSha256": "701d4c9921f304a95bc13ae908de149cfa178c3edf5a9ce7db9ee732af7b34c1",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "minds_en_us_034",
+      "language": "en-US",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "production-lattice-human-baseline",
+      "benchmarkEligible": true,
+      "selection": {
+        "runId": "pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix",
+        "finalGeneratedAt": "2026-08-09T05:14:13.996504Z",
+        "policy": "latest-valid-manually-adjudicated-production-run"
+      },
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/minds_en_us_034.wav",
+        "bytes": 464290,
+        "sha256": "1ec88e91ff3d34141369de420f4a3ad242044b5891f06a01d6c79bb2afcb479e"
+      },
+      "artifacts": {
+        "inputTranscript": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/semantic/input-transcript.v2.json",
+          "fileSha256": "31914e4c294680c5cf4cda7df7bfea34dc777d0ffe32b9dd71f062b632283bdd",
+          "canonicalSha256": "d5fe75cb6d36a1084bbd55d4d68deaf90ac0234a7b981e2c15ba06e7a97a1afc"
+        },
+        "benchmarkDocument": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/transcript-document.v2.json",
+          "fileSha256": "e4b196f0fe6227db78ff4c5096dc61cfbeba8fa82ec4f0cc3715b3a3e5d42082",
+          "canonicalSha256": "144c8c7ba95f4b0d60e136ec3ba31237316220abf05fd9507031dde099b477b8"
+        },
+        "candidateLattice": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/semantic/composition-runs/144c8c7ba95f4b0d60e136ec3ba31237316220abf05fd9507031dde099b477b8/semantic-candidate-lattice.initial.v1.json",
+          "fileSha256": "417a06669c8935d505cbdd5a340b614c1f0d39d0f857fea20ca8b89858bfb4ba",
+          "canonicalSha256": "1db5cfb022011f4e96969585064410aec823016423ec261dc85daee1874bec64"
+        },
+        "manualBaseline": {
+          "embeddedInBenchmarkCase": true,
+          "canonicalSha256": "bb5b6d1af2c818c2c8f55157ef0e61788d6722871e7d74589085b936192c8e13",
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1"
+        },
+        "legacyFinalArtifact": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/final-adjudicated-transcript.v1.json",
+          "fileSha256": "a2d3f12585e4518a46710968fb6d28f91fbc28c09751c1105ef62287b4328329",
+          "canonicalSha256": "e11f4fa8985292bdfc918f7592ffc5fc6e85ac99708f6d3cd6f0d37ab1b32e74",
+          "classification": "consistent-supporting-evidence",
+          "usedAsBenchmarkBaseline": false
+        },
+        "reviewQueue": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r19-multilingual-audio-review-fix/outputs/minds_en_us_034/review/review-queue.json",
+          "fileSha256": "a00e5f1aa4d04b49d0e019392f4814b930daf550ded665ae25cc166afd283e0d",
+          "canonicalSha256": "65dcd049362e952ae3254473bcb635c704acfd3dfefae000232c9eb58d91825f"
+        }
+      },
+      "manualAdjudication": {
+        "source": "human",
+        "actorIds": [
+          "codex-semantic-adjudicator"
+        ],
+        "decisionCount": 8,
+        "reviewQueueCanonicalSha256": "65dcd049362e952ae3254473bcb635c704acfd3dfefae000232c9eb58d91825f"
+      },
+      "limitations": [
+        "benchmark document is the post-review transcript-document bound to the final lattice and baseline",
+        "pre-review semantic input is retained as provenance and is not rebound to the final baseline"
+      ]
+    },
+    {
+      "caseId": "fleurs_es_419_validation_009",
+      "language": "es-419",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_es_419_validation_009.wav",
+        "bytes": 176718,
+        "sha256": "e7e113fb6b52c9c91452506fe11f0e82793bf17fcfc1c20e8f422f40325761b2"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_es_419_validation_009",
+        "manifestCaseCanonicalSha256": "f7474ed4ccf693a9c0f415c0512e0d199b5758aac3f0f257e12233af20c8c61b",
+        "scoringTranscriptCanonicalSha256": "766a4e308555c817aaac0c096866ae09a6d2a3f87fdb99a6e55a40c2f3c95950",
+        "nativeTranscriptCanonicalSha256": "e39164d2eef153b80a53b5709c4602f3890fdab7a6cbc454475eece6c5a04cbe",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_es_419_validation_080",
+      "language": "es-419",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_es_419_validation_080.wav",
+        "bytes": 140238,
+        "sha256": "2f27f2822b111177d044ab757408201b83ff761d76d5439f03a535f7b13d615e"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_es_419_validation_080",
+        "manifestCaseCanonicalSha256": "ad095069183079440140347d2c201320b4a3e1122fc12e01dfb9edd09b07e8a9",
+        "scoringTranscriptCanonicalSha256": "add2b723364a3e8862ed354ee83f23af8df4426a8c8a3f1934751e35e8279bde",
+        "nativeTranscriptCanonicalSha256": "b678ca1bc17de57f0dc5724e8a52de149536a9ff01bfb796b145b522003ed3a0",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_es_419_validation_232",
+      "language": "es-419",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_es_419_validation_232.wav",
+        "bytes": 230478,
+        "sha256": "598303617d4e7b839ce02e6e905d5fd7fb9d0bc5a58101eba60cf4c8c56b7093"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_es_419_validation_232",
+        "manifestCaseCanonicalSha256": "edac2267b15b82c4ba65b6df1648cea322c4921510f6a53278e7c4d25a80ad0a",
+        "scoringTranscriptCanonicalSha256": "1a8e56dedc4a33aaf67e7419debbf95333608ee9c1d887ffd494f1c1abf81310",
+        "nativeTranscriptCanonicalSha256": "c5a2750953623d545d31bf2813c0edaf0746ea6a4a90b7ea9209b6a922bbad69",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "minds_fr_fr_089",
+      "language": "fr-FR",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "production-lattice-human-baseline",
+      "benchmarkEligible": true,
+      "selection": {
+        "runId": "pilot-20260807-qwen3.5-9b-resharded-r11",
+        "finalGeneratedAt": "2026-08-07T14:33:52.626857Z",
+        "policy": "latest-valid-manually-adjudicated-production-run"
+      },
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/minds_fr_fr_089.wav",
+        "bytes": 439958,
+        "sha256": "6d92987c097f80db78e249a78afd166f32160a4f0d0339d67beeb03c1f1b97cc"
+      },
+      "artifacts": {
+        "inputTranscript": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/semantic/input-transcript.v2.json",
+          "fileSha256": "b0b138c898ecdf886d92296cb19bbb7c05476fabc61bfab206ff47beec553064",
+          "canonicalSha256": "14ed0d74c2411f6df78452d0928d82459585b070812692a7e8f4e66cc5e7abed"
+        },
+        "benchmarkDocument": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/transcript-document.v2.json",
+          "fileSha256": "9f65605173aaef5d1fcc88287f2edc3c17018ab050cba135b6510c8c1b4f5dd2",
+          "canonicalSha256": "6a4c441beb85307462853fd9a08d8ee82597852b9b7107e53a0f5f9cb279d76d"
+        },
+        "candidateLattice": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/semantic/composition-runs/6a4c441beb85307462853fd9a08d8ee82597852b9b7107e53a0f5f9cb279d76d/semantic-candidate-lattice.initial.v1.json",
+          "fileSha256": "d8e5adb30368d3134c8f18395364f72e2ff23ad9d45acb14ff404f137f8eae53",
+          "canonicalSha256": "de8b41558676dce0fc3c84c6bcf1b81548ab42112a77d1b75a32e69f46a7e959"
+        },
+        "manualBaseline": {
+          "embeddedInBenchmarkCase": true,
+          "canonicalSha256": "b46f6486798fafd80b9569b8e0ee815ac27527e4179950c5a3a1aa346b7106f0",
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1"
+        },
+        "legacyFinalArtifact": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/final-adjudicated-transcript.v1.json",
+          "fileSha256": "9079d5bd0123ed1b8c70908c272f9fbc3744aabb74dca546cd0d8145872cf796",
+          "canonicalSha256": "de5eacc11e0e7f21a13648f043d5c61c4d80c54545d947fd5c231d142f987c81",
+          "classification": "consistent-supporting-evidence",
+          "usedAsBenchmarkBaseline": false
+        },
+        "reviewQueue": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260807-qwen3.5-9b-resharded-r11/outputs/minds_fr_fr_089/review/review-queue.json",
+          "fileSha256": "9fceeb16c6400f93262c612e8bf32001236e5bf910bd5dfafc31a43a77047932",
+          "canonicalSha256": "6d3a6ff3ff4de73ad3bc614c7f1477bd05bb7db0e2d2ddf5f2de08183409955d"
+        }
+      },
+      "manualAdjudication": {
+        "source": "human",
+        "actorIds": [
+          "codex-human-semantic-reviewer"
+        ],
+        "decisionCount": 25,
+        "reviewQueueCanonicalSha256": "6d3a6ff3ff4de73ad3bc614c7f1477bd05bb7db0e2d2ddf5f2de08183409955d"
+      },
+      "limitations": [
+        "benchmark document is the post-review transcript-document bound to the final lattice and baseline",
+        "pre-review semantic input is retained as provenance and is not rebound to the final baseline"
+      ]
+    },
+    {
+      "caseId": "fleurs_id_id_validation_003",
+      "language": "id-ID",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "production-lattice-human-baseline",
+      "benchmarkEligible": true,
+      "selection": {
+        "runId": "pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline",
+        "finalGeneratedAt": "2026-08-09T06:05:26.529809Z",
+        "policy": "latest-valid-manually-adjudicated-production-run"
+      },
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_id_id_validation_003.wav",
+        "bytes": 280398,
+        "sha256": "4f03d0412ae4e902f6d3adeda0a5b3136a51c1eef1080ff47e6638c60e9bf27f"
+      },
+      "artifacts": {
+        "inputTranscript": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/semantic/input-transcript.v2.json",
+          "fileSha256": "eee578ca62c0e683cccf68d0265d0e1c338a50d10ee7f741765102b1f9a0bfa4",
+          "canonicalSha256": "25e79d8371cae8f26899f9fde39cbb16e5cba5280d2c27e3db970deda7e6bd84"
+        },
+        "benchmarkDocument": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/transcript-document.v2.json",
+          "fileSha256": "7accf6ab7380ffb73c19647518998aa9e4d0a94e74dc1dcd54823d29e403323d",
+          "canonicalSha256": "303dd29fb91e6d0b159800d9586e0761be9c5738bc60204fbefe75d890d760b2"
+        },
+        "candidateLattice": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/semantic/composition-runs/303dd29fb91e6d0b159800d9586e0761be9c5738bc60204fbefe75d890d760b2/semantic-candidate-lattice.initial.v1.json",
+          "fileSha256": "ef8f6e47c4e28966aeb20eec3f2e576c2d26045f370f7680e6e957792ee51a13",
+          "canonicalSha256": "e65ff912e40f4f7f9ac8937e6137c8cb3e49e2a377b6289371732ad1b38e767b"
+        },
+        "manualBaseline": {
+          "embeddedInBenchmarkCase": true,
+          "canonicalSha256": "aa3f9c3242601a43ecaedbe8412cf3702c077e9691247f4c5b1aa67565524a8a",
+          "derivation": "reviewed-transcript-document-plus-accepted-review-decisions-v1"
+        },
+        "legacyFinalArtifact": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/final-adjudicated-transcript.v1.json",
+          "fileSha256": "3fecbf8f1151080bfbb3a8c7d6a2ca06fcf54ac75c10c4ea3f9212f3faadb068",
+          "canonicalSha256": "f5507079fb0c42c378c76896c439c6791865b66eca5a499fa4947c5b17fe910b",
+          "classification": "known-invalid-pre-fix-evidence",
+          "usedAsBenchmarkBaseline": false
+        },
+        "reviewQueue": {
+          "path": "../../../../mts-eval/product-runs/pilot-20260809-qwen3.5-9b-r23-multilingual-semantic-baseline/outputs/fleurs_id_id_validation_003/review/review-queue.json",
+          "fileSha256": "b8cb69ea8f319e78dde5a08631a10f07e06271c0e97fd9771981e43097d32aed",
+          "canonicalSha256": "58dd6336eaf04b09b5fd93e0d305b19fcdab369fc5a63a76f05ba26f01b9b82c"
+        }
+      },
+      "manualAdjudication": {
+        "source": "human",
+        "actorIds": [
+          "codex-semantic-adjudicator"
+        ],
+        "decisionCount": 12,
+        "reviewQueueCanonicalSha256": "58dd6336eaf04b09b5fd93e0d305b19fcdab369fc5a63a76f05ba26f01b9b82c"
+      },
+      "limitations": [
+        "benchmark document is the post-review transcript-document bound to the final lattice and baseline",
+        "pre-review semantic input is retained as provenance and is not rebound to the final baseline",
+        "semantic composition and manual adjudication completed",
+        "PDF/publication failed after semantic completion; that downstream failure is excluded from semantic-model scoring",
+        "legacy final-adjudicated artifact was overwritten by pre-fix composition and is excluded from baseline scoring"
+      ]
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_030",
+      "language": "ja-JP",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ja_jp_validation_030.wav",
+        "bytes": 349518,
+        "sha256": "79a19de4e5c5e92f662f233a3629263e80c6c4a330ba17e94e464f62b52a4a2d"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ja_jp_validation_030",
+        "manifestCaseCanonicalSha256": "f5aa8147e8c97d182979ad91ff19742d527468b7160df39b643e099860f71695",
+        "scoringTranscriptCanonicalSha256": "1d8fcf8ffc904629074662f32cc5878a3e223cba651ce7a6fa53379946ebedc6",
+        "nativeTranscriptCanonicalSha256": "433926c7ad7f4f212364c501039fa7d9272e62f0d3406ce48068ee0d46750235",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_060",
+      "language": "ja-JP",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ja_jp_validation_060.wav",
+        "bytes": 399438,
+        "sha256": "82c59b3417563dabf50455f12e029664f43204689be8603e7b48b36e1e65412f"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ja_jp_validation_060",
+        "manifestCaseCanonicalSha256": "479ce5b05eb5dbfa3ff107e17c0c74060fbaf84fa9012cd3f69d623e00d44ef1",
+        "scoringTranscriptCanonicalSha256": "5ee9a0dd33c9e7951282a3428526ce430e65549f576ed465f7f66f57244e4494",
+        "nativeTranscriptCanonicalSha256": "2c621ab6c18aabc54d25b18f3f40b551373ebb166804a43f28e33415b966add1",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ja_jp_validation_090",
+      "language": "ja-JP",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ja_jp_validation_090.wav",
+        "bytes": 326478,
+        "sha256": "369218d5ca0a677ee9b5cbd22e179d0e5a8356fd00fd47646e46cd0a89cee2b0"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ja_jp_validation_090",
+        "manifestCaseCanonicalSha256": "b5ebd4dcaa63da1194ea1775cbeaae4484a8fd0edc0f66e857df85381f9f5a9e",
+        "scoringTranscriptCanonicalSha256": "73638a97db44615ecf12abbf17e9c4ebe10080fd1ccf36d138de7cf100c44835",
+        "nativeTranscriptCanonicalSha256": "cba2e9769e4186a95264bf7a4c024d84187fb07d8f9800b695d090d6dbf35291",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_030",
+      "language": "ko-KR",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ko_kr_validation_030.wav",
+        "bytes": 407118,
+        "sha256": "5b8d2ea4898b596e4d316fb5411606fdebac9a4b2d66131fad5133d354cedea4"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ko_kr_validation_030",
+        "manifestCaseCanonicalSha256": "f547b0e0fd1f2da71967439e1356b2f8fec66424164d258da0a6db49da895045",
+        "scoringTranscriptCanonicalSha256": "be3adac1268b4a66f9ae2546b0b539cc820fedbb6f1fdb356dc651102e5c69e6",
+        "nativeTranscriptCanonicalSha256": "a7fe72653a1cbba129e276ed0e7c9ab31ab885f28f532c1f78986c70fbed756b",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_060",
+      "language": "ko-KR",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ko_kr_validation_060.wav",
+        "bytes": 506958,
+        "sha256": "9881aeb390b260d5064552ca209be417ba8e578e7f5642ca5dceb5cf0b700de6"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ko_kr_validation_060",
+        "manifestCaseCanonicalSha256": "a3c566ffbe9cf123bbdb86e765d40b8b01df9225a2e90f8ec424b5cdf1723362",
+        "scoringTranscriptCanonicalSha256": "295805fd5d78a20aca7a98d2000033c837910e01b2ed5d3faf41e94dd9ee2a50",
+        "nativeTranscriptCanonicalSha256": "6c66ee2f2201e31ac9d6cf3f5fc6e3fc7974b4202cdee010a9efbbece982c822",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ko_kr_validation_090",
+      "language": "ko-KR",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ko_kr_validation_090.wav",
+        "bytes": 326478,
+        "sha256": "8fac0c4b9c2dcb9b18751bf91c5b766a03396fc319359ec9c222e650a13a6507"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ko_kr_validation_090",
+        "manifestCaseCanonicalSha256": "355f2032b25006138d7693814ef3a697bd1288ac24fd36c9c4edff2cf0dd5aba",
+        "scoringTranscriptCanonicalSha256": "71a1a3ad488c58849167fad2e512866548ede7c8fe73a1516badf15f201a10a3",
+        "nativeTranscriptCanonicalSha256": "bf5082ffb8278f2971fa538df2ae221dc222fb32bdb3b27bf465feaad2c7ed6c",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_030",
+      "language": "ar-EG",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ar_eg_validation_030.wav",
+        "bytes": 357198,
+        "sha256": "c080be47ea159229339fc9c514aff1b010a6fafef8e980792f0b2e27c6cf65d0"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ar_eg_validation_030",
+        "manifestCaseCanonicalSha256": "588797117e74c984c399c79053c9f51131ad4d1fae0422bf1faa01ab847be6f4",
+        "scoringTranscriptCanonicalSha256": "4857d02da78efac912f8a78fbe8d112f3cbe76f6533028ca0f054bca6a3df7c8",
+        "nativeTranscriptCanonicalSha256": "40db29f20433b1b2f7debe3e3358abb2ad8912a8183006ed22850d5dad7f2930",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_060",
+      "language": "ar-EG",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ar_eg_validation_060.wav",
+        "bytes": 211278,
+        "sha256": "b2eee49815dc820fa95bca422a78fad8171c5d18e33b51247fd4efbe5d42cb8e"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ar_eg_validation_060",
+        "manifestCaseCanonicalSha256": "0f9ae031f047910eef996b987c9c764194ee9c363e8e034a435beaabc24d6499",
+        "scoringTranscriptCanonicalSha256": "45f3de98c6f7f053eeb06aaba6f45c06a3e0852dc5353c72ed8e10419687f727",
+        "nativeTranscriptCanonicalSha256": "a2f88a4fe7d31501182d2eeced037cce32fede75d52499308f6af11d03faebca",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_ar_eg_validation_090",
+      "language": "ar-EG",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_ar_eg_validation_090.wav",
+        "bytes": 446798,
+        "sha256": "803cf6d8910040c9181bb7215814638b512755bd1c6d903c1ce0fe497f75bad8"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_ar_eg_validation_090",
+        "manifestCaseCanonicalSha256": "9ca074d54e063ea8666ff11b94ad2e0597035bd0a7b0dc6bf0bb36cf00c33794",
+        "scoringTranscriptCanonicalSha256": "5990dda9a6bc905d07ce0f6f0a02819061935241774afcc2459eb33056192785",
+        "nativeTranscriptCanonicalSha256": "d8794209cb77de44a12ada6845ce00d4864034b82cc423559cc0fd4d73dac29e",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_030",
+      "language": "hi-IN",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_hi_in_validation_030.wav",
+        "bytes": 480078,
+        "sha256": "4438eba8543b8d5f2acaf0b44660b5df981215613c641c27403fabafc1089cd1"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_hi_in_validation_030",
+        "manifestCaseCanonicalSha256": "c3e896d5525db1f479ca71e7c2dbda75076684af092b4e3801f0c1091663c67b",
+        "scoringTranscriptCanonicalSha256": "8ae1fbd7ee76841acc0524ffc9aa23deafa01065d3a96b4e2305ce8362cecc8d",
+        "nativeTranscriptCanonicalSha256": "71afffb290a781396c1b804b0d32777db8ddeb206086c651b41b1eee7c3b878b",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_060",
+      "language": "hi-IN",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_hi_in_validation_060.wav",
+        "bytes": 416718,
+        "sha256": "9c6042c66e74879c0f9ca532ac8a9c07cf9b248707399e2cd485eb83124d8746"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_hi_in_validation_060",
+        "manifestCaseCanonicalSha256": "8dd06371c2bc6ab53c0237ddb3b3fad6ac7f4cee372ed78563e98764378bb1e4",
+        "scoringTranscriptCanonicalSha256": "fc8957381437215e54bbc83a133b12eb082fde92c0a376c92f1c2904c70f8608",
+        "nativeTranscriptCanonicalSha256": "e9b55edc46c614f6413c67b46d1c6f892583788807eea3a059a7eb1fc4b4145c",
+        "textCopiedIntoFreeze": false
+      }
+    },
+    {
+      "caseId": "fleurs_hi_in_validation_090",
+      "language": "hi-IN",
+      "freezeSplit": "development",
+      "sourceEvaluationSplit": "development",
+      "status": "audio-reference-only",
+      "benchmarkEligible": false,
+      "blockingReason": "production document, candidate lattice, and manual final baseline are not frozen",
+      "audio": {
+        "path": "../../../.runtime_cache/sample-library/global/audio/fleurs_hi_in_validation_090.wav",
+        "bytes": 249678,
+        "sha256": "514905d0805456218ea907848de7a556243fbb87475f1a6fcb5f24ce98db17a0"
+      },
+      "reference": {
+        "manifestPath": "../../../.runtime_cache/sample-library/global/fleurs-multilingual-frozen.v1.json",
+        "manifestCaseId": "fleurs_hi_in_validation_090",
+        "manifestCaseCanonicalSha256": "45d66cb47517eac84f9c0ff7771bfa1cbf6df0148aff747750f7ce5ab666dcac",
+        "scoringTranscriptCanonicalSha256": "7f27e9dbb6f93b9f94532cc54119642795b70ceb96b24fa74ece0a4c6898fe12",
+        "nativeTranscriptCanonicalSha256": "6254d2b8d1be4fa395cbed845a9c122362c7c8ff0ff8fa0b18f21b343ea5a734",
+        "textCopiedIntoFreeze": false
+      }
+    }
+  ],
+  "canonicalSha256": "2118b5cf23edc925ef933d4c6cb62a12ad5963839fc13ce72bff2dee9406ffbb"
+}

@@ -107,8 +107,164 @@ interface TaskCreatorProps {
 }
 
 export const MAX_INLINE_SPEAKER_EDITORS = 32;
-const DEFAULT_LOCAL_MODEL = "qwen3.5:9b";
+const DEFAULT_LOCAL_MODEL = "qwen3.5:27b-q4_K_M";
 const DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:11434";
+const DEFAULT_LLM_PROVIDER = "ollama-loopback";
+type LlmEndpointPolicy = CreateJobRequest["localLlmEndpointPolicy"];
+interface LlmProviderPreset {
+  id: string;
+  label: string;
+  model: string;
+  endpoint: string;
+  endpointPolicy: LlmEndpointPolicy;
+  apiKeyEnv: string;
+}
+const LLM_PROVIDER_PRESETS: readonly LlmProviderPreset[] = [
+  {
+    id: "ollama-loopback",
+    label: "Ollama (local)",
+    model: DEFAULT_LOCAL_MODEL,
+    endpoint: DEFAULT_LOCAL_ENDPOINT,
+    endpointPolicy: "loopback-only",
+    apiKeyEnv: "",
+  },
+  {
+    id: "huggingface-router",
+    label: "Hugging Face Router",
+    model: "Qwen/Qwen3-32B",
+    endpoint: "https://router.huggingface.co/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "HF_TOKEN",
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    model: "gpt-5",
+    endpoint: "https://api.openai.com/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "OPENAI_API_KEY",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic Claude",
+    model: "claude-sonnet-4-5",
+    endpoint: "https://api.anthropic.com/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+  },
+  {
+    id: "google-gemini",
+    label: "Google Gemini",
+    model: "gemini-2.5-pro",
+    endpoint: "https://generativelanguage.googleapis.com/v1beta",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "GEMINI_API_KEY",
+  },
+  {
+    id: "dashscope",
+    label: "Alibaba Qwen / DashScope",
+    model: "qwen3.5-plus",
+    endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "DASHSCOPE_API_KEY",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    model: "deepseek-chat",
+    endpoint: "https://api.deepseek.com/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "DEEPSEEK_API_KEY",
+  },
+  {
+    id: "moonshot",
+    label: "Moonshot / Kimi",
+    model: "kimi-k2.5",
+    endpoint: "https://api.moonshot.cn/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "MOONSHOT_API_KEY",
+  },
+  {
+    id: "zhipu",
+    label: "Zhipu GLM",
+    model: "glm-5",
+    endpoint: "https://open.bigmodel.cn/api/paas/v4",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "ZHIPUAI_API_KEY",
+  },
+  {
+    id: "minimax",
+    label: "MiniMax",
+    model: "MiniMax-M2.1",
+    endpoint: "https://api.minimax.io/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "MINIMAX_API_KEY",
+  },
+  {
+    id: "siliconflow",
+    label: "SiliconFlow",
+    model: "Qwen/Qwen3-32B",
+    endpoint: "https://api.siliconflow.cn/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "SILICONFLOW_API_KEY",
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    model: "openai/gpt-5",
+    endpoint: "https://openrouter.ai/api/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "OPENROUTER_API_KEY",
+  },
+  {
+    id: "groq",
+    label: "Groq",
+    model: "llama-4-scout-17b-16e-instruct",
+    endpoint: "https://api.groq.com/openai/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "GROQ_API_KEY",
+  },
+  {
+    id: "mistral",
+    label: "Mistral AI",
+    model: "mistral-large-latest",
+    endpoint: "https://api.mistral.ai/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "MISTRAL_API_KEY",
+  },
+  {
+    id: "together",
+    label: "Together AI",
+    model: "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    endpoint: "https://api.together.xyz/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "TOGETHER_API_KEY",
+  },
+  {
+    id: "xai",
+    label: "xAI",
+    model: "grok-4",
+    endpoint: "https://api.x.ai/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "XAI_API_KEY",
+  },
+  {
+    id: "perplexity",
+    label: "Perplexity",
+    model: "sonar-pro",
+    endpoint: "https://api.perplexity.ai",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "PERPLEXITY_API_KEY",
+  },
+  {
+    id: "openai-compatible",
+    label: "Custom OpenAI-compatible / relay",
+    model: "custom-model",
+    endpoint: "https://example.invalid/v1",
+    endpointPolicy: "remote-explicit",
+    apiKeyEnv: "CUSTOM_LLM_API_KEY",
+  },
+] as const;
 const DEFAULT_SOURCE_LANGUAGE = "auto";
 const DEFAULT_OUTPUT_LOCALE = "en-US";
 const MAX_MEDIA_QUEUE_ITEMS = 32;
@@ -169,6 +325,58 @@ function isListedLanguage(
   presets: ReadonlyArray<readonly [string, TaskCreatorMessageKey]>,
 ): boolean {
   return presets.some(([tag]) => tag === value);
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return ["localhost", "127.0.0.1", "[::1]"].includes(
+    hostname.toLocaleLowerCase("en-US"),
+  );
+}
+
+function isValidLlmEndpoint(
+  value: string,
+  policy: LlmEndpointPolicy,
+): boolean {
+  try {
+    const parsed = new URL(value);
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.search.length > 0 ||
+      parsed.hash.length > 0
+    ) {
+      return false;
+    }
+    const loopback = isLoopbackHost(parsed.hostname);
+    return policy === "loopback-only"
+      ? loopback
+      : parsed.protocol === "https:" || loopback;
+  } catch {
+    return false;
+  }
+}
+
+function isValidProxyUrl(value: string): boolean {
+  if (value.trim().length === 0) {
+    return true;
+  }
+  try {
+    const parsed = new URL(value.trim());
+    return (
+      ["http:", "https:"].includes(parsed.protocol) &&
+      parsed.username.length === 0 &&
+      parsed.password.length === 0 &&
+      parsed.search.length === 0 &&
+      parsed.hash.length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isValidEnvironmentName(value: string): boolean {
+  return value.trim().length === 0 || /^[A-Z_][A-Z0-9_]*$/u.test(value.trim());
 }
 
 function materializeLabels(
@@ -344,6 +552,11 @@ export function TaskCreator({
   const [localLlmEndpoint, setLocalLlmEndpoint] = useState(
     DEFAULT_LOCAL_ENDPOINT,
   );
+  const [llmProvider, setLlmProvider] = useState(DEFAULT_LLM_PROVIDER);
+  const [llmEndpointPolicy, setLlmEndpointPolicy] =
+    useState<LlmEndpointPolicy>("loopback-only");
+  const [llmApiKeyEnv, setLlmApiKeyEnv] = useState("");
+  const [llmProxyUrl, setLlmProxyUrl] = useState("");
   const [outputCustomization, setOutputCustomization] =
     useState<OutputCustomization>(() =>
       cloneOutputCustomization(DEFAULT_OUTPUT_CUSTOMIZATION),
@@ -618,10 +831,12 @@ export function TaskCreator({
     isListedLanguage(outputLocale, OUTPUT_LOCALE_PRESETS);
   const localRuntimeValid =
     !businessEnabled ||
-    (localLlmModel.trim() === DEFAULT_LOCAL_MODEL &&
-      /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/.*)?$/u.test(
-        localLlmEndpoint.trim(),
-      ));
+    (localLlmModel.trim().length > 0 &&
+      localLlmModel.trim().length <= 256 &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(llmProvider) &&
+      isValidLlmEndpoint(localLlmEndpoint.trim(), llmEndpointPolicy) &&
+      isValidEnvironmentName(llmApiKeyEnv) &&
+      isValidProxyUrl(llmProxyUrl));
   const actionableMediaItems = mediaQueue.filter(
     (item) => item.status !== "accepted",
   );
@@ -1024,7 +1239,10 @@ export function TaskCreator({
             : "disabled",
         localLlmModel: localLlmModel.trim(),
         localLlmEndpoint: localLlmEndpoint.trim(),
-        localLlmEndpointPolicy: "loopback-only",
+        llmProvider,
+        llmApiKeyEnv: llmApiKeyEnv.trim() || null,
+        llmProxyUrl: llmProxyUrl.trim() || null,
+        localLlmEndpointPolicy: llmEndpointPolicy,
         localLlmAutoApply: false,
         translationTargets,
         summary: businessEnabled && summaryEnabled,
@@ -2049,13 +2267,53 @@ export function TaskCreator({
                     <summary>{taskT("creator.runtime.advanced")}</summary>
                     <div className="runtime-details__grid">
                       <label className="field">
+                        <span>Provider</span>
+                        <select
+                          value={llmProvider}
+                          onChange={(event) => {
+                            const preset = LLM_PROVIDER_PRESETS.find(
+                              (item) => item.id === event.target.value,
+                            );
+                            if (!preset) {
+                              return;
+                            }
+                            setLlmProvider(preset.id);
+                            setLocalLlmModel(preset.model);
+                            setLocalLlmEndpoint(preset.endpoint);
+                            setLlmEndpointPolicy(preset.endpointPolicy);
+                            setLlmApiKeyEnv(preset.apiKeyEnv);
+                            setLlmProxyUrl("");
+                          }}
+                        >
+                          {LLM_PROVIDER_PRESETS.map((preset) => (
+                            <option value={preset.id} key={preset.id}>
+                              {preset.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>Connection mode</span>
+                        <select
+                          value={llmEndpointPolicy}
+                          onChange={(event) =>
+                            setLlmEndpointPolicy(
+                              event.target.value as LlmEndpointPolicy,
+                            )
+                          }
+                        >
+                          <option value="loopback-only">Local / offline</option>
+                          <option value="remote-explicit">Online / API</option>
+                        </select>
+                      </label>
+                      <label className="field">
                         <span>{taskT("creator.runtime.model")}</span>
                         <input
                           value={localLlmModel}
                           spellCheck={false}
                           autoComplete="off"
                           aria-invalid={
-                            localLlmModel.trim() !== DEFAULT_LOCAL_MODEL
+                            localLlmModel.trim().length === 0
                           }
                           onChange={(event) =>
                             setLocalLlmModel(event.target.value)
@@ -2068,14 +2326,40 @@ export function TaskCreator({
                           value={localLlmEndpoint}
                           spellCheck={false}
                           autoComplete="off"
-                          aria-invalid={!localRuntimeValid}
+                          aria-invalid={
+                            !isValidLlmEndpoint(
+                              localLlmEndpoint.trim(),
+                              llmEndpointPolicy,
+                            )
+                          }
                           onChange={(event) =>
                             setLocalLlmEndpoint(event.target.value)
                           }
                         />
-                        <small>
-                          {taskT("creator.runtime.endpointHelp")}
-                        </small>
+                      </label>
+                      <label className="field">
+                        <span>API key environment variable</span>
+                        <input
+                          value={llmApiKeyEnv}
+                          spellCheck={false}
+                          autoComplete="off"
+                          aria-invalid={!isValidEnvironmentName(llmApiKeyEnv)}
+                          onChange={(event) =>
+                            setLlmApiKeyEnv(event.target.value)
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>Proxy URL</span>
+                        <input
+                          value={llmProxyUrl}
+                          spellCheck={false}
+                          autoComplete="off"
+                          aria-invalid={!isValidProxyUrl(llmProxyUrl)}
+                          onChange={(event) =>
+                            setLlmProxyUrl(event.target.value)
+                          }
+                        />
                       </label>
                     </div>
                   </details>

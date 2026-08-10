@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactType": "production-review-decisions",
+  "jobId": "sample-fleurs_ko_kr_validation_090-manual",
+  "automaticScoring": false,
+  "decisions": [
+    {
+      "itemId": "window-000001:SEGMENT_LOW_CONFIDENCE",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-090-postref-text-0001",
+      "reason": "Post-reference Codex adjudication confirms the semantic input exactly matches the official FLEURS rawTranscript.",
+      "evidence": ["fleurs-raw-transcript:fleurs_ko_kr_validation_090", "fleurs-freeze-file-sha256:5295411b5fef5a885bedf05ec3b3f1ebf373642ed5db2b2c34d34a5904929e01", "semantic-input-transcript-file-sha256:b4c743ddac1b5e5c6a6f602309f19bcc6b8fc626362cf275d52648ec80361c31"],
+      "confidence": 1.0,
+      "normalizedText": "우주에 있는 위성은 신호를 받고 나서 거의 즉각적으로 반사해 내려보낸다.",
+      "displayText": "우주에 있는 위성은 신호를 받고 나서 거의 즉각적으로 반사해 내려보낸다.",
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    },
+    {
+      "itemId": "window-000001:SECONDARY_VERIFIER_UNRESOLVED",
+      "action": "accept",
+      "decisionId": "fleurs-ko-kr-090-postref-speaker-0002",
+      "reason": "The frozen semantic input proves one segment assigned to the configured sole speaker; the eventual queue shape must still be checked at review.required.",
+      "evidence": ["audio:full", "manifest:expected-speaker-count=1", "semantic-input-transcript-file-sha256:b4c743ddac1b5e5c6a6f602309f19bcc6b8fc626362cf275d52648ec80361c31"],
+      "confidence": 0.99,
+      "audit": {"actor": "codex-semantic-adjudicator", "source": "codex-agent"}
+    }
+  ]
+}

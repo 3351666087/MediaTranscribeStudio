@@ -1218,7 +1218,7 @@ describe("TaskCreator dynamic speaker policies", () => {
     ).toHaveValue("en-US");
     await user.click(screen.getByText("Advanced local runtime"));
     expect(screen.getByRole("textbox", { name: "Local model" })).toHaveValue(
-      "qwen3.5:9b",
+      "qwen3.5:27b-q4_K_M",
     );
     expect(
       screen.getByRole("textbox", { name: /^Loopback endpoint/u }),

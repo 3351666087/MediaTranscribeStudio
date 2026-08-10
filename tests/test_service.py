@@ -187,6 +187,48 @@ class _RecordingProbeRunner:
         )
 
 
+class _AudioOnlyProbeRunner(_RecordingProbeRunner):
+    def run(
+        self,
+        command: tuple[str, ...] | list[str],
+        *,
+        limits: ProcessLimits,
+    ) -> ProcessResult:
+        argv = tuple(command)
+        if "-show_streams" not in argv:
+            return super().run(command, limits=limits)
+        del limits
+        self.order.append("media-probe")
+        return ProcessResult(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "index": 0,
+                            "codec_name": "pcm_s16le",
+                            "codec_type": "audio",
+                            "sample_rate": "16000",
+                            "channels": 1,
+                            "duration": "8.0",
+                            "disposition": {"default": 1},
+                        }
+                    ],
+                    "format": {
+                        "format_name": "wav",
+                        "format_long_name": "fixture audio",
+                        "duration": "8.0",
+                        "bit_rate": "256000",
+                    },
+                    "programs": [],
+                    "chapters": [],
+                }
+            ).encode(),
+            stderr=b"",
+            elapsed_ms=2,
+        )
+
+
 class _RecordingTranscriptionAdapter(FakeTranscriptionAdapter):
     def __init__(self, order: list[str]) -> None:
         super().__init__(result_mapping(1))
@@ -634,6 +676,7 @@ def test_required_semantic_composition_persists_and_drives_final_scoring() -> No
                 candidate_lattice: dict,
                 carried_lattice: dict | None = None,
                 carried_arbitration: dict | None = None,
+                exhausted_request_group_ids=frozenset(),
             ) -> dict:
                 self.calls += 1
                 selections = []
@@ -1265,6 +1308,61 @@ def test_recipe_job_probes_before_transcription_and_persists_exact_plans() -> No
         service.shutdown()
 
 
+def test_audio_burn_in_fails_before_transcription_or_semantic() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        order: list[str] = []
+        events: list[dict[str, Any]] = []
+        semantic_factory_calls: list[str] = []
+
+        def semantic_factory(request, context):
+            del context
+            semantic_factory_calls.append(request.job_id)
+            raise AssertionError("semantic factory must not run")
+
+        service = _service(
+            root,
+            adapter=_RecordingTranscriptionAdapter(order),
+            renderer=_PlannedRenderer(),
+            event_sink=events.append,
+            media_probe=MediaProbe(runner=_AudioOnlyProbeRunner(order)),
+            semantic_required=True,
+            semantic_orchestrator_factory=semantic_factory,
+        )
+        started = service.start(
+            {
+                "jobId": "audio-burn-in-preflight",
+                "sourcePath": "source.wav",
+                "outputDirectory": "job",
+                "speakerCountMode": "manual",
+                "speakerCount": 1,
+                "language": "zh-Hans",
+                "outputCustomization": recipe_payload(
+                    formats=["pdf", "ass"],
+                    modes=["sidecar", "burn-in"],
+                ),
+            }
+        )
+
+        final = service.wait(started["jobId"], timeout=5)
+
+        assert final["status"] == "failed"
+        assert final["error"] == {
+            "code": "OUTPUT_RECIPE_COMPILE_FAILED",
+            "message": "the canonical output recipe could not be compiled",
+            "retryable": False,
+            "details": {"reason": "burn-in is unavailable for audio-only media"},
+        }
+        assert "transcription" not in order
+        assert semantic_factory_calls == []
+        assert not any(event["type"] == "job.started" for event in events)
+        output = root / "output" / "job"
+        assert (output / "media-probe.v1.json").is_file()
+        assert not (output / "transcript-document.v2.json").exists()
+        assert not (output / "semantic").exists()
+        service.shutdown()
+
+
 def test_recipe_job_fails_closed_without_trusted_media_probe() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1450,7 +1548,14 @@ def test_business_variants_run_after_review_and_preserve_transcript() -> None:
         assert (
             output / "business" / "translation-en.v1.json"
         ) in [Path(path) for path in final["business"]["artifactPaths"]]
-        assert json.loads(transcript_path.read_text(encoding="utf-8")) == before
+        after = json.loads(transcript_path.read_text(encoding="utf-8"))
+        audio_review = after["segments"][0]["evidence"].pop("audioReview")
+        assert audio_review == {
+            "status": "human-reviewed",
+            "reviewer": "test",
+            "notes": "human review confirmed",
+        }
+        assert after == before
         checkpoint = json.loads(
             (output / "checkpoint.v2.json").read_text(encoding="utf-8")
         )
@@ -1565,6 +1670,18 @@ class _ReleaseFailingBusinessRunner:
 
     def release_resources(self) -> None:
         raise RuntimeError("release failed")
+
+
+def test_semantic_composition_release_failure_uses_semantic_error_code() -> None:
+    runner = _ReleaseFailingBusinessRunner()
+
+    with pytest.raises(WorkerError) as captured:
+        WorkerService._release_stage_runner_resources(
+            runner,
+            stage="semantic_composition",
+        )
+
+    assert captured.value.code == "SEMANTIC_RESOURCE_RELEASE_FAILED"
 
 
 def test_business_release_failure_fails_closed_after_successful_run() -> None:

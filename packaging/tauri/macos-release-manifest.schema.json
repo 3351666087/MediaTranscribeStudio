@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mediatranscribe.studio/schemas/tauri-macos-release-manifest-v1.json",
+  "title": "MediaTranscribe Studio Tauri macOS Release Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contract",
+    "appId",
+    "productName",
+    "releaseId",
+    "version",
+    "platform",
+    "architecture",
+    "channel",
+    "sourceDateEpoch",
+    "build",
+    "trust",
+    "runtime",
+    "artifacts",
+    "fileCount",
+    "totalBytes",
+    "files"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "contract": {"const": "mts-tauri-macos-release/v1"},
+    "appId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]{1,126}[A-Za-z0-9])?$"
+    },
+    "productName": {"type": "string", "minLength": 1, "maxLength": 128},
+    "releaseId": {"type": "string", "minLength": 1, "maxLength": 256},
+    "version": {"$ref": "#/$defs/semver"},
+    "platform": {"const": "macos"},
+    "architecture": {"enum": ["x64", "arm64", "universal2"]},
+    "channel": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+    "sourceDateEpoch": {"type": "integer", "minimum": 0},
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetTriple", "gitCommit", "lockedInputs", "commands", "host"],
+      "properties": {
+        "targetTriple": {
+          "enum": [
+            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
+            "universal-apple-darwin"
+          ]
+        },
+        "gitCommit": {"type": "string", "minLength": 1, "maxLength": 64},
+        "lockedInputs": {
+          "type": "array",
+          "minItems": 2,
+          "items": {"$ref": "#/$defs/lockedInput"}
+        },
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "host": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "trust": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "signingIdentity", "notarization"],
+          "properties": {
+            "mode": {"const": "codesign"},
+            "signingIdentity": {"type": "string", "minLength": 1, "maxLength": 256},
+            "notarization": {"enum": ["not-claimed", "stapled"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "signingIdentity", "notarization"],
+          "properties": {
+            "mode": {"const": "development-unsigned"},
+            "signingIdentity": {"type": "null"},
+            "notarization": {"const": "not-claimed"}
+          }
+        }
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "bundledPythonRuntime",
+        "bundledModelArtifacts",
+        "providerCatalog",
+        "modelCatalog"
+      ],
+      "properties": {
+        "root": {"type": "string", "const": "Contents/Resources/mts-runtime"},
+        "bundledPythonRuntime": {"const": false},
+        "bundledModelArtifacts": {"const": false},
+        "providerCatalog": {"type": "string", "minLength": 1},
+        "modelCatalog": {"type": "string", "minLength": 1}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "fileCount": {"type": "integer", "minimum": 1},
+    "totalBytes": {"type": "integer", "minimum": 0},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/file"}
+    }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+$"
+    },
+    "lockedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle", "format", "path", "fileCount", "totalBytes"],
+      "properties": {
+        "bundle": {"enum": ["app", "dmg", "zip"]},
+        "format": {"enum": ["app-bundle", "dmg", "app-zip"]},
+        "path": {"$ref": "#/$defs/relativePath"},
+        "fileCount": {"type": "integer", "minimum": 1},
+        "totalBytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "file": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "kind", "size", "sha256"],
+          "properties": {
+            "path": {"$ref": "#/$defs/relativePath"},
+            "kind": {"const": "file"},
+            "size": {"type": "integer", "minimum": 0},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "kind", "target", "size", "sha256"],
+          "properties": {
+            "path": {"$ref": "#/$defs/relativePath"},
+            "kind": {"const": "symlink"},
+            "target": {"type": "string", "minLength": 1},
+            "size": {"type": "integer", "minimum": 0},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          }
+        }
+      ]
+    }
+  }
+}

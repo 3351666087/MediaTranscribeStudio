@@ -727,6 +727,34 @@ def _run_bootstrap(app: Path) -> dict[str, object]:
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
+def _copy_app_for_runtime_actions(
+    app: Path,
+    executable: Path,
+) -> tuple[Path, Path, Path]:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    temporary_parent = Path(runner_temp) if runner_temp else Path(tempfile.gettempdir())
+    temporary_parent.mkdir(parents=True, exist_ok=True)
+    temporary_root = Path(
+        tempfile.mkdtemp(prefix="mts-macos-runtime-actions-", dir=temporary_parent)
+    )
+    copied_app = temporary_root / app.name
+    try:
+        executable_relative = executable.relative_to(app)
+        build._copy_artifact(app, copied_app)
+    except (ValueError, build.ReleaseBuildError, OSError) as exc:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise ReleaseVerificationError(
+            f"Unable to isolate the macOS app for runtime checks: {exc}"
+        ) from exc
+    copied_executable = copied_app / executable_relative
+    if copied_executable.is_symlink() or not copied_executable.is_file():
+        shutil.rmtree(temporary_root, ignore_errors=True)
+        raise ReleaseVerificationError(
+            "Isolated macOS app is missing its declared executable."
+        )
+    return temporary_root, copied_app, copied_executable
+
+
 def _process_ids_for_executable(process_table: str, executable: Path) -> set[int]:
     prefix = str(executable)
     matches: set[int] = set()
@@ -969,17 +997,30 @@ def verify(
             raise ReleaseVerificationError(
                 "Bootstrap/launch verification requires an app or ZIP artifact in addition to DMG."
             )
-        bootstrap = _run_bootstrap(app_for_actions) if run_bootstrap and app_for_actions else None
-        launch = (
-            _launch_smoke(
+        action_app: Path | None = None
+        action_executable: Path | None = None
+        if run_bootstrap or launch_smoke_seconds > 0:
+            assert app_for_actions is not None and executable_for_actions is not None
+            action_root, action_app, action_executable = _copy_app_for_runtime_actions(
                 app_for_actions,
                 executable_for_actions,
+            )
+            temporary_roots.append(action_root)
+        bootstrap = _run_bootstrap(action_app) if run_bootstrap and action_app else None
+        launch = (
+            _launch_smoke(
+                action_app,
+                action_executable,
                 launch_smoke_seconds,
                 via_launch_services=launch_via_open,
             )
-            if launch_smoke_seconds > 0 and app_for_actions and executable_for_actions
+            if launch_smoke_seconds > 0 and action_app and action_executable
             else None
         )
+        # Runtime checks may import Python modules or start the worker. Recheck
+        # the source ledger after those actions so any accidental mutation of
+        # the publishable candidate remains fail-closed.
+        _verify_exact_ledger(release_root, manifest)
         return {
             "ok": True,
             "action": "VerifyTauriMacOSRelease",
@@ -993,6 +1034,7 @@ def verify(
             "appChecks": app_checks,
             "bootstrap": bootstrap,
             "launch": launch,
+            "postActionLedgerVerified": True,
         }
     finally:
         for root in temporary_roots:

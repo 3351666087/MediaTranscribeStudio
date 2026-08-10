@@ -65,19 +65,27 @@ function Write-Utf8NoBom {
     )
 }
 
-function New-TauriWindowsOverlay {
+function New-TauriWindowsOverlayConfig {
     param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$RuntimeStage,
+        [Parameter(Mandatory = $true)][string]$RuntimeSource,
         [string]$PublisherThumbprint,
         [string]$TimestampUrl
     )
+
+    if (
+        [string]::IsNullOrWhiteSpace($RuntimeSource) -or
+        [System.IO.Path]::IsPathRooted($RuntimeSource) -or
+        $RuntimeSource.Contains("\") -or
+        $RuntimeSource.Split("/") -contains ".."
+    ) {
+        throw "Tauri runtime resource source must be a forward-slash relative path: $RuntimeSource"
+    }
 
     $resources = [ordered]@{}
     # On Windows Tauri's $RESOURCES directory is beside the installed exe.
     # Keep the explicit resources/ prefix so worker_supervisor resolves the
     # same path for NSIS, MSI, and unpacked portable payloads.
-    $resources[$RuntimeStage] = "resources/mts-runtime"
+    $resources[$RuntimeSource] = "resources/mts-runtime"
     $bundle = [ordered]@{ resources = $resources }
     if (-not [string]::IsNullOrWhiteSpace($PublisherThumbprint)) {
         $bundle.windows = [ordered]@{
@@ -86,7 +94,15 @@ function New-TauriWindowsOverlay {
             timestampUrl = $TimestampUrl
         }
     }
-    $config = [ordered]@{ bundle = $bundle }
+    return [ordered]@{ bundle = $bundle }
+}
+
+function Write-TauriWindowsOverlay {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Config
+    )
+
     Write-Utf8NoBom -Path $Path -Content (($config | ConvertTo-Json -Depth 16) + "`n")
 }
 
@@ -313,6 +329,17 @@ try {
         New-LockedInputRecord -Path $packageLockPath
         New-LockedInputRecord -Path $cargoLockPath
     )
+    # Tauri 2.11 mis-normalizes absolute Windows resource-map keys by dropping
+    # their drive prefix. The CLI changes its working directory to src-tauri,
+    # so stage below that directory and give Tauri only a relative source path.
+    $temporaryBuildName = ".mts-tauri-build-" + [guid]::NewGuid().ToString("N")
+    $temporaryBuildRoot = Join-Path $tauriRoot $temporaryBuildName
+    $embeddedRuntime = Join-Path $temporaryBuildRoot "mts-runtime"
+    $runtimeResourceSource = Get-RelativePathFromRoot -Root $tauriRoot -Path $embeddedRuntime
+    $windowsOverlay = New-TauriWindowsOverlayConfig `
+        -RuntimeSource $runtimeResourceSource `
+        -PublisherThumbprint $PublisherThumbprint `
+        -TimestampUrl $TimestampUrl
 
     if ($DryRun) {
         Write-ResultAndExit ([ordered]@{
@@ -329,6 +356,7 @@ try {
             lockedInputs = $lockedInputs
             commands = if ($SkipCompile) { @() } else { $commands }
             runtimeBootstrap = $payloadPlan
+            tauriOverlay = $windowsOverlay
             runtimeInjection = [ordered]@{
                 destination = "resources/mts-runtime"
                 strategy = "tauri-bundle-resources-overlay"
@@ -350,8 +378,6 @@ try {
 
     $temporaryPayload = Join-Path ([System.IO.Path]::GetTempPath()) ("mts-tauri-payload-" + [guid]::NewGuid().ToString("N"))
     $temporaryInstallers = Join-Path ([System.IO.Path]::GetTempPath()) ("mts-tauri-installers-" + [guid]::NewGuid().ToString("N"))
-    $temporaryBuildRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mts-tauri-build-" + [guid]::NewGuid().ToString("N"))
-    $embeddedRuntime = Join-Path $temporaryBuildRoot "mts-runtime"
     $overlayPath = Join-Path $temporaryBuildRoot "tauri.windows.overlay.json"
     $oldCargoTarget = $env:CARGO_TARGET_DIR
     $oldSourceDateEpoch = $env:SOURCE_DATE_EPOCH
@@ -367,11 +393,9 @@ try {
             if ($null -eq $runtimeResult -or -not $runtimeResult.ok) {
                 throw "Windows runtime bootstrap staging failed before the native Tauri build."
             }
-            New-TauriWindowsOverlay `
+            Write-TauriWindowsOverlay `
                 -Path $overlayPath `
-                -RuntimeStage $embeddedRuntime `
-                -PublisherThumbprint $PublisherThumbprint `
-                -TimestampUrl $TimestampUrl
+                -Config $windowsOverlay
 
             $env:CARGO_TARGET_DIR = $targetBase
             $env:SOURCE_DATE_EPOCH = [string]$SourceDateEpoch

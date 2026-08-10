@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 import shutil
 import struct
 import subprocess
@@ -329,6 +330,18 @@ def test_build_plan_is_locked_version_coherent_and_non_mutating(
         "npm ci",
         "npm run tauri -- build --ci --target x86_64-pc-windows-msvc --bundles nsis,msi --config <temporary-windows-tauri-overlay.json> -- --locked",
     ]
+    resources = result["tauriOverlay"]["bundle"]["resources"]
+    assert len(resources) == 1
+    runtime_source, runtime_destination = next(iter(resources.items()))
+    assert runtime_destination == "resources/mts-runtime"
+    assert "\\" not in runtime_source
+    assert not PurePosixPath(runtime_source).is_absolute()
+    assert not PureWindowsPath(runtime_source).is_absolute()
+    assert PurePosixPath(runtime_source).parts[-1] == "mts-runtime"
+    tauri_root = (REPOSITORY_ROOT / "apps" / "desktop" / "src-tauri").resolve()
+    resolved_runtime_source = (tauri_root / runtime_source).resolve()
+    assert resolved_runtime_source.is_relative_to(tauri_root)
+    assert resolved_runtime_source.parent.name.startswith(".mts-tauri-build-")
     assert len(result["lockedInputs"]) == 2
     assert all(item["size"] > 0 for item in result["lockedInputs"])
     assert all(len(item["sha256"]) == 64 for item in result["lockedInputs"])

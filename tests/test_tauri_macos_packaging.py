@@ -652,6 +652,66 @@ def test_macos_transport_archive_rejects_traversal_before_extraction(
     assert not (tmp_path / "roundtrip").exists()
 
 
+def test_macos_runtime_actions_cannot_mutate_the_release_ledger(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project = tmp_path / "project"
+    _write_project(project)
+    _write_app(project)
+    release = tmp_path / "release"
+    _run(
+        project,
+        "--target-triple",
+        TARGET,
+        "--bundles",
+        "app",
+        "--output-directory",
+        str(release),
+        "--skip-compile",
+        "--allow-unsigned-development",
+    )
+    verifier = _load_verify_module()
+    source_app = release / "artifacts" / "app" / "Fixture.app"
+    action_apps: list[Path] = []
+
+    def fake_bootstrap(action_app: Path) -> dict[str, object]:
+        action_apps.append(action_app)
+        cache = (
+            action_app
+            / "Contents"
+            / "Resources"
+            / "mts-runtime"
+            / "backend"
+            / "__pycache__"
+        )
+        cache.mkdir()
+        (cache / "worker.cpython-312.pyc").write_bytes(b"runtime-side-effect")
+        return {"ok": True, "configCreated": True}
+
+    runner_temp = tmp_path / "runner temp"
+    runner_temp.mkdir()
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    monkeypatch.setattr(verifier, "_run_bootstrap", fake_bootstrap)
+
+    result = verifier.verify(
+        release,
+        SCHEMA,
+        expected_target=TARGET,
+        expected_signing_identity=None,
+        require_native=False,
+        run_bootstrap=True,
+        launch_smoke_seconds=0,
+        launch_via_open=False,
+    )
+
+    assert result["postActionLedgerVerified"] is True
+    assert len(action_apps) == 1
+    assert action_apps[0] != source_app
+    assert not list(source_app.rglob("*.pyc"))
+    assert not list(source_app.rglob("__pycache__"))
+
+
 def test_macos_launchservices_process_matching_is_exact_for_paths_with_spaces() -> None:
     verifier = _load_verify_module()
     executable = Path(

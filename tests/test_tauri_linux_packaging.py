@@ -195,6 +195,8 @@ def test_linux_workflow_uses_native_runners_and_mode_preserving_transport() -> N
     assert "MTS_EXPECTED_RUNNER_ARCH" in workflow
     assert 'actual_architecture="$(uname -m)"' in workflow
     assert "gcc-aarch64-linux-gnu" not in workflow
+    assert "libayatana-appindicator3-dev" in workflow
+    assert "libappindicator3-dev" not in workflow
     assert 'tar -czf "$archive"' in workflow
     assert 'tar -xzf "$archive"' in workflow
     assert 'sha256sum "$(basename "$archive")"' in workflow
